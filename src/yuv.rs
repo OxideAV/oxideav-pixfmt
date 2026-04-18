@@ -2,15 +2,16 @@
 //! planar chroma resampling (4:2:0 ↔ 4:2:2 ↔ 4:4:4), and NV12/NV21
 //! ↔ Yuv420P bridging.
 //!
-//! The scalar floating-point inner loops here are fast enough for the
-//! frame sizes the rest of the framework passes around. Callers that
-//! need sub-frame latency should hoist a conversion around the top of
-//! their decode loop, not inside it.
+//! The per-pixel math runs in signed fixed-point (Q15) integer arithmetic
+//! so the hot loops avoid f32 conversion and give a clean target for the
+//! SIMD vectorisation in [`crate::yuv_simd`]. Scalar results match the
+//! historical f32 implementation within ±1 LSB after rounding.
 
 use crate::convert::ColorSpace;
+use crate::yuv_simd;
 
 /// BT.601 / BT.709 weight pair. The integer matrix used by the
-/// converters below is built from these f32 values at runtime.
+/// converters below is derived from these f32 values.
 #[derive(Clone, Copy)]
 pub struct YuvMatrix {
     pub kr: f32,
@@ -19,13 +20,11 @@ pub struct YuvMatrix {
 }
 
 impl YuvMatrix {
-    /// BT.601 weights.
     pub const BT601: Self = Self {
         kr: 0.299,
         kb: 0.114,
         limited: true,
     };
-    /// BT.709 weights.
     pub const BT709: Self = Self {
         kr: 0.2126,
         kb: 0.0722,
@@ -46,76 +45,199 @@ impl YuvMatrix {
     }
 }
 
-#[inline]
-fn clamp_u8(v: f32) -> u8 {
-    if v <= 0.0 {
-        0
-    } else if v >= 255.0 {
-        255
+// ---------------------------------------------------------------------
+// Fixed-point matrices (Q15).
+//
+// Encode  (RGB → YUV): y = (cy_r*r + cy_g*g + cy_b*b + y_bias) >> SHIFT
+// Decode  (YUV → RGB): r = y_lin + (cr_coeff * (cr-128)) >> SHIFT
+//                      b = y_lin + (cb_coeff * (cb-128)) >> SHIFT
+//                      g = y_lin - (cg_cr*(cr-128) + cg_cb*(cb-128)) >> SHIFT
+// For limited range, y_lin = ((y-16) * y_scale) >> SHIFT; scaling into the
+// same 0..255 target space. The pre-shift rounding bias is folded into the
+// offset terms where it matters.
+
+pub(crate) const FP_SHIFT: i32 = 15;
+pub(crate) const FP_ONE: i32 = 1 << FP_SHIFT;
+pub(crate) const FP_HALF: i32 = 1 << (FP_SHIFT - 1);
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EncodeParams {
+    // Y = (cy_r*r + cy_g*g + cy_b*b + y_bias) >> SHIFT
+    pub cy_r: i32,
+    pub cy_g: i32,
+    pub cy_b: i32,
+    pub y_bias: i32,
+    // Cb = (cb_r*r + cb_g*g + cb_b*b + c_bias) >> SHIFT
+    pub cb_r: i32,
+    pub cb_g: i32,
+    pub cb_b: i32,
+    // Cr = (cr_r*r + cr_g*g + cr_b*b + c_bias) >> SHIFT
+    pub cr_r: i32,
+    pub cr_g: i32,
+    pub cr_b: i32,
+    pub c_bias: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DecodeParams {
+    // y_lin = y_scale * (y - y_off), >> SHIFT then added to chroma term.
+    pub y_scale: i32,
+    pub y_off: i32,
+    pub cr_r: i32,
+    pub cb_b: i32,
+    pub cg_cr: i32, // always positive; subtracted
+    pub cg_cb: i32, // always positive; subtracted
+}
+
+/// Q15 rounding: `round(f * FP_ONE)` as i32. Manual rounding for negatives.
+fn q15(f: f32) -> i32 {
+    let v = f * FP_ONE as f32;
+    if v >= 0.0 {
+        (v + 0.5) as i32
     } else {
-        v.round() as u8
+        -((-v + 0.5) as i32)
     }
 }
 
-/// Encode a single (R, G, B) pixel into (Y, U, V) per `matrix`.
-///
-/// For "limited" output, Y is in [16, 235] and Cb/Cr in [16, 240].
-/// Full-range outputs use 0..=255 for both.
-pub fn rgb_to_yuv(r: u8, g: u8, b: u8, matrix: YuvMatrix) -> (u8, u8, u8) {
-    let kr = matrix.kr;
-    let kb = matrix.kb;
-    let kg = 1.0 - kr - kb;
-    let rf = r as f32;
-    let gf = g as f32;
-    let bf = b as f32;
-
-    // Y is the luma in [0, 255].
-    let y_full = kr * rf + kg * gf + kb * bf;
-    // Cb / Cr are centered on 128 with a full-range span of ±128.
-    let cb_full = (bf - y_full) / (2.0 * (1.0 - kb));
-    let cr_full = (rf - y_full) / (2.0 * (1.0 - kr));
-
-    if matrix.limited {
-        // Studio / "TV" range.
-        // Y: scale 0..255 → 16..235 (scale 219/255).
-        // C: scale ±128 → ±112 then centre on 128 (scale 224/255).
-        let y = y_full * (219.0 / 255.0) + 16.0;
-        let cb = cb_full * (224.0 / 255.0) + 128.0;
-        let cr = cr_full * (224.0 / 255.0) + 128.0;
-        (clamp_u8(y), clamp_u8(cb), clamp_u8(cr))
-    } else {
-        // Full range — JPEG / "J" YUV.
-        let y = y_full;
-        let cb = cb_full + 128.0;
-        let cr = cr_full + 128.0;
-        (clamp_u8(y), clamp_u8(cb), clamp_u8(cr))
+impl YuvMatrix {
+    pub(crate) fn encode_params(&self) -> EncodeParams {
+        let kr = self.kr;
+        let kb = self.kb;
+        let kg = 1.0 - kr - kb;
+        // Limited: Y_lim = 16 + 219/255 * (kr*R + kg*G + kb*B)
+        //          C_lim = 128 + 224/255 * (C - y_full) / (2*(1-k))
+        let (ys, cs, y_off, c_off) = if self.limited {
+            (219.0 / 255.0, 224.0 / 255.0, 16.0, 128.0)
+        } else {
+            (1.0, 1.0, 0.0, 128.0)
+        };
+        let cy_r = q15(kr * ys);
+        let cy_g = q15(kg * ys);
+        let cy_b = q15(kb * ys);
+        // Cb = cs/(2*(1-kb)) * (B - y_full) = cs/(2*(1-kb)) * (-kr*R - kg*G + (1-kb)*B)
+        let cb_scale = cs / (2.0 * (1.0 - kb));
+        let cb_r = q15(cb_scale * -kr);
+        let cb_g = q15(cb_scale * -kg);
+        let cb_b = q15(cb_scale * (1.0 - kb));
+        // Cr = cs/(2*(1-kr)) * (R - y_full) = cs/(2*(1-kr)) * ((1-kr)*R - kg*G - kb*B)
+        let cr_scale = cs / (2.0 * (1.0 - kr));
+        let cr_r = q15(cr_scale * (1.0 - kr));
+        let cr_g = q15(cr_scale * -kg);
+        let cr_b = q15(cr_scale * -kb);
+        // Biases: fold offset and rounding (+0.5 LSB) into the bias term.
+        let y_bias = ((y_off * FP_ONE as f32).round() as i32) + FP_HALF;
+        let c_bias = ((c_off * FP_ONE as f32).round() as i32) + FP_HALF;
+        EncodeParams {
+            cy_r,
+            cy_g,
+            cy_b,
+            y_bias,
+            cb_r,
+            cb_g,
+            cb_b,
+            cr_r,
+            cr_g,
+            cr_b,
+            c_bias,
+        }
     }
+
+    pub(crate) fn decode_params(&self) -> DecodeParams {
+        let kr = self.kr;
+        let kb = self.kb;
+        let kg = 1.0 - kr - kb;
+        if self.limited {
+            // y_lin = (y - 16) * 255/219
+            // chroma: (c - 128) * 255/224 * 2*(1-k) = (c-128) * factor
+            let y_scale = q15(255.0 / 219.0);
+            let cr_r = q15(2.0 * (1.0 - kr) * (255.0 / 224.0));
+            let cb_b = q15(2.0 * (1.0 - kb) * (255.0 / 224.0));
+            // g = y - kr/kg * (r - y) - kb/kg * (b - y)
+            //   = y_lin - (kr/kg * cr_delta + kb/kg * cb_delta)
+            // cr_delta = (cr-128) * 2*(1-kr) * 255/224
+            // kr/kg * 2*(1-kr) = 2*kr*(1-kr)/kg
+            let cg_cr = q15((2.0 * kr * (1.0 - kr) / kg) * (255.0 / 224.0));
+            let cg_cb = q15((2.0 * kb * (1.0 - kb) / kg) * (255.0 / 224.0));
+            DecodeParams {
+                y_scale,
+                y_off: 16,
+                cr_r,
+                cb_b,
+                cg_cr,
+                cg_cb,
+            }
+        } else {
+            let y_scale = FP_ONE;
+            let cr_r = q15(2.0 * (1.0 - kr));
+            let cb_b = q15(2.0 * (1.0 - kb));
+            let cg_cr = q15(2.0 * kr * (1.0 - kr) / kg);
+            let cg_cb = q15(2.0 * kb * (1.0 - kb) / kg);
+            DecodeParams {
+                y_scale,
+                y_off: 0,
+                cr_r,
+                cb_b,
+                cg_cr,
+                cg_cb,
+            }
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn clamp_u8_i32(v: i32) -> u8 {
+    if v < 0 {
+        0
+    } else if v > 255 {
+        255
+    } else {
+        v as u8
+    }
+}
+
+// ---------------------------------------------------------------------
+// Per-pixel scalar paths.
+
+/// Encode a single (R, G, B) pixel into (Y, U, V) per `matrix`.
+pub fn rgb_to_yuv(r: u8, g: u8, b: u8, matrix: YuvMatrix) -> (u8, u8, u8) {
+    let p = matrix.encode_params();
+    rgb_to_yuv_fp(r, g, b, &p)
+}
+
+#[inline]
+pub(crate) fn rgb_to_yuv_fp(r: u8, g: u8, b: u8, p: &EncodeParams) -> (u8, u8, u8) {
+    let ri = r as i32;
+    let gi = g as i32;
+    let bi = b as i32;
+    let y = (p.cy_r * ri + p.cy_g * gi + p.cy_b * bi + p.y_bias) >> FP_SHIFT;
+    let cb = (p.cb_r * ri + p.cb_g * gi + p.cb_b * bi + p.c_bias) >> FP_SHIFT;
+    let cr = (p.cr_r * ri + p.cr_g * gi + p.cr_b * bi + p.c_bias) >> FP_SHIFT;
+    (clamp_u8_i32(y), clamp_u8_i32(cb), clamp_u8_i32(cr))
 }
 
 /// Decode a single (Y, U, V) pixel into (R, G, B).
 pub fn yuv_to_rgb(y: u8, cb: u8, cr: u8, matrix: YuvMatrix) -> (u8, u8, u8) {
-    let kr = matrix.kr;
-    let kb = matrix.kb;
-    let kg = 1.0 - kr - kb;
-
-    let (yf, cbf, crf) = if matrix.limited {
-        let y_lin = (y as f32 - 16.0) * (255.0 / 219.0);
-        let cb_lin = (cb as f32 - 128.0) * (255.0 / 224.0);
-        let cr_lin = (cr as f32 - 128.0) * (255.0 / 224.0);
-        (y_lin, cb_lin, cr_lin)
-    } else {
-        (y as f32, cb as f32 - 128.0, cr as f32 - 128.0)
-    };
-
-    let r = yf + 2.0 * (1.0 - kr) * crf;
-    let b = yf + 2.0 * (1.0 - kb) * cbf;
-    let g = (yf - kr * r - kb * b) / kg;
-    (clamp_u8(r), clamp_u8(g), clamp_u8(b))
+    let d = matrix.decode_params();
+    yuv_to_rgb_fp(y, cb, cr, &d)
 }
 
-/// Convert a 4:4:4 planar triple (each plane tightly packed at `w×h`)
-/// into a packed RGB24 output buffer (also tightly packed).
-pub fn yuv444_to_rgb24(
+#[inline]
+pub(crate) fn yuv_to_rgb_fp(y: u8, cb: u8, cr: u8, d: &DecodeParams) -> (u8, u8, u8) {
+    let yv = (y as i32 - d.y_off) * d.y_scale;
+    let cbv = cb as i32 - 128;
+    let crv = cr as i32 - 128;
+    let r = (yv + d.cr_r * crv + FP_HALF) >> FP_SHIFT;
+    let b = (yv + d.cb_b * cbv + FP_HALF) >> FP_SHIFT;
+    let g = (yv - d.cg_cr * crv - d.cg_cb * cbv + FP_HALF) >> FP_SHIFT;
+    (clamp_u8_i32(r), clamp_u8_i32(g), clamp_u8_i32(b))
+}
+
+// ---------------------------------------------------------------------
+// Scalar-fixed-point planar converters. These are the golden fallback;
+// SIMD dispatch delegates to them when the CPU lacks vector support or
+// the frame is too small to vectorise.
+
+pub(crate) fn yuv444_to_rgb24_scalar(
     yp: &[u8],
     up: &[u8],
     vp: &[u8],
@@ -124,55 +246,22 @@ pub fn yuv444_to_rgb24(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    debug_assert!(dst.len() >= w * h * 3);
+    let d = matrix.decode_params();
     for row in 0..h {
+        let yrow = &yp[row * w..row * w + w];
+        let urow = &up[row * w..row * w + w];
+        let vrow = &vp[row * w..row * w + w];
+        let drow = &mut dst[row * w * 3..row * w * 3 + w * 3];
         for col in 0..w {
-            let (r, g, b) = yuv_to_rgb(
-                yp[row * w + col],
-                up[row * w + col],
-                vp[row * w + col],
-                matrix,
-            );
-            let o = (row * w + col) * 3;
-            dst[o] = r;
-            dst[o + 1] = g;
-            dst[o + 2] = b;
+            let (r, g, b) = yuv_to_rgb_fp(yrow[col], urow[col], vrow[col], &d);
+            drow[col * 3] = r;
+            drow[col * 3 + 1] = g;
+            drow[col * 3 + 2] = b;
         }
     }
 }
 
-/// Convert a 4:2:2 planar triple into packed RGB24. Chroma planes are
-/// `(w/2)×h`; each pair of luma columns shares one chroma sample.
-pub fn yuv422_to_rgb24(
-    yp: &[u8],
-    up: &[u8],
-    vp: &[u8],
-    dst: &mut [u8],
-    w: usize,
-    h: usize,
-    matrix: YuvMatrix,
-) {
-    let cw = w / 2;
-    for row in 0..h {
-        for col in 0..w {
-            let cc = col / 2;
-            let (r, g, b) = yuv_to_rgb(
-                yp[row * w + col],
-                up[row * cw + cc],
-                vp[row * cw + cc],
-                matrix,
-            );
-            let o = (row * w + col) * 3;
-            dst[o] = r;
-            dst[o + 1] = g;
-            dst[o + 2] = b;
-        }
-    }
-}
-
-/// Convert a 4:2:0 planar triple into packed RGB24. Chroma planes are
-/// `(w/2)×(h/2)`; each 2×2 luma block shares one chroma sample.
-pub fn yuv420_to_rgb24(
+pub(crate) fn yuv422_to_rgb24_scalar(
     yp: &[u8],
     up: &[u8],
     vp: &[u8],
@@ -182,26 +271,50 @@ pub fn yuv420_to_rgb24(
     matrix: YuvMatrix,
 ) {
     let cw = w / 2;
+    let d = matrix.decode_params();
     for row in 0..h {
-        let cr = row / 2;
+        let yrow = &yp[row * w..row * w + w];
+        let urow = &up[row * cw..row * cw + cw];
+        let vrow = &vp[row * cw..row * cw + cw];
+        let drow = &mut dst[row * w * 3..row * w * 3 + w * 3];
         for col in 0..w {
-            let cc = col / 2;
-            let (r, g, b) = yuv_to_rgb(
-                yp[row * w + col],
-                up[cr * cw + cc],
-                vp[cr * cw + cc],
-                matrix,
-            );
-            let o = (row * w + col) * 3;
-            dst[o] = r;
-            dst[o + 1] = g;
-            dst[o + 2] = b;
+            let cc = col >> 1;
+            let (r, g, b) = yuv_to_rgb_fp(yrow[col], urow[cc], vrow[cc], &d);
+            drow[col * 3] = r;
+            drow[col * 3 + 1] = g;
+            drow[col * 3 + 2] = b;
         }
     }
 }
 
-// Encode: pack RGB → YUV 4:4:4 planar.
-pub fn rgb24_to_yuv444(
+pub(crate) fn yuv420_to_rgb24_scalar(
+    yp: &[u8],
+    up: &[u8],
+    vp: &[u8],
+    dst: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    let cw = w / 2;
+    let d = matrix.decode_params();
+    for row in 0..h {
+        let cr = row >> 1;
+        let yrow = &yp[row * w..row * w + w];
+        let urow = &up[cr * cw..cr * cw + cw];
+        let vrow = &vp[cr * cw..cr * cw + cw];
+        let drow = &mut dst[row * w * 3..row * w * 3 + w * 3];
+        for col in 0..w {
+            let cc = col >> 1;
+            let (r, g, b) = yuv_to_rgb_fp(yrow[col], urow[cc], vrow[cc], &d);
+            drow[col * 3] = r;
+            drow[col * 3 + 1] = g;
+            drow[col * 3 + 2] = b;
+        }
+    }
+}
+
+pub(crate) fn rgb24_to_yuv444_scalar(
     src: &[u8],
     yp: &mut [u8],
     up: &mut [u8],
@@ -210,10 +323,11 @@ pub fn rgb24_to_yuv444(
     h: usize,
     matrix: YuvMatrix,
 ) {
+    let p = matrix.encode_params();
     for row in 0..h {
         for col in 0..w {
             let o = (row * w + col) * 3;
-            let (y, u, v) = rgb_to_yuv(src[o], src[o + 1], src[o + 2], matrix);
+            let (y, u, v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
             yp[row * w + col] = y;
             up[row * w + col] = u;
             vp[row * w + col] = v;
@@ -221,8 +335,7 @@ pub fn rgb24_to_yuv444(
     }
 }
 
-/// RGB → YUV 4:2:2 (average chroma horizontally over 2 luma columns).
-pub fn rgb24_to_yuv422(
+pub(crate) fn rgb24_to_yuv422_scalar(
     src: &[u8],
     yp: &mut [u8],
     up: &mut [u8],
@@ -232,20 +345,20 @@ pub fn rgb24_to_yuv422(
     matrix: YuvMatrix,
 ) {
     let cw = w / 2;
+    let p = matrix.encode_params();
     for row in 0..h {
         for col in 0..w {
             let o = (row * w + col) * 3;
-            let (y, _u, _v) = rgb_to_yuv(src[o], src[o + 1], src[o + 2], matrix);
+            let (y, _u, _v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
             yp[row * w + col] = y;
         }
         for cc in 0..cw {
-            // Average of columns (cc*2) and (cc*2 + 1).
             let mut cbs = 0i32;
             let mut crs = 0i32;
             for dx in 0..2 {
                 let col = cc * 2 + dx;
                 let o = (row * w + col) * 3;
-                let (_y, u, v) = rgb_to_yuv(src[o], src[o + 1], src[o + 2], matrix);
+                let (_y, u, v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
                 cbs += u as i32;
                 crs += v as i32;
             }
@@ -255,8 +368,7 @@ pub fn rgb24_to_yuv422(
     }
 }
 
-/// RGB → YUV 4:2:0 (average chroma over a 2×2 block).
-pub fn rgb24_to_yuv420(
+pub(crate) fn rgb24_to_yuv420_scalar(
     src: &[u8],
     yp: &mut [u8],
     up: &mut [u8],
@@ -267,15 +379,14 @@ pub fn rgb24_to_yuv420(
 ) {
     let cw = w / 2;
     let ch = h / 2;
-    // Luma pass.
+    let p = matrix.encode_params();
     for row in 0..h {
         for col in 0..w {
             let o = (row * w + col) * 3;
-            let (y, _u, _v) = rgb_to_yuv(src[o], src[o + 1], src[o + 2], matrix);
+            let (y, _u, _v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
             yp[row * w + col] = y;
         }
     }
-    // Chroma pass.
     for cr in 0..ch {
         for cc in 0..cw {
             let mut cbs = 0i32;
@@ -285,7 +396,7 @@ pub fn rgb24_to_yuv420(
                     let row = cr * 2 + dy;
                     let col = cc * 2 + dx;
                     let o = (row * w + col) * 3;
-                    let (_y, u, v) = rgb_to_yuv(src[o], src[o + 1], src[o + 2], matrix);
+                    let (_y, u, v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
                     cbs += u as i32;
                     crs += v as i32;
                 }
@@ -297,9 +408,85 @@ pub fn rgb24_to_yuv420(
 }
 
 // ---------------------------------------------------------------------
-// Planar ↔ planar subsample conversions.
+// Public dispatching entrypoints. The SIMD module picks the best path
+// available at runtime (scalar / AVX2 / NEON / std::simd).
 
-/// Downsample a 4:4:4 chroma plane to 4:2:2 (average horizontally).
+pub fn yuv444_to_rgb24(
+    yp: &[u8],
+    up: &[u8],
+    vp: &[u8],
+    dst: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    debug_assert!(dst.len() >= w * h * 3);
+    yuv_simd::yuv444_to_rgb24(yp, up, vp, dst, w, h, matrix);
+}
+
+pub fn yuv422_to_rgb24(
+    yp: &[u8],
+    up: &[u8],
+    vp: &[u8],
+    dst: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    yuv_simd::yuv422_to_rgb24(yp, up, vp, dst, w, h, matrix);
+}
+
+pub fn yuv420_to_rgb24(
+    yp: &[u8],
+    up: &[u8],
+    vp: &[u8],
+    dst: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    yuv_simd::yuv420_to_rgb24(yp, up, vp, dst, w, h, matrix);
+}
+
+pub fn rgb24_to_yuv444(
+    src: &[u8],
+    yp: &mut [u8],
+    up: &mut [u8],
+    vp: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    yuv_simd::rgb24_to_yuv444(src, yp, up, vp, w, h, matrix);
+}
+
+pub fn rgb24_to_yuv422(
+    src: &[u8],
+    yp: &mut [u8],
+    up: &mut [u8],
+    vp: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    yuv_simd::rgb24_to_yuv422(src, yp, up, vp, w, h, matrix);
+}
+
+pub fn rgb24_to_yuv420(
+    src: &[u8],
+    yp: &mut [u8],
+    up: &mut [u8],
+    vp: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    yuv_simd::rgb24_to_yuv420(src, yp, up, vp, w, h, matrix);
+}
+
+// ---------------------------------------------------------------------
+// Planar ↔ planar subsample conversions (kept scalar — cheap already).
+
 pub fn chroma_444_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let cw = w / 2;
     for row in 0..h {
@@ -311,7 +498,6 @@ pub fn chroma_444_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     }
 }
 
-/// Upsample a 4:2:2 chroma plane to 4:4:4 (pixel replication).
 pub fn chroma_422_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let cw = w / 2;
     for row in 0..h {
@@ -322,7 +508,6 @@ pub fn chroma_422_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     }
 }
 
-/// Downsample 4:4:4 → 4:2:0 (average 2×2).
 pub fn chroma_444_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let cw = w / 2;
     let ch = h / 2;
@@ -339,7 +524,6 @@ pub fn chroma_444_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     }
 }
 
-/// Upsample 4:2:0 → 4:4:4 (nearest neighbour).
 pub fn chroma_420_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let cw = w / 2;
     for row in 0..h {
@@ -351,7 +535,6 @@ pub fn chroma_420_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     }
 }
 
-/// Downsample 4:2:2 → 4:2:0 (average vertically).
 pub fn chroma_422_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let cw = w / 2;
     let ch = h / 2;
@@ -364,7 +547,6 @@ pub fn chroma_422_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     }
 }
 
-/// Upsample 4:2:0 → 4:2:2 (row replication).
 pub fn chroma_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let cw = w / 2;
     for row in 0..h {
@@ -378,7 +560,6 @@ pub fn chroma_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 // ---------------------------------------------------------------------
 // NV12 / NV21 ↔ Yuv420P.
 
-/// Split an NV12 interleaved UV plane into distinct U and V planes.
 pub fn nv12_uv_split(uv: &[u8], up: &mut [u8], vp: &mut [u8], cw: usize, ch: usize) {
     for i in 0..cw * ch {
         up[i] = uv[i * 2];
@@ -386,7 +567,6 @@ pub fn nv12_uv_split(uv: &[u8], up: &mut [u8], vp: &mut [u8], cw: usize, ch: usi
     }
 }
 
-/// Same as [`nv12_uv_split`] but with V-first ordering (NV21).
 pub fn nv21_vu_split(vu: &[u8], up: &mut [u8], vp: &mut [u8], cw: usize, ch: usize) {
     for i in 0..cw * ch {
         vp[i] = vu[i * 2];
@@ -410,37 +590,112 @@ pub fn nv21_vu_merge(up: &[u8], vp: &[u8], vu: &mut [u8], cw: usize, ch: usize) 
 
 // ---------------------------------------------------------------------
 // Full/limited range plane conversion for YuvJ* ↔ Yuv*.
+// Fixed-point per-byte scaling avoids f32 in the hot loop.
 
-/// Scale a plane from studio ("limited") to full range in place.
 pub fn limited_to_full_luma(plane: &mut [u8]) {
+    // scale = 255/219 ≈ 1.16438
+    const SCALE: i32 = ((255 * FP_ONE as i64) / 219) as i32;
     for b in plane.iter_mut() {
-        let v = *b as f32;
-        let f = ((v - 16.0) * (255.0 / 219.0)).clamp(0.0, 255.0);
-        *b = f.round() as u8;
+        let v = (*b as i32 - 16) * SCALE + FP_HALF;
+        let v = v >> FP_SHIFT;
+        *b = clamp_u8_i32(v);
     }
 }
 
-/// Scale a chroma plane from limited to full (centre stays at 128).
 pub fn limited_to_full_chroma(plane: &mut [u8]) {
+    // scale = 255/224
+    const SCALE: i32 = ((255 * FP_ONE as i64) / 224) as i32;
     for b in plane.iter_mut() {
-        let v = *b as f32 - 128.0;
-        let f = (v * (255.0 / 224.0) + 128.0).clamp(0.0, 255.0);
-        *b = f.round() as u8;
+        let v = (*b as i32 - 128) * SCALE + (128 << FP_SHIFT) + FP_HALF;
+        let v = v >> FP_SHIFT;
+        *b = clamp_u8_i32(v);
     }
 }
 
 pub fn full_to_limited_luma(plane: &mut [u8]) {
+    // scale = 219/255
+    const SCALE: i32 = ((219 * FP_ONE as i64) / 255) as i32;
     for b in plane.iter_mut() {
-        let v = *b as f32;
-        let f = (v * (219.0 / 255.0) + 16.0).clamp(0.0, 255.0);
-        *b = f.round() as u8;
+        let v = (*b as i32) * SCALE + (16 << FP_SHIFT) + FP_HALF;
+        let v = v >> FP_SHIFT;
+        *b = clamp_u8_i32(v);
     }
 }
 
 pub fn full_to_limited_chroma(plane: &mut [u8]) {
+    // scale = 224/255
+    const SCALE: i32 = ((224 * FP_ONE as i64) / 255) as i32;
     for b in plane.iter_mut() {
-        let v = *b as f32 - 128.0;
-        let f = (v * (224.0 / 255.0) + 128.0).clamp(0.0, 255.0);
-        *b = f.round() as u8;
+        let v = (*b as i32 - 128) * SCALE + (128 << FP_SHIFT) + FP_HALF;
+        let v = v >> FP_SHIFT;
+        *b = clamp_u8_i32(v);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // BT.709 limited-range test vectors. These are the reference values
+    // produced by the canonical f32 math, and the fixed-point path must
+    // match within ±1 LSB (documented tolerance for int rounding).
+    #[test]
+    fn bt709_limited_known_vectors() {
+        let m = YuvMatrix::BT709.with_range(true);
+        // (R, G, B, expected Y, expected U, expected V) from f32 reference.
+        let cases = [
+            (0u8, 0u8, 0u8, 16u8, 128u8, 128u8),
+            (255, 255, 255, 235, 128, 128),
+            (255, 0, 0, 63, 102, 240),
+            (0, 255, 0, 173, 42, 26),
+            (0, 0, 255, 32, 240, 118),
+            (128, 128, 128, 126, 128, 128),
+        ];
+        for (r, g, b, ey, eu, ev) in cases {
+            let (y, u, v) = rgb_to_yuv(r, g, b, m);
+            assert!(
+                (y as i32 - ey as i32).abs() <= 1,
+                "Y mismatch for ({r},{g},{b}): got {y}, want {ey}"
+            );
+            assert!(
+                (u as i32 - eu as i32).abs() <= 1,
+                "U mismatch for ({r},{g},{b}): got {u}, want {eu}"
+            );
+            assert!(
+                (v as i32 - ev as i32).abs() <= 1,
+                "V mismatch for ({r},{g},{b}): got {v}, want {ev}"
+            );
+        }
+    }
+
+    #[test]
+    fn bt709_limited_decode_vectors() {
+        let m = YuvMatrix::BT709.with_range(true);
+        // Decoding the encoded values should round-trip to within ±2 LSB
+        // for primary colours (combined encode+decode error budget).
+        let rgbs = [
+            (0u8, 0u8, 0u8),
+            (255, 255, 255),
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (128, 128, 128),
+        ];
+        for (r, g, b) in rgbs {
+            let (y, u, v) = rgb_to_yuv(r, g, b, m);
+            let (r2, g2, b2) = yuv_to_rgb(y, u, v, m);
+            assert!(
+                (r2 as i32 - r as i32).abs() <= 2,
+                "R mismatch: ({r},{g},{b}) → ({r2},{g2},{b2})"
+            );
+            assert!(
+                (g2 as i32 - g as i32).abs() <= 2,
+                "G mismatch: ({r},{g},{b}) → ({r2},{g2},{b2})"
+            );
+            assert!(
+                (b2 as i32 - b as i32).abs() <= 2,
+                "B mismatch: ({r},{g},{b}) → ({r2},{g2},{b2})"
+            );
+        }
     }
 }

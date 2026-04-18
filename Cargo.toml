@@ -12,5 +12,17 @@ readme = "README.md"
 keywords = ["multimedia", "video", "pixel-format", "color", "yuv"]
 categories = ["multimedia::video", "multimedia::images"]
 
+[features]
+# Enable the `std::simd` (portable_simd) conversion path. Requires a
+# nightly toolchain because `core::simd` is unstable.
+nightly = []
+
 [dependencies]
 oxideav-core = "0.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "yuv_rgb"
+harness = false
