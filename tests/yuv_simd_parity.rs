@@ -17,7 +17,9 @@ fn lcg_bytes(seed: u64, n: usize) -> Vec<u8> {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut out = Vec::with_capacity(n);
     for _ in 0..n {
-        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
         out.push((state >> 32) as u8);
     }
     out
@@ -44,10 +46,7 @@ fn assert_within_1(a: &[u8], b: &[u8], what: &str) {
         if d > max_diff {
             max_diff = d;
         }
-        assert!(
-            d <= 1,
-            "{what}: byte {i} diff {d} (simd={x}, scalar={y})"
-        );
+        assert!(d <= 1, "{what}: byte {i} diff {d} (simd={x}, scalar={y})");
     }
     if max_diff > 0 {
         eprintln!("{what}: {n_off} bytes differ by 1 LSB (ok)");
@@ -74,40 +73,19 @@ fn run_once(force_scalar: bool, make: impl FnOnce() -> Vec<u8>) -> Vec<u8> {
     out
 }
 
-fn yuv420_to_rgb(
-    yp: &[u8],
-    up: &[u8],
-    vp: &[u8],
-    w: usize,
-    h: usize,
-    m: YuvMatrix,
-) -> Vec<u8> {
+fn yuv420_to_rgb(yp: &[u8], up: &[u8], vp: &[u8], w: usize, h: usize, m: YuvMatrix) -> Vec<u8> {
     let mut dst = vec![0u8; w * h * 3];
     yuv::yuv420_to_rgb24(yp, up, vp, &mut dst, w, h, m);
     dst
 }
 
-fn yuv422_to_rgb(
-    yp: &[u8],
-    up: &[u8],
-    vp: &[u8],
-    w: usize,
-    h: usize,
-    m: YuvMatrix,
-) -> Vec<u8> {
+fn yuv422_to_rgb(yp: &[u8], up: &[u8], vp: &[u8], w: usize, h: usize, m: YuvMatrix) -> Vec<u8> {
     let mut dst = vec![0u8; w * h * 3];
     yuv::yuv422_to_rgb24(yp, up, vp, &mut dst, w, h, m);
     dst
 }
 
-fn yuv444_to_rgb(
-    yp: &[u8],
-    up: &[u8],
-    vp: &[u8],
-    w: usize,
-    h: usize,
-    m: YuvMatrix,
-) -> Vec<u8> {
+fn yuv444_to_rgb(yp: &[u8], up: &[u8], vp: &[u8], w: usize, h: usize, m: YuvMatrix) -> Vec<u8> {
     let mut dst = vec![0u8; w * h * 3];
     yuv::yuv444_to_rgb24(yp, up, vp, &mut dst, w, h, m);
     dst
@@ -140,26 +118,15 @@ fn rgb_to_yuv444(src: &[u8], w: usize, h: usize, m: YuvMatrix) -> (Vec<u8>, Vec<
 // against a freshly-recomputed reference implemented right here (bit-
 // exact re-derivation of the fixed-point math).
 
-fn ref_yuv420(
-    yp: &[u8],
-    up: &[u8],
-    vp: &[u8],
-    w: usize,
-    h: usize,
-    m: YuvMatrix,
-) -> Vec<u8> {
+fn ref_yuv420(yp: &[u8], up: &[u8], vp: &[u8], w: usize, h: usize, m: YuvMatrix) -> Vec<u8> {
     let cw = w / 2;
     let mut out = vec![0u8; w * h * 3];
     for row in 0..h {
         let cr_ = row / 2;
         for col in 0..w {
             let cc = col / 2;
-            let (r, g, b) = yuv::yuv_to_rgb(
-                yp[row * w + col],
-                up[cr_ * cw + cc],
-                vp[cr_ * cw + cc],
-                m,
-            );
+            let (r, g, b) =
+                yuv::yuv_to_rgb(yp[row * w + col], up[cr_ * cw + cc], vp[cr_ * cw + cc], m);
             let o = (row * w + col) * 3;
             out[o] = r;
             out[o + 1] = g;
@@ -169,14 +136,7 @@ fn ref_yuv420(
     out
 }
 
-fn ref_yuv444(
-    yp: &[u8],
-    up: &[u8],
-    vp: &[u8],
-    w: usize,
-    h: usize,
-    m: YuvMatrix,
-) -> Vec<u8> {
+fn ref_yuv444(yp: &[u8], up: &[u8], vp: &[u8], w: usize, h: usize, m: YuvMatrix) -> Vec<u8> {
     let mut out = vec![0u8; w * h * 3];
     for row in 0..h {
         for col in 0..w {
@@ -190,25 +150,14 @@ fn ref_yuv444(
     out
 }
 
-fn ref_yuv422(
-    yp: &[u8],
-    up: &[u8],
-    vp: &[u8],
-    w: usize,
-    h: usize,
-    m: YuvMatrix,
-) -> Vec<u8> {
+fn ref_yuv422(yp: &[u8], up: &[u8], vp: &[u8], w: usize, h: usize, m: YuvMatrix) -> Vec<u8> {
     let cw = w / 2;
     let mut out = vec![0u8; w * h * 3];
     for row in 0..h {
         for col in 0..w {
             let cc = col / 2;
-            let (r, g, b) = yuv::yuv_to_rgb(
-                yp[row * w + col],
-                up[row * cw + cc],
-                vp[row * cw + cc],
-                m,
-            );
+            let (r, g, b) =
+                yuv::yuv_to_rgb(yp[row * w + col], up[row * cw + cc], vp[row * cw + cc], m);
             let o = (row * w + col) * 3;
             out[o] = r;
             out[o + 1] = g;
@@ -309,8 +258,7 @@ fn simd_rgb24_to_yuv420_matches_scalar_per_pixel() {
                             let row = cr * 2 + dy;
                             let col = cc * 2 + dx;
                             let o = (row * w + col) * 3;
-                            let (_y, u, v) =
-                                yuv::rgb_to_yuv(src[o], src[o + 1], src[o + 2], m);
+                            let (_y, u, v) = yuv::rgb_to_yuv(src[o], src[o + 1], src[o + 2], m);
                             cbs += u as i32;
                             crs += v as i32;
                         }
@@ -319,9 +267,21 @@ fn simd_rgb24_to_yuv420_matches_scalar_per_pixel() {
                     v2[cr * cw + cc] = ((crs + 2) / 4) as u8;
                 }
             }
-            assert_within_1(&y1, &y2, &format!("rgb→y420 Y kr={} lim={}", m.kr, m.limited));
-            assert_within_1(&u1, &u2, &format!("rgb→y420 U kr={} lim={}", m.kr, m.limited));
-            assert_within_1(&v1, &v2, &format!("rgb→y420 V kr={} lim={}", m.kr, m.limited));
+            assert_within_1(
+                &y1,
+                &y2,
+                &format!("rgb→y420 Y kr={} lim={}", m.kr, m.limited),
+            );
+            assert_within_1(
+                &u1,
+                &u2,
+                &format!("rgb→y420 U kr={} lim={}", m.kr, m.limited),
+            );
+            assert_within_1(
+                &v1,
+                &v2,
+                &format!("rgb→y420 V kr={} lim={}", m.kr, m.limited),
+            );
         }
     }
 }
@@ -337,8 +297,7 @@ fn simd_rgb24_to_yuv444_matches_scalar_per_pixel() {
             let mut u2 = vec![0u8; w * h];
             let mut v2 = vec![0u8; w * h];
             for i in 0..w * h {
-                let (y, u, v) =
-                    yuv::rgb_to_yuv(src[i * 3], src[i * 3 + 1], src[i * 3 + 2], m);
+                let (y, u, v) = yuv::rgb_to_yuv(src[i * 3], src[i * 3 + 1], src[i * 3 + 2], m);
                 y2[i] = y;
                 u2[i] = u;
                 v2[i] = v;

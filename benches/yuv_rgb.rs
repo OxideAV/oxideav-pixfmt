@@ -45,7 +45,12 @@ fn synth_yuv444(w: usize, h: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 fn bench_yuv420_to_rgb24(c: &mut Criterion) {
     let mut group = c.benchmark_group("yuv420_to_rgb24");
     for (w, h, mtx, label) in [
-        (1280usize, 720usize, YuvMatrix::BT601, "1280x720_bt601_limited"),
+        (
+            1280usize,
+            720usize,
+            YuvMatrix::BT601,
+            "1280x720_bt601_limited",
+        ),
         (1280, 720, YuvMatrix::BT709, "1280x720_bt709_limited"),
         (1920, 1080, YuvMatrix::BT709, "1920x1080_bt709_limited"),
     ] {

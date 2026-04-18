@@ -25,22 +25,10 @@ unsafe fn decode_block_i32x8(
     let cg_cb = vdupq_n_s32(d.cg_cb);
     let bias = vdupq_n_s32(FP_HALF);
 
-    let r_lo = vshrq_n_s32::<FP_SHIFT>(vaddq_s32(
-        vaddq_s32(y_lin.0, vmulq_s32(cr_r, cr.0)),
-        bias,
-    ));
-    let r_hi = vshrq_n_s32::<FP_SHIFT>(vaddq_s32(
-        vaddq_s32(y_lin.1, vmulq_s32(cr_r, cr.1)),
-        bias,
-    ));
-    let b_lo = vshrq_n_s32::<FP_SHIFT>(vaddq_s32(
-        vaddq_s32(y_lin.0, vmulq_s32(cb_b, cb.0)),
-        bias,
-    ));
-    let b_hi = vshrq_n_s32::<FP_SHIFT>(vaddq_s32(
-        vaddq_s32(y_lin.1, vmulq_s32(cb_b, cb.1)),
-        bias,
-    ));
+    let r_lo = vshrq_n_s32::<FP_SHIFT>(vaddq_s32(vaddq_s32(y_lin.0, vmulq_s32(cr_r, cr.0)), bias));
+    let r_hi = vshrq_n_s32::<FP_SHIFT>(vaddq_s32(vaddq_s32(y_lin.1, vmulq_s32(cr_r, cr.1)), bias));
+    let b_lo = vshrq_n_s32::<FP_SHIFT>(vaddq_s32(vaddq_s32(y_lin.0, vmulq_s32(cb_b, cb.0)), bias));
+    let b_hi = vshrq_n_s32::<FP_SHIFT>(vaddq_s32(vaddq_s32(y_lin.1, vmulq_s32(cb_b, cb.1)), bias));
     let g_lo = vshrq_n_s32::<FP_SHIFT>(vaddq_s32(
         vsubq_s32(
             vsubq_s32(y_lin.0, vmulq_s32(cg_cr, cr.0)),
@@ -60,11 +48,7 @@ unsafe fn decode_block_i32x8(
     let r16 = vcombine_s16(vqmovn_s32(r_lo), vqmovn_s32(r_hi));
     let g16 = vcombine_s16(vqmovn_s32(g_lo), vqmovn_s32(g_hi));
     let b16 = vcombine_s16(vqmovn_s32(b_lo), vqmovn_s32(b_hi));
-    (
-        vqmovun_s16(r16),
-        vqmovun_s16(g16),
-        vqmovun_s16(b16),
-    )
+    (vqmovun_s16(r16), vqmovun_s16(g16), vqmovun_s16(b16))
 }
 
 #[inline]
@@ -98,10 +82,7 @@ unsafe fn load_chroma_4_broadcast(src: &[u8]) -> int32x4x2_t {
 unsafe fn store_rgb24_lane8(dst: &mut [u8], r: uint8x8_t, g: uint8x8_t, b: uint8x8_t) {
     // NEON has `vst3_u8` which interleaves 3 u8x8 vectors — exactly what
     // we want for a 24-byte RGB24 store.
-    vst3_u8(
-        dst.as_mut_ptr(),
-        uint8x8x3_t(r, g, b),
-    );
+    vst3_u8(dst.as_mut_ptr(), uint8x8x3_t(r, g, b));
 }
 
 #[target_feature(enable = "neon")]

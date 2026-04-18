@@ -141,10 +141,7 @@ unsafe fn load16_sub_i32(src: &[u8], off: i32) -> (__m256i, __m256i) {
     let lo8 = _mm256_cvtepu8_epi32(v);
     let hi8 = _mm256_cvtepu8_epi32(_mm_srli_si128(v, 8));
     let off_v = _mm256_set1_epi32(off);
-    (
-        _mm256_sub_epi32(lo8, off_v),
-        _mm256_sub_epi32(hi8, off_v),
-    )
+    (_mm256_sub_epi32(lo8, off_v), _mm256_sub_epi32(hi8, off_v))
 }
 
 // Expand 8 chroma bytes to a 16-wide vector where each sample is
@@ -194,9 +191,7 @@ pub(crate) unsafe fn yuv444_to_rgb24(
             let y_lin_hi = _mm256_mullo_epi32(y_hi, y_scale_v);
             let (cb_lo, cb_hi) = load16_sub_i32(&urow[off..], 128);
             let (cr_lo, cr_hi) = load16_sub_i32(&vrow[off..], 128);
-            let (r, g, b) = decode_block_i32x16(
-                y_lin_lo, y_lin_hi, cb_lo, cb_hi, cr_lo, cr_hi, &d,
-            );
+            let (r, g, b) = decode_block_i32x16(y_lin_lo, y_lin_hi, cb_lo, cb_hi, cr_lo, cr_hi, &d);
             store_rgb24_lane16(&mut drow[off * 3..off * 3 + LANES * 3], r, g, b);
         }
         // Tail in scalar.
@@ -240,9 +235,7 @@ pub(crate) unsafe fn yuv422_to_rgb24(
             let y_lin_hi = _mm256_mullo_epi32(y_hi, y_scale_v);
             let (cb_lo, cb_hi) = load_chroma_8_broadcast(&urow[coff..]);
             let (cr_lo, cr_hi) = load_chroma_8_broadcast(&vrow[coff..]);
-            let (r, g, b) = decode_block_i32x16(
-                y_lin_lo, y_lin_hi, cb_lo, cb_hi, cr_lo, cr_hi, &d,
-            );
+            let (r, g, b) = decode_block_i32x16(y_lin_lo, y_lin_hi, cb_lo, cb_hi, cr_lo, cr_hi, &d);
             store_rgb24_lane16(&mut drow[off * 3..off * 3 + LANES * 3], r, g, b);
         }
         for col in (chunks * LANES)..w {
@@ -287,9 +280,8 @@ pub(crate) unsafe fn yuv420_to_rgb24(
             let y_lin_hi = _mm256_mullo_epi32(y_hi, y_scale_v);
             let (cb_lo, cb_hi) = load_chroma_8_broadcast(&urow[coff..]);
             let (cr_lo2, cr_hi2) = load_chroma_8_broadcast(&vrow[coff..]);
-            let (r, g, b) = decode_block_i32x16(
-                y_lin_lo, y_lin_hi, cb_lo, cb_hi, cr_lo2, cr_hi2, &d,
-            );
+            let (r, g, b) =
+                decode_block_i32x16(y_lin_lo, y_lin_hi, cb_lo, cb_hi, cr_lo2, cr_hi2, &d);
             store_rgb24_lane16(&mut drow[off * 3..off * 3 + LANES * 3], r, g, b);
         }
         for col in (chunks * LANES)..w {
@@ -530,4 +522,3 @@ pub(crate) unsafe fn rgb24_to_yuv420(
         }
     }
 }
-
