@@ -4,6 +4,13 @@
 //! All functions in this module assume tightly packed input/output
 //! (no stride padding). The caller is responsible for stripping stride
 //! before handing buffers in and re-adding it afterwards.
+//!
+//! `swizzle4` / `swizzle3` compute a per-channel permutation from the
+//! runtime `src_pos` / `dst_pos` indices and then dispatch to a
+//! vectorised path (`swizzle_simd::*`) that rides on a single AVX2
+//! `pshufb`. The scalar fallback lives right here.
+
+mod swizzle_simd;
 
 /// Component index into a 4-byte packed pixel. Used to describe where
 /// R, G, B, and A live for each of the 4-channel formats.
@@ -54,66 +61,58 @@ pub const BGR_POS: Rgb3 = Rgb3 { r: 2, g: 1, b: 0 };
 
 /// Swizzle a packed 3-byte pixel stream between RGB and BGR (or any
 /// two Rgb3 layouts).
+///
+/// Uses a pre-computed 3-byte permutation so the compiler can lift the
+/// position indirection out of the hot loop and auto-vectorise the
+/// byte-shuffle.
 pub fn swizzle3(src: &[u8], src_pos: Rgb3, dst: &mut [u8], dst_pos: Rgb3, pixels: usize) {
     debug_assert!(src.len() >= pixels * 3 && dst.len() >= pixels * 3);
-    for i in 0..pixels {
-        let s = i * 3;
-        let d = i * 3;
-        let r = src[s + src_pos.r];
-        let g = src[s + src_pos.g];
-        let b = src[s + src_pos.b];
-        dst[d + dst_pos.r] = r;
-        dst[d + dst_pos.g] = g;
-        dst[d + dst_pos.b] = b;
-    }
+    // perm[j] = source byte offset (within the 3-byte group) that goes
+    // to destination byte j.
+    let mut perm = [0u8; 3];
+    perm[dst_pos.r] = src_pos.r as u8;
+    perm[dst_pos.g] = src_pos.g as u8;
+    perm[dst_pos.b] = src_pos.b as u8;
+    swizzle_simd::swizzle3_perm(src, dst, pixels, perm);
 }
 
 /// Swizzle a packed 4-byte pixel stream between any two Rgba4 layouts.
+///
+/// Routes through an AVX2 `pshufb`-based path when the CPU supports it;
+/// otherwise falls back to a specialised-permutation scalar loop.
 pub fn swizzle4(src: &[u8], src_pos: Rgba4, dst: &mut [u8], dst_pos: Rgba4, pixels: usize) {
     debug_assert!(src.len() >= pixels * 4 && dst.len() >= pixels * 4);
-    for i in 0..pixels {
-        let s = i * 4;
-        let d = i * 4;
-        let r = src[s + src_pos.r];
-        let g = src[s + src_pos.g];
-        let b = src[s + src_pos.b];
-        let a = src[s + src_pos.a];
-        dst[d + dst_pos.r] = r;
-        dst[d + dst_pos.g] = g;
-        dst[d + dst_pos.b] = b;
-        dst[d + dst_pos.a] = a;
-    }
+    // perm[j] = source byte offset (within the 4-byte group) that goes
+    // to destination byte j.
+    let mut perm = [0u8; 4];
+    perm[dst_pos.r] = src_pos.r as u8;
+    perm[dst_pos.g] = src_pos.g as u8;
+    perm[dst_pos.b] = src_pos.b as u8;
+    perm[dst_pos.a] = src_pos.a as u8;
+    swizzle_simd::swizzle4_perm(src, dst, pixels, perm);
 }
 
 /// Convert a 3-byte packed source to a 4-byte packed destination,
 /// synthesising an opaque alpha (255).
 pub fn rgb3_to_rgba4(src: &[u8], src_pos: Rgb3, dst: &mut [u8], dst_pos: Rgba4, pixels: usize) {
-    for i in 0..pixels {
-        let s = i * 3;
-        let d = i * 4;
-        let r = src[s + src_pos.r];
-        let g = src[s + src_pos.g];
-        let b = src[s + src_pos.b];
-        dst[d + dst_pos.r] = r;
-        dst[d + dst_pos.g] = g;
-        dst[d + dst_pos.b] = b;
-        dst[d + dst_pos.a] = 255;
-    }
+    // perm3[i] (0..3) = source byte within the 3-byte group for dst RGB
+    // byte i; perm3[dst_pos.a] is set to 0xFF to mark "emit 255".
+    let mut perm3 = [0xFFu8; 4];
+    perm3[dst_pos.r] = src_pos.r as u8;
+    perm3[dst_pos.g] = src_pos.g as u8;
+    perm3[dst_pos.b] = src_pos.b as u8;
+    swizzle_simd::rgb3_to_rgba4_perm(src, dst, pixels, perm3);
 }
 
 /// Drop the alpha channel, converting a 4-byte packed source to a
 /// 3-byte packed destination.
 pub fn rgba4_to_rgb3(src: &[u8], src_pos: Rgba4, dst: &mut [u8], dst_pos: Rgb3, pixels: usize) {
-    for i in 0..pixels {
-        let s = i * 4;
-        let d = i * 3;
-        let r = src[s + src_pos.r];
-        let g = src[s + src_pos.g];
-        let b = src[s + src_pos.b];
-        dst[d + dst_pos.r] = r;
-        dst[d + dst_pos.g] = g;
-        dst[d + dst_pos.b] = b;
-    }
+    // perm4[i] (0..3) = source byte within the 4-byte group for dst byte i.
+    let mut perm4 = [0u8; 3];
+    perm4[dst_pos.r] = src_pos.r as u8;
+    perm4[dst_pos.g] = src_pos.g as u8;
+    perm4[dst_pos.b] = src_pos.b as u8;
+    swizzle_simd::rgba4_to_rgb3_perm(src, dst, pixels, perm4);
 }
 
 /// Rgb48Le → Rgb24 (drop low 8 bits, keep the high byte of each LE word).
