@@ -26,3 +26,7 @@ criterion = "0.5"
 [[bench]]
 name = "yuv_rgb"
 harness = false
+
+[[bench]]
+name = "pixel_ops"
+harness = false

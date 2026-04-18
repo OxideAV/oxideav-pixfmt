@@ -96,9 +96,69 @@ fn bench_rgb24_to_yuv420(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_rgb24_to_yuv422(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rgb24_to_yuv422");
+    let (w, h) = (1280, 720);
+    let src = synth_rgb24(w, h);
+    let mut yp = vec![0u8; w * h];
+    let mut up = vec![0u8; (w / 2) * h];
+    let mut vp = vec![0u8; (w / 2) * h];
+    group.throughput(Throughput::Bytes((w * h * 3) as u64));
+    group.bench_function("1280x720_bt709_limited", |b| {
+        b.iter(|| {
+            yuv::rgb24_to_yuv422(&src, &mut yp, &mut up, &mut vp, w, h, YuvMatrix::BT709);
+        });
+    });
+    group.finish();
+}
+
+fn bench_rgb24_to_yuv444(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rgb24_to_yuv444");
+    let (w, h) = (1280, 720);
+    let src = synth_rgb24(w, h);
+    let mut yp = vec![0u8; w * h];
+    let mut up = vec![0u8; w * h];
+    let mut vp = vec![0u8; w * h];
+    group.throughput(Throughput::Bytes((w * h * 3) as u64));
+    group.bench_function("1280x720_bt709_limited", |b| {
+        b.iter(|| {
+            yuv::rgb24_to_yuv444(&src, &mut yp, &mut up, &mut vp, w, h, YuvMatrix::BT709);
+        });
+    });
+    group.finish();
+}
+
+fn bench_yuv422_to_rgb24(c: &mut Criterion) {
+    let mut group = c.benchmark_group("yuv422_to_rgb24");
+    let (w, h) = (1280, 720);
+    let (yp, up, vp) = {
+        let src = synth_rgb24(w, h);
+        let cw = w / 2;
+        let mut yp = vec![0u8; w * h];
+        let mut up = vec![0u8; cw * h];
+        let mut vp = vec![0u8; cw * h];
+        yuv::rgb24_to_yuv422(&src, &mut yp, &mut up, &mut vp, w, h, YuvMatrix::BT709);
+        (yp, up, vp)
+    };
+    let mut dst = vec![0u8; w * h * 3];
+    group.throughput(Throughput::Bytes((w * h * 3) as u64));
+    group.bench_function("1280x720_bt709_limited", |b| {
+        b.iter(|| {
+            yuv::yuv422_to_rgb24(&yp, &up, &vp, &mut dst, w, h, YuvMatrix::BT709);
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     name = yuv_benches;
     config = Criterion::default().sample_size(30);
-    targets = bench_yuv420_to_rgb24, bench_yuv444_to_rgb24, bench_rgb24_to_yuv420
+    targets =
+        bench_yuv420_to_rgb24,
+        bench_yuv422_to_rgb24,
+        bench_yuv444_to_rgb24,
+        bench_rgb24_to_yuv420,
+        bench_rgb24_to_yuv422,
+        bench_rgb24_to_yuv444
 );
 criterion_main!(yuv_benches);
