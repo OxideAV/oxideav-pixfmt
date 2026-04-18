@@ -21,13 +21,7 @@ fn lcg_bytes(seed: u64, n: usize) -> Vec<u8> {
     out
 }
 
-fn reference_swizzle4(
-    src: &[u8],
-    src_pos: Rgba4,
-    dst: &mut [u8],
-    dst_pos: Rgba4,
-    pixels: usize,
-) {
+fn reference_swizzle4(src: &[u8], src_pos: Rgba4, dst: &mut [u8], dst_pos: Rgba4, pixels: usize) {
     for i in 0..pixels {
         let s = i * 4;
         let d = i * 4;
@@ -63,7 +57,8 @@ fn swizzle4_matches_reference_for_every_pair() {
                 rgb::swizzle4(&src, sp, &mut got, dp, w);
                 reference_swizzle4(&src, sp, &mut want, dp, w);
                 assert_eq!(
-                    got, want,
+                    got,
+                    want,
                     "swizzle4 w={w} src={:?} dst={:?}",
                     (sp.r, sp.g, sp.b, sp.a),
                     (dp.r, dp.g, dp.b, dp.a),
@@ -159,7 +154,8 @@ fn swizzle3_matches_reference_for_every_pair() {
                 rgb::swizzle3(&src, sp, &mut got, dp, w);
                 reference_swizzle3(&src, sp, &mut want, dp, w);
                 assert_eq!(
-                    got, want,
+                    got,
+                    want,
                     "swizzle3 w={w} src={:?} dst={:?}",
                     (sp.r, sp.g, sp.b),
                     (dp.r, dp.g, dp.b),

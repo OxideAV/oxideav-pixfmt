@@ -162,7 +162,11 @@ fn scalar_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4
         let d = i * 4;
         for j in 0..4 {
             let p = perm3[j];
-            dst[d + j] = if p == 0xFF { 255 } else { src[s + (p & 3) as usize] };
+            dst[d + j] = if p == 0xFF {
+                255
+            } else {
+                src[s + (p & 3) as usize]
+            };
         }
     }
 }
@@ -186,13 +190,13 @@ unsafe fn avx2_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [
     let mut alpha_or = [0u8; 16];
     for pix in 0..4 {
         let base = (pix * 3) as u8;
-        for slot in 0..4 {
+        for (slot, &p) in perm3.iter().enumerate() {
             let idx = pix * 4 + slot;
-            if perm3[slot] == 0xFF {
+            if p == 0xFF {
                 mask_bytes[idx] = 0x80;
                 alpha_or[idx] = 0xFF;
             } else {
-                mask_bytes[idx] = base + perm3[slot];
+                mask_bytes[idx] = base + p;
             }
         }
     }

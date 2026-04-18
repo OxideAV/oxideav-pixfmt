@@ -154,7 +154,7 @@ unsafe fn rgb48_to_rgb24_avx2(src: &[u8], dst: &mut [u8], pixels: usize) {
     let shuf = _mm_loadu_si128(SHUF.as_ptr() as *const __m128i);
 
     // Leave a 2-pixel tail so our 16-byte load never reads past end.
-    let simd_pixels = if pixels >= 2 { pixels - 2 } else { 0 };
+    let simd_pixels = pixels.saturating_sub(2);
     let chunks = simd_pixels / 2;
     for c in 0..chunks {
         let soff = c * 12;

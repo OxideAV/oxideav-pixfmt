@@ -55,8 +55,8 @@ pub mod gray;
 pub mod pal8;
 pub mod palette;
 pub mod rgb;
-pub mod yuv;
 mod simd_dispatch;
+pub mod yuv;
 mod yuv_simd;
 
 pub use convert::{convert, convert_in_place_if_same, ColorSpace, ConvertOptions, Dither};

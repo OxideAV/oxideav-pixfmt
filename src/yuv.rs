@@ -640,8 +640,12 @@ unsafe fn deinterleave_u8_pair_avx2(src: &[u8], a: &mut [u8], b: &mut [u8], n: u
     use core::arch::x86_64::*;
     // 32 source bytes per iteration (= 16 output bytes per stream).
     // Two pshufb on each __m128i pull the evens / odds apart.
-    const MASK_EVEN: [u8; 16] = [0, 2, 4, 6, 8, 10, 12, 14, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
-    const MASK_ODD: [u8; 16] = [1, 3, 5, 7, 9, 11, 13, 15, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
+    const MASK_EVEN: [u8; 16] = [
+        0, 2, 4, 6, 8, 10, 12, 14, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
+    const MASK_ODD: [u8; 16] = [
+        1, 3, 5, 7, 9, 11, 13, 15, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
     let m_even = _mm_loadu_si128(MASK_EVEN.as_ptr() as *const __m128i);
     let m_odd = _mm_loadu_si128(MASK_ODD.as_ptr() as *const __m128i);
 

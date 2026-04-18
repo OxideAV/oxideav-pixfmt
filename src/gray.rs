@@ -53,7 +53,9 @@ unsafe fn gray8_to_rgba_avx2(src: &[u8], dst: &mut [u8], pixels: usize) {
 
     let chunks = pixels / 4;
     for c in 0..chunks {
-        let s = _mm_cvtsi32_si128(core::ptr::read_unaligned(src.as_ptr().add(c * 4) as *const i32));
+        let s = _mm_cvtsi32_si128(core::ptr::read_unaligned(
+            src.as_ptr().add(c * 4) as *const i32
+        ));
         let broadcast = _mm_shuffle_epi8(s, shuf);
         let with_alpha = _mm_or_si128(broadcast, alpha);
         _mm_storeu_si128(dst.as_mut_ptr().add(c * 16) as *mut __m128i, with_alpha);
