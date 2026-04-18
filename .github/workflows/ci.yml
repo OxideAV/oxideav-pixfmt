@@ -54,3 +54,33 @@ jobs:
 
       - name: cargo clippy -- -D warnings
         run: cargo clippy --all-targets -- -D warnings
+
+  nightly:
+    name: Build & test (nightly, --features nightly)
+    runs-on: ubuntu-latest
+    # Nightly can regress on unstable features (portable_simd) — don't block
+    # the merge queue. This job is informational: a red X tells us the
+    # std::simd path needs attention, but stable CI still gates merges.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly
+
+      - name: Build --features nightly
+        run: cargo build --all-targets --features nightly
+
+      # Force the portable_simd dispatch path at runtime so the std::simd
+      # code is actually executed by the parity tests — otherwise the AVX2
+      # path would be chosen on GitHub runners and the nightly-only code
+      # would only be compile-checked.
+      - name: Test --features nightly (force portable_simd)
+        env:
+          OXIDEAV_PIXFMT_FORCE_PORTABLE_SIMD: "1"
+        run: cargo test --features nightly
