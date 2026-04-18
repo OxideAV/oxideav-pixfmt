@@ -364,20 +364,51 @@ unsafe fn encode_block_i32x8(
 }
 
 /// Load 8 consecutive RGB triples → 3 × __m256i of i32.
+///
+/// Two `_mm_loadu_si128` at +0 and +8 give us the 24 relevant bytes in
+/// two overlapping 16-byte registers. A pair of `pshufb` per channel
+/// pulls the four R (or G, B) bytes out of each register, an `or`
+/// merges them, and `_mm256_cvtepu8_epi32` widens to 8 × i32. Replaces
+/// a scalar-per-byte spill that was capping the encode path at
+/// 3 GiB/s.
 #[inline]
 #[target_feature(enable = "avx2")]
 unsafe fn load_rgb24_8(src: &[u8]) -> (__m256i, __m256i, __m256i) {
-    let mut rs = [0i32; 8];
-    let mut gs = [0i32; 8];
-    let mut bs = [0i32; 8];
-    for i in 0..8 {
-        rs[i] = src[i * 3] as i32;
-        gs[i] = src[i * 3 + 1] as i32;
-        bs[i] = src[i * 3 + 2] as i32;
-    }
-    let r = _mm256_loadu_si256(rs.as_ptr() as *const __m256i);
-    let g = _mm256_loadu_si256(gs.as_ptr() as *const __m256i);
-    let b = _mm256_loadu_si256(bs.as_ptr() as *const __m256i);
+    // Source bytes 0..23 = 8 RGB24 pixels. Split into v0=[0..15] and
+    // v1=[8..23] (8-byte overlap). From v0 we pick 4 R/G/B samples;
+    // from v1 we pick the other 4.
+    const R_MASK_V0: [u8; 16] = [
+        0, 3, 6, 9, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
+    const R_MASK_V1: [u8; 16] = [
+        0x80, 0x80, 0x80, 0x80, 4, 7, 10, 13, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
+    const G_MASK_V0: [u8; 16] = [
+        1, 4, 7, 10, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
+    const G_MASK_V1: [u8; 16] = [
+        0x80, 0x80, 0x80, 0x80, 5, 8, 11, 14, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
+    const B_MASK_V0: [u8; 16] = [
+        2, 5, 8, 11, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
+    const B_MASK_V1: [u8; 16] = [
+        0x80, 0x80, 0x80, 0x80, 6, 9, 12, 15, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
+    let v0 = _mm_loadu_si128(src.as_ptr() as *const __m128i);
+    let v1 = _mm_loadu_si128(src.as_ptr().add(8) as *const __m128i);
+    let rm0 = _mm_loadu_si128(R_MASK_V0.as_ptr() as *const __m128i);
+    let rm1 = _mm_loadu_si128(R_MASK_V1.as_ptr() as *const __m128i);
+    let gm0 = _mm_loadu_si128(G_MASK_V0.as_ptr() as *const __m128i);
+    let gm1 = _mm_loadu_si128(G_MASK_V1.as_ptr() as *const __m128i);
+    let bm0 = _mm_loadu_si128(B_MASK_V0.as_ptr() as *const __m128i);
+    let bm1 = _mm_loadu_si128(B_MASK_V1.as_ptr() as *const __m128i);
+    let r_bytes = _mm_or_si128(_mm_shuffle_epi8(v0, rm0), _mm_shuffle_epi8(v1, rm1));
+    let g_bytes = _mm_or_si128(_mm_shuffle_epi8(v0, gm0), _mm_shuffle_epi8(v1, gm1));
+    let b_bytes = _mm_or_si128(_mm_shuffle_epi8(v0, bm0), _mm_shuffle_epi8(v1, bm1));
+    let r = _mm256_cvtepu8_epi32(r_bytes);
+    let g = _mm256_cvtepu8_epi32(g_bytes);
+    let b = _mm256_cvtepu8_epi32(b_bytes);
     (r, g, b)
 }
 
@@ -435,28 +466,45 @@ pub(crate) unsafe fn rgb24_to_yuv422(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    // Luma pass (vectorised); chroma pass keeps the scalar averaging
-    // because the horizontal-add is a few adds per pair and would need
-    // a cross-lane shuffle to justify any vector work.
     let p = matrix.encode_params();
     let cw = w / 2;
+    let ones = _mm_set1_epi8(1);
+    let round1 = _mm_set1_epi16(1);
     for row in 0..h {
-        let chunks = w / 8;
         let srow = &src[row * w * 3..row * w * 3 + w * 3];
         let yrow = &mut yp[row * w..row * w + w];
+        let urow = &mut up[row * cw..row * cw + cw];
+        let vrow = &mut vp[row * cw..row * cw + cw];
+
+        // Fused luma + chroma pass: 16 pixels per iter produces 16 Y
+        // bytes and 8 (U, V) bytes.
+        let chunks = w / 16;
         for chunk in 0..chunks {
-            let off = chunk * 8;
-            let (r, g, b) = load_rgb24_8(&srow[off * 3..off * 3 + 24]);
-            let (y, _u, _v) = encode_block_i32x8(r, g, b, &p);
-            store_u8_lane8(&mut yrow[off..off + 8], y);
+            let off = chunk * 16;
+            let (r0, g0, b0) = load_rgb24_8(&srow[off * 3..]);
+            let (r1, g1, b1) = load_rgb24_8(&srow[(off + 8) * 3..]);
+            let (y0, u0, v0) = encode_block_i32x8(r0, g0, b0, &p);
+            let (y1, u1, v1) = encode_block_i32x8(r1, g1, b1, &p);
+            store_u8_lane8(&mut yrow[off..off + 8], y0);
+            store_u8_lane8(&mut yrow[off + 8..off + 16], y1);
+            // 16 U bytes → 8 pair-summed i16 → (sum+1)/2 → u8.
+            let u16_pairs = _mm_maddubs_epi16(_mm_unpacklo_epi64(u0, u1), ones);
+            let v16_pairs = _mm_maddubs_epi16(_mm_unpacklo_epi64(v0, v1), ones);
+            let u_avg = _mm_srai_epi16(_mm_add_epi16(u16_pairs, round1), 1);
+            let v_avg = _mm_srai_epi16(_mm_add_epi16(v16_pairs, round1), 1);
+            let u_bytes = _mm_packus_epi16(u_avg, u_avg);
+            let v_bytes = _mm_packus_epi16(v_avg, v_avg);
+            let coff = chunk * 8;
+            store_u8_lane8(&mut urow[coff..coff + 8], u_bytes);
+            store_u8_lane8(&mut vrow[coff..coff + 8], v_bytes);
         }
-        for col in (chunks * 8)..w {
+        // Scalar tail. Match the scalar path's luma + average.
+        for col in (chunks * 16)..w {
             let o = col * 3;
             let (y, _u, _v) = rgb_to_yuv_fp(srow[o], srow[o + 1], srow[o + 2], &p);
             yrow[col] = y;
         }
-        // Chroma averages (2 cols → 1).
-        for cc in 0..cw {
+        for cc in (chunks * 8)..cw {
             let mut cbs = 0i32;
             let mut crs = 0i32;
             for dx in 0..2 {
@@ -466,8 +514,8 @@ pub(crate) unsafe fn rgb24_to_yuv422(
                 cbs += u as i32;
                 crs += v as i32;
             }
-            up[row * cw + cc] = ((cbs + 1) / 2) as u8;
-            vp[row * cw + cc] = ((crs + 1) / 2) as u8;
+            urow[cc] = ((cbs + 1) / 2) as u8;
+            vrow[cc] = ((crs + 1) / 2) as u8;
         }
     }
 }
@@ -485,26 +533,66 @@ pub(crate) unsafe fn rgb24_to_yuv420(
     let p = matrix.encode_params();
     let cw = w / 2;
     let ch = h / 2;
-    // Luma pass with AVX2.
-    for row in 0..h {
-        let chunks = w / 8;
-        let srow = &src[row * w * 3..row * w * 3 + w * 3];
-        let yrow = &mut yp[row * w..row * w + w];
-        for chunk in 0..chunks {
-            let off = chunk * 8;
-            let (r, g, b) = load_rgb24_8(&srow[off * 3..off * 3 + 24]);
-            let (y, _u, _v) = encode_block_i32x8(r, g, b, &p);
-            store_u8_lane8(&mut yrow[off..off + 8], y);
-        }
-        for col in (chunks * 8)..w {
-            let o = col * 3;
-            let (y, _u, _v) = rgb_to_yuv_fp(srow[o], srow[o + 1], srow[o + 2], &p);
-            yrow[col] = y;
-        }
-    }
-    // Chroma pass: scalar (2×2 averaging is bandwidth-bound).
+    let ones = _mm_set1_epi8(1);
+    let round2 = _mm_set1_epi16(2);
+
+    // Fused luma + chroma pass over row pairs. Each iteration takes
+    // two source rows of 16 pixels, writes 16 Y bytes per row and
+    // 8 chroma bytes per row-pair.
     for cr in 0..ch {
-        for cc in 0..cw {
+        let row_a = cr * 2;
+        let row_b = cr * 2 + 1;
+        let srow_a = &src[row_a * w * 3..row_a * w * 3 + w * 3];
+        let srow_b = &src[row_b * w * 3..row_b * w * 3 + w * 3];
+        // Split yp so row_a and row_b are disjoint mutable slices.
+        let (yp_before_b, yp_from_b) = yp.split_at_mut(row_b * w);
+        let yrow_a = &mut yp_before_b[row_a * w..row_a * w + w];
+        let yrow_b = &mut yp_from_b[..w];
+        let chunks = w / 16;
+        for chunk in 0..chunks {
+            let off = chunk * 16;
+            let (ra0, ga0, ba0) = load_rgb24_8(&srow_a[off * 3..]);
+            let (ra1, ga1, ba1) = load_rgb24_8(&srow_a[(off + 8) * 3..]);
+            let (ya0, ua0, va0) = encode_block_i32x8(ra0, ga0, ba0, &p);
+            let (ya1, ua1, va1) = encode_block_i32x8(ra1, ga1, ba1, &p);
+            store_u8_lane8(&mut yrow_a[off..off + 8], ya0);
+            store_u8_lane8(&mut yrow_a[off + 8..off + 16], ya1);
+
+            let (rb0, gb0, bb0) = load_rgb24_8(&srow_b[off * 3..]);
+            let (rb1, gb1, bb1) = load_rgb24_8(&srow_b[(off + 8) * 3..]);
+            let (yb0, ub0, vb0) = encode_block_i32x8(rb0, gb0, bb0, &p);
+            let (yb1, ub1, vb1) = encode_block_i32x8(rb1, gb1, bb1, &p);
+            store_u8_lane8(&mut yrow_b[off..off + 8], yb0);
+            store_u8_lane8(&mut yrow_b[off + 8..off + 16], yb1);
+
+            let ua = _mm_unpacklo_epi64(ua0, ua1);
+            let va = _mm_unpacklo_epi64(va0, va1);
+            let ub = _mm_unpacklo_epi64(ub0, ub1);
+            let vb = _mm_unpacklo_epi64(vb0, vb1);
+            let ua_pair = _mm_maddubs_epi16(ua, ones);
+            let va_pair = _mm_maddubs_epi16(va, ones);
+            let ub_pair = _mm_maddubs_epi16(ub, ones);
+            let vb_pair = _mm_maddubs_epi16(vb, ones);
+            let u_sum = _mm_add_epi16(ua_pair, ub_pair);
+            let v_sum = _mm_add_epi16(va_pair, vb_pair);
+            let u_avg = _mm_srai_epi16(_mm_add_epi16(u_sum, round2), 2);
+            let v_avg = _mm_srai_epi16(_mm_add_epi16(v_sum, round2), 2);
+            let u_bytes = _mm_packus_epi16(u_avg, u_avg);
+            let v_bytes = _mm_packus_epi16(v_avg, v_avg);
+            let coff = cr * cw + chunk * 8;
+            store_u8_lane8(&mut up[coff..coff + 8], u_bytes);
+            store_u8_lane8(&mut vp[coff..coff + 8], v_bytes);
+        }
+        // Tail: scalar luma for unprocessed cols in both rows, then
+        // scalar chroma for unprocessed chroma cols.
+        for col in (chunks * 16)..w {
+            let oa = col * 3;
+            let (ya, _u, _v) = rgb_to_yuv_fp(srow_a[oa], srow_a[oa + 1], srow_a[oa + 2], &p);
+            yp[row_a * w + col] = ya;
+            let (yb, _u, _v) = rgb_to_yuv_fp(srow_b[oa], srow_b[oa + 1], srow_b[oa + 2], &p);
+            yp[row_b * w + col] = yb;
+        }
+        for cc in (chunks * 8)..cw {
             let mut cbs = 0i32;
             let mut crs = 0i32;
             for dy in 0..2 {
@@ -519,6 +607,15 @@ pub(crate) unsafe fn rgb24_to_yuv420(
             }
             up[cr * cw + cc] = ((cbs + 2) / 4) as u8;
             vp[cr * cw + cc] = ((crs + 2) / 4) as u8;
+        }
+    }
+    // Handle a potential leftover odd row (h odd). Scalar.
+    if h > ch * 2 {
+        let row = h - 1;
+        for col in 0..w {
+            let o = (row * w + col) * 3;
+            let (y, _u, _v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
+            yp[row * w + col] = y;
         }
     }
 }
