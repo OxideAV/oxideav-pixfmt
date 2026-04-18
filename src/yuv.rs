@@ -501,10 +501,11 @@ pub fn chroma_444_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 pub fn chroma_422_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let cw = w / 2;
     for row in 0..h {
-        for col in 0..w {
-            let cc = col / 2;
-            dst[row * w + col] = src[row * cw + cc];
-        }
+        dup_bytes_2x(
+            &src[row * cw..row * cw + cw],
+            &mut dst[row * w..row * w + w],
+            cw,
+        );
     }
 }
 
@@ -528,10 +529,54 @@ pub fn chroma_420_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let cw = w / 2;
     for row in 0..h {
         let cr = row / 2;
-        for col in 0..w {
-            let cc = col / 2;
-            dst[row * w + col] = src[cr * cw + cc];
+        dup_bytes_2x(
+            &src[cr * cw..cr * cw + cw],
+            &mut dst[row * w..row * w + w],
+            cw,
+        );
+    }
+}
+
+/// Copy `src[0..n]` into `dst[0..2n]`, duplicating every byte so
+/// `dst[2i] == dst[2i+1] == src[i]`. Vectorised via AVX2 when
+/// available.
+#[inline]
+fn dup_bytes_2x(src: &[u8], dst: &mut [u8], n: usize) {
+    debug_assert!(src.len() >= n && dst.len() >= n * 2);
+    if crate::simd_dispatch::has_avx2() {
+        // SAFETY: path() guards AVX2 feature detection.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            dup_bytes_2x_avx2(src, dst, n);
+            return;
         }
+    }
+    for i in 0..n {
+        dst[i * 2] = src[i];
+        dst[i * 2 + 1] = src[i];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn dup_bytes_2x_avx2(src: &[u8], dst: &mut [u8], n: usize) {
+    use core::arch::x86_64::*;
+    // 16 source bytes → 32 dest bytes per iteration via two
+    // _mm_unpack[lo|hi]_epi8(v, v) that interleave the vector with
+    // itself. The unpack produces a duplicated-byte stream directly.
+    let chunks = n / 16;
+    for c in 0..chunks {
+        let off = c * 16;
+        let v = _mm_loadu_si128(src.as_ptr().add(off) as *const __m128i);
+        let lo = _mm_unpacklo_epi8(v, v);
+        let hi = _mm_unpackhi_epi8(v, v);
+        _mm_storeu_si128(dst.as_mut_ptr().add(off * 2) as *mut __m128i, lo);
+        _mm_storeu_si128(dst.as_mut_ptr().add(off * 2 + 16) as *mut __m128i, hi);
+    }
+    let tail = chunks * 16;
+    for i in tail..n {
+        dst[i * 2] = src[i];
+        dst[i * 2 + 1] = src[i];
     }
 }
 
@@ -561,16 +606,66 @@ pub fn chroma_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 // NV12 / NV21 ↔ Yuv420P.
 
 pub fn nv12_uv_split(uv: &[u8], up: &mut [u8], vp: &mut [u8], cw: usize, ch: usize) {
-    for i in 0..cw * ch {
-        up[i] = uv[i * 2];
-        vp[i] = uv[i * 2 + 1];
-    }
+    deinterleave_u8_pair(uv, up, vp, cw * ch);
 }
 
 pub fn nv21_vu_split(vu: &[u8], up: &mut [u8], vp: &mut [u8], cw: usize, ch: usize) {
-    for i in 0..cw * ch {
-        vp[i] = vu[i * 2];
-        up[i] = vu[i * 2 + 1];
+    // NV21 is VUVU...: the even byte is V, the odd byte is U. Same
+    // deinterleave as NV12 with the two output slots swapped.
+    deinterleave_u8_pair(vu, vp, up, cw * ch);
+}
+
+/// Split an interleaved byte-pair stream `src[0..2n]` into two output
+/// planes `a[0..n]` (even bytes) and `b[0..n]` (odd bytes). Vectorised
+/// via AVX2 when available.
+#[inline]
+fn deinterleave_u8_pair(src: &[u8], a: &mut [u8], b: &mut [u8], n: usize) {
+    debug_assert!(src.len() >= n * 2 && a.len() >= n && b.len() >= n);
+    if crate::simd_dispatch::has_avx2() {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            deinterleave_u8_pair_avx2(src, a, b, n);
+            return;
+        }
+    }
+    for i in 0..n {
+        a[i] = src[i * 2];
+        b[i] = src[i * 2 + 1];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn deinterleave_u8_pair_avx2(src: &[u8], a: &mut [u8], b: &mut [u8], n: usize) {
+    use core::arch::x86_64::*;
+    // 32 source bytes per iteration (= 16 output bytes per stream).
+    // Two pshufb on each __m128i pull the evens / odds apart.
+    const MASK_EVEN: [u8; 16] = [0, 2, 4, 6, 8, 10, 12, 14, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
+    const MASK_ODD: [u8; 16] = [1, 3, 5, 7, 9, 11, 13, 15, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
+    let m_even = _mm_loadu_si128(MASK_EVEN.as_ptr() as *const __m128i);
+    let m_odd = _mm_loadu_si128(MASK_ODD.as_ptr() as *const __m128i);
+
+    let chunks = n / 16;
+    for c in 0..chunks {
+        let soff = c * 32;
+        let doff = c * 16;
+        let v0 = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
+        let v1 = _mm_loadu_si128(src.as_ptr().add(soff + 16) as *const __m128i);
+        // Low half of each: bytes 0..7 valid, rest zero.
+        let a0 = _mm_shuffle_epi8(v0, m_even);
+        let b0 = _mm_shuffle_epi8(v0, m_odd);
+        let a1 = _mm_shuffle_epi8(v1, m_even);
+        let b1 = _mm_shuffle_epi8(v1, m_odd);
+        // Combine: pack the two halves into one 16-byte register.
+        let a_comb = _mm_unpacklo_epi64(a0, a1);
+        let b_comb = _mm_unpacklo_epi64(b0, b1);
+        _mm_storeu_si128(a.as_mut_ptr().add(doff) as *mut __m128i, a_comb);
+        _mm_storeu_si128(b.as_mut_ptr().add(doff) as *mut __m128i, b_comb);
+    }
+    let tail = chunks * 16;
+    for i in tail..n {
+        a[i] = src[i * 2];
+        b[i] = src[i * 2 + 1];
     }
 }
 

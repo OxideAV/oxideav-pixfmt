@@ -17,7 +17,49 @@ pub fn gray8_to_rgb24(src: &[u8], dst: &mut [u8], pixels: usize) {
 
 /// Gray8 → Rgba (broadcast grey; alpha = 255).
 pub fn gray8_to_rgba(src: &[u8], dst: &mut [u8], pixels: usize) {
+    if crate::simd_dispatch::has_avx2() {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            gray8_to_rgba_avx2(src, dst, pixels);
+            return;
+        }
+    }
     for i in 0..pixels {
+        let v = src[i];
+        dst[i * 4] = v;
+        dst[i * 4 + 1] = v;
+        dst[i * 4 + 2] = v;
+        dst[i * 4 + 3] = 255;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn gray8_to_rgba_avx2(src: &[u8], dst: &mut [u8], pixels: usize) {
+    use core::arch::x86_64::*;
+    // 4 pixels per __m128i iteration: load 4 bytes, pshufb to broadcast
+    // each into a 4-byte slot, OR with a 0xFF alpha mask. Actually 16
+    // pixels per __m256i is just as easy — process that.
+    // 16 src bytes → 64 dst bytes per iteration. Use per-lane pshufb
+    // where each lane handles 8 source bytes → 32 output bytes. That
+    // doesn't fit; stick with 4-pixel __m128i → 16-byte store.
+    //
+    // Mask: byte j of the 16-byte output corresponds to pixel `j/4`;
+    // the RGB lanes get source byte `j/4`, the alpha lane gets 0x80
+    // (pshufb emits zero) and we OR in 0xFF.
+    const SHUF: [u8; 16] = [0, 0, 0, 0x80, 1, 1, 1, 0x80, 2, 2, 2, 0x80, 3, 3, 3, 0x80];
+    let shuf = _mm_loadu_si128(SHUF.as_ptr() as *const __m128i);
+    let alpha = _mm_set1_epi32(0xFF00_0000u32 as i32);
+
+    let chunks = pixels / 4;
+    for c in 0..chunks {
+        let s = _mm_cvtsi32_si128(core::ptr::read_unaligned(src.as_ptr().add(c * 4) as *const i32));
+        let broadcast = _mm_shuffle_epi8(s, shuf);
+        let with_alpha = _mm_or_si128(broadcast, alpha);
+        _mm_storeu_si128(dst.as_mut_ptr().add(c * 16) as *mut __m128i, with_alpha);
+    }
+    let tail = chunks * 4;
+    for i in tail..pixels {
         let v = src[i];
         dst[i * 4] = v;
         dst[i * 4 + 1] = v;

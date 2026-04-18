@@ -117,8 +117,56 @@ pub fn rgba4_to_rgb3(src: &[u8], src_pos: Rgba4, dst: &mut [u8], dst_pos: Rgb3, 
 
 /// Rgb48Le → Rgb24 (drop low 8 bits, keep the high byte of each LE word).
 pub fn rgb48_to_rgb24(src: &[u8], dst: &mut [u8], pixels: usize) {
+    if crate::simd_dispatch::has_avx2() {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            rgb48_to_rgb24_avx2(src, dst, pixels);
+            return;
+        }
+    }
     for i in 0..pixels {
-        // 6 bytes in, 3 bytes out; LE → high byte = index 1, 3, 5.
+        dst[i * 3] = src[i * 6 + 1];
+        dst[i * 3 + 1] = src[i * 6 + 3];
+        dst[i * 3 + 2] = src[i * 6 + 5];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn rgb48_to_rgb24_avx2(src: &[u8], dst: &mut [u8], pixels: usize) {
+    use core::arch::x86_64::*;
+    // 2 pixels per __m128i iteration: 12 source bytes → 6 dst bytes.
+    // That's too small — bump up to 4 pixels = 24 src bytes = one full
+    // __m128i input, producing 12 dst bytes per iteration.
+    //
+    // For each pixel `p` in 0..4, we want dst[p*3 + c] = src[p*6 + c*2 + 1]
+    // for c in 0..3. Source-byte offsets within the 16-byte input:
+    //   pixel 0: 1, 3, 5
+    //   pixel 1: 7, 9, 11
+    //   pixel 2: 13, 15, (17 - out of lane)
+    //   pixel 3: (19, 21, 23 - out of lane)
+    // So 4 pixels won't fit in one 16-byte load. Use 2 pixels per
+    // iteration = 12 src bytes → 6 dst bytes instead — still avoids
+    // scalar-per-byte.
+    const SHUF: [u8; 16] = [
+        1, 3, 5, 7, 9, 11, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+    ];
+    let shuf = _mm_loadu_si128(SHUF.as_ptr() as *const __m128i);
+
+    // Leave a 2-pixel tail so our 16-byte load never reads past end.
+    let simd_pixels = if pixels >= 2 { pixels - 2 } else { 0 };
+    let chunks = simd_pixels / 2;
+    for c in 0..chunks {
+        let soff = c * 12;
+        let doff = c * 6;
+        let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
+        let out = _mm_shuffle_epi8(v, shuf);
+        // Store 16 bytes; next iteration (or scalar tail) overwrites
+        // the 10 zero bytes.
+        _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
+    }
+    let tail_start = chunks * 2;
+    for i in tail_start..pixels {
         dst[i * 3] = src[i * 6 + 1];
         dst[i * 3 + 1] = src[i * 6 + 3];
         dst[i * 3 + 2] = src[i * 6 + 5];
