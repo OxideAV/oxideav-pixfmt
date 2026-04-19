@@ -48,6 +48,48 @@ oxideav-pixfmt = { version = "0.0", features = ["nightly"] }
 | Colour matrices         | BT.601 / BT.709, limited (studio) / full (JPEG) range                       |
 | Dither strategies       | None, 8×8 ordered Bayer, Floyd–Steinberg                                    |
 
+## Roadmap
+
+ffmpeg's `-pix_fmts` lists ~200 entries; this crate currently covers
+~28. The remaining gap is mostly long-tail or hardware-specific. The
+formats below are *planned* — they're not implemented yet, but they
+have real callers in the codecs/containers we want to support, so the
+[`PixelFormat`](https://docs.rs/oxideav-core/latest/oxideav_core/enum.PixelFormat.html)
+variants and `convert()` paths will land over time.
+
+**Tier 1 — short-term targets:**
+
+| family                   | additions                                                                  |
+| ------------------------ | -------------------------------------------------------------------------- |
+| 16-bit packed RGB        | `Rgb565Le/Be`, `Rgb555Le/Be`, `Rgb444Le/Be` (+ BGR mirrors)                |
+| Padded 4-byte packed RGB | `0Rgb`, `Rgb0`, `0Bgr`, `Bgr0` (no-alpha 32-bit, alignment-friendly)       |
+| GBR planar               | `Gbrp`, `Gbrp10/12/16Le` — JPEG-2000, ProRes 4444, lossless H.264 GBR mode |
+| Legacy planar YUV        | `Yuv411P`, `Yuv410P`, `Yuv440P` (+ `YuvJ*` mirrors) — DV, MJPEG, SD        |
+| 4:2:2 / 4:4:4 NV         | `Nv16`, `Nv24` — common on Android / embedded                              |
+| Alpha-bearing YUV        | `YuvA422P`, `YuvA444P`, plus 10/12/16Le siblings of `Yuva420P`             |
+
+**Tier 2 — mid-term:**
+
+| family                | additions                                                                     |
+| --------------------- | ----------------------------------------------------------------------------- |
+| Big-endian mirrors    | `Rgb48Be`, `Rgba64Be`, `Gray16Be`, `Yuv420P10Be`, … of every `*Le` we ship    |
+| Higher-precision YUV  | `Yuv420P9/14/16Le`, same for `422` / `444`                                    |
+| 10/12/16-bit semi-pl. | `P010Le`, `P012Le`, `P016Le` — HEVC Main10, Dolby Vision                      |
+| DCI / cinema          | `Xyz12Le`                                                                     |
+| 8-bit low-bpp packed  | `Rgb8` (3-3-2), `Rgb4`, `Bgr4Byte`                                            |
+
+**Out of scope (no plans):**
+
+- Hardware-opaque surfaces (`cuda`, `vaapi`, `vdpau`, `qsv`,
+  `videotoolbox`, `vulkan`, `drm_prime`, `mediacodec`, …) — these are
+  zero-copy GPU descriptors, not something a CPU pixfmt layer would
+  convert. The framework will surface them at the codec/IO boundary
+  instead, leaving the GPU contents untouched.
+- Bayer mosaic patterns (`bayer_*`) — a RAW-camera concern, outside
+  this crate's video-pipeline scope.
+- Niche packed YUV (`Ayuv64Le`, `Vuya`, `Vuyx`) — open to PRs if a
+  consumer needs them.
+
 ## Low-level API — work on your own buffers
 
 Every hot path is exposed as a function over `&[u8]` / `&mut [u8]`. The
