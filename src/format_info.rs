@@ -92,9 +92,14 @@ impl FormatInfo {
                 has_alpha: false,
                 is_palette: true,
             },
-            // The enum is `#[non_exhaustive]`; future variants fall back
-            // to a conservative "single packed 8-bit plane" descriptor.
-            _ => Self::packed(8, false),
+            // The enum is `#[non_exhaustive]`; a future variant that
+            // lands in oxideav-core without a matching arm here falls
+            // back to a conservative "single packed 8-bit plane"
+            // descriptor. Flagged in dev builds so we catch the gap.
+            _ => {
+                debug_assert!(false, "FormatInfo::of: unhandled PixelFormat variant");
+                Self::packed(8, false)
+            }
         }
     }
 
