@@ -24,13 +24,13 @@ Zero C dependencies. Zero FFI. Runtime-selected AVX2 (x86_64) and NEON
 
 ```toml
 [dependencies]
-oxideav-pixfmt = "0.0"
+oxideav-pixfmt = "0.1"
 ```
 
 Nightly users who want the `std::simd` path:
 
 ```toml
-oxideav-pixfmt = { version = "0.0", features = ["nightly"] }
+oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 ```
 
 ## What's supported
