@@ -18,8 +18,7 @@ categories = ["multimedia::video", "multimedia::images"]
 nightly = []
 
 [dependencies]
-oxideav-core = "0.0"
-
+oxideav-core = "0.1"
 [dev-dependencies]
 criterion = "0.5"
 
