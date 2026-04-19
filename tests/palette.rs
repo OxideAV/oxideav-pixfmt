@@ -88,6 +88,64 @@ fn generate_palette_stays_under_256() {
 }
 
 #[test]
+fn octree_palette_respects_max_and_roundtrips() {
+    let src = gradient_rgb24(64, 64);
+    let palette = generate_palette(
+        &[&src],
+        &PaletteGenOptions {
+            strategy: PaletteStrategy::Octree,
+            max_colors: 64,
+            transparency: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        !palette.colors.is_empty(),
+        "octree must emit at least one colour"
+    );
+    assert!(
+        palette.colors.len() <= 64,
+        "octree over-produced: {} > 64",
+        palette.colors.len()
+    );
+
+    let opts = ConvertOptions {
+        dither: Dither::FloydSteinberg,
+        palette: Some(palette.clone()),
+        color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
+    };
+    let pal8 = convert(&src, PixelFormat::Pal8, &opts).unwrap();
+    let back = convert(
+        &pal8,
+        PixelFormat::Rgb24,
+        &ConvertOptions {
+            dither: Dither::None,
+            palette: Some(palette),
+            color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
+        },
+    )
+    .unwrap();
+    let psnr = psnr_rgb(&src.planes[0].data, &back.planes[0].data);
+    assert!(psnr > 24.0, "octree roundtrip psnr {psnr} below 24 dB");
+}
+
+#[test]
+fn octree_palette_small_max_caps_output() {
+    let frame = deterministic_rgba(128, 128, 0xCAFEF00D);
+    let palette = generate_palette(
+        &[&frame],
+        &PaletteGenOptions {
+            strategy: PaletteStrategy::Octree,
+            max_colors: 16,
+            transparency: None,
+        },
+    )
+    .unwrap();
+    assert!(palette.colors.len() <= 16);
+    assert!(!palette.colors.is_empty());
+}
+
+#[test]
 fn uniform_palette_has_256_entries() {
     let frame = deterministic_rgba(64, 64, 0xB16B00B5);
     let opts = PaletteGenOptions {
