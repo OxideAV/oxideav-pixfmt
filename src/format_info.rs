@@ -65,6 +65,8 @@ impl FormatInfo {
             // RGB family
             P::Rgb24 | P::Bgr24 => Self::packed(8, false),
             P::Rgba | P::Bgra | P::Argb | P::Abgr => Self::packed(8, true),
+            // CMYK — 4 components packed 8-bit, no alpha.
+            P::Cmyk => Self::packed(8, false),
             P::Rgb48Le => Self::packed(16, false),
             P::Rgba64Le => Self::packed(16, true),
             // Gray

@@ -44,10 +44,14 @@
 //! - MonoBlack/MonoWhite ↔ Gray8.
 //! - Pal8 → Rgb24/Rgba requires `opts.palette`.
 //! - Rgb24/Rgba → Pal8 requires `opts.palette`; dithering per `opts.dither`.
+//! - Cmyk ↔ Rgb24/Rgba — uncalibrated device-CMYK approximation (see
+//!   [`cmyk`] for the formula and the caveats around ICC profiles and
+//!   Adobe-inverted JPEGs).
 //!
 //! Anything else returns `Error::Unsupported` — callers handle it or
 //! stage through a supported intermediate (most paths go via Rgba).
 
+pub mod cmyk;
 pub mod convert;
 pub mod dither;
 pub mod format_info;

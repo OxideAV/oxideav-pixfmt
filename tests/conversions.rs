@@ -176,3 +176,49 @@ fn swizzle_all_four_byte_pairs() {
         }
     }
 }
+
+#[test]
+fn cmyk_roundtrip_via_rgb24() {
+    // Rgb24 → Cmyk → Rgb24 is lossless at 8-bit precision by
+    // construction of the formulas in the `cmyk` module.
+    let opts = ConvertOptions::default();
+    let src = synth_rgb24(16, 8);
+    let cmyk = convert(&src, PixelFormat::Cmyk, &opts).unwrap();
+    assert_eq!(cmyk.format, PixelFormat::Cmyk);
+    assert_eq!(cmyk.planes[0].data.len(), 16 * 8 * 4);
+    let back = convert(&cmyk, PixelFormat::Rgb24, &opts).unwrap();
+    assert_eq!(back.planes[0].data, src.planes[0].data);
+}
+
+#[test]
+fn cmyk_roundtrip_via_rgba() {
+    // Rgba → Cmyk → Rgba. Alpha is dropped by Cmyk then restored
+    // as opaque 255 on the way back, so the data matches only when
+    // the source alpha was 255 to begin with.
+    let opts = ConvertOptions::default();
+    let w = 16u32;
+    let h = 8u32;
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            data.push((x * 13 + y * 7) as u8);
+            data.push((x * 3 + y * 31) as u8);
+            data.push((x * 29 + y * 17) as u8);
+            data.push(255);
+        }
+    }
+    let src = VideoFrame {
+        format: PixelFormat::Rgba,
+        width: w,
+        height: h,
+        pts: None,
+        time_base: tb(),
+        planes: vec![VideoPlane {
+            stride: (w * 4) as usize,
+            data,
+        }],
+    };
+    let cmyk = convert(&src, PixelFormat::Cmyk, &opts).unwrap();
+    let back = convert(&cmyk, PixelFormat::Rgba, &opts).unwrap();
+    assert_eq!(back.planes[0].data, src.planes[0].data);
+}

@@ -8,6 +8,7 @@
 
 use oxideav_core::{Error, PixelFormat, Result, VideoFrame, VideoPlane};
 
+use crate::cmyk;
 use crate::gray;
 use crate::pal8;
 use crate::palette::Palette;
@@ -165,6 +166,13 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Pal8, P::Rgba,  Pal8ToRgb { alpha: true }),
         (P::Rgb24, P::Pal8, RgbToPal8 { alpha_in: false }),
         (P::Rgba,  P::Pal8, RgbToPal8 { alpha_in: true }),
+
+        // CMYK ↔ RGB. Uncalibrated device-CMYK approximation; pure
+        // bit-manipulation (no matrix / ColorSpace knob applies).
+        (P::Cmyk,  P::Rgb24, CmykToRgb { alpha: false }),
+        (P::Cmyk,  P::Rgba,  CmykToRgb { alpha: true }),
+        (P::Rgb24, P::Cmyk,  RgbToCmyk { alpha_in: false }),
+        (P::Rgba,  P::Cmyk,  RgbToCmyk { alpha_in: true }),
     ]
 };
 
@@ -238,6 +246,14 @@ enum ConvertOp {
     RgbToPal8 {
         alpha_in: bool,
     },
+    CmykToRgb {
+        /// When true, output is RGBA (opaque alpha). When false, Rgb24.
+        alpha: bool,
+    },
+    RgbToCmyk {
+        /// When true, source is RGBA (alpha ignored). When false, Rgb24.
+        alpha_in: bool,
+    },
 }
 
 impl ConvertOp {
@@ -282,6 +298,8 @@ impl ConvertOp {
             Self::Yuv420pToNv { is_nv12 } => yuv420p_to_nv(src, dst_format, is_nv12),
             Self::Pal8ToRgb { alpha } => pal8_to_rgb(src, dst_format, opts, alpha),
             Self::RgbToPal8 { alpha_in } => rgb_to_pal8(src, dst_format, opts, alpha_in),
+            Self::CmykToRgb { alpha } => do_cmyk_to_rgb(src, dst_format, alpha),
+            Self::RgbToCmyk { alpha_in } => do_rgb_to_cmyk(src, dst_format, alpha_in),
         }
     }
 }
@@ -965,6 +983,59 @@ fn rgb_to_pal8(
         dst_format,
         vec![VideoPlane {
             stride: w,
+            data: out,
+        }],
+    ))
+}
+
+// -------------------------------------------------------------------------
+// CMYK.
+
+fn do_cmyk_to_rgb(src: &VideoFrame, dst_format: PixelFormat, alpha: bool) -> Result<VideoFrame> {
+    let w = src.width as usize;
+    let h = src.height as usize;
+    let in_plane = &src.planes[0];
+    let bpp_out = if alpha { 4 } else { 3 };
+    let mut out = vec![0u8; w * h * bpp_out];
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
+        let dr = &mut out[row * w * bpp_out..row * w * bpp_out + w * bpp_out];
+        if alpha {
+            cmyk::cmyk_to_rgba(sr, dr, w);
+        } else {
+            cmyk::cmyk_to_rgb24(sr, dr, w);
+        }
+    }
+    Ok(make_frame(
+        src,
+        dst_format,
+        vec![VideoPlane {
+            stride: w * bpp_out,
+            data: out,
+        }],
+    ))
+}
+
+fn do_rgb_to_cmyk(src: &VideoFrame, dst_format: PixelFormat, alpha_in: bool) -> Result<VideoFrame> {
+    let w = src.width as usize;
+    let h = src.height as usize;
+    let in_plane = &src.planes[0];
+    let bpp_in = if alpha_in { 4 } else { 3 };
+    let mut out = vec![0u8; w * h * 4];
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * bpp_in);
+        let dr = &mut out[row * w * 4..row * w * 4 + w * 4];
+        if alpha_in {
+            cmyk::rgba_to_cmyk(sr, dr, w);
+        } else {
+            cmyk::rgb24_to_cmyk(sr, dr, w);
+        }
+    }
+    Ok(make_frame(
+        src,
+        dst_format,
+        vec![VideoPlane {
+            stride: w * 4,
             data: out,
         }],
     ))
