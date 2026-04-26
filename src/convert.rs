@@ -70,11 +70,11 @@ pub struct ConvertOptions {
 /// Return `Some(src)` when the caller's destination format already
 /// matches the source's format — useful to skip a pointless clone in
 /// hot paths.
-pub fn convert_in_place_if_same<'a>(
-    src: &'a VideoFrame,
+pub fn convert_in_place_if_same(
+    src: &VideoFrame,
     src_info: FrameInfo,
     dst_format: PixelFormat,
-) -> Option<&'a VideoFrame> {
+) -> Option<&VideoFrame> {
     if src_info.format == dst_format {
         Some(src)
     } else {
