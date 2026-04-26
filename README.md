@@ -185,24 +185,22 @@ If you're already using `oxideav-core`, the one-line form handles every
 conversion through the same dispatch table:
 
 ```rust
-use oxideav_core::{PixelFormat, TimeBase, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ColorSpace, ConvertOptions};
+use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
+use oxideav_pixfmt::{convert, ColorSpace, ConvertOptions, FrameInfo};
 
 let src = VideoFrame {
-    format: PixelFormat::Yuv420P,
-    width: 1920,
-    height: 1080,
     pts: None,
-    time_base: TimeBase::new(1, 25),
     planes: vec![
         VideoPlane { stride: 1920, data: vec![16; 1920 * 1080] },
         VideoPlane { stride: 960,  data: vec![128; 960 * 540]   },
         VideoPlane { stride: 960,  data: vec![128; 960 * 540]   },
     ],
 };
+let src_info = FrameInfo::new(PixelFormat::Yuv420P, 1920, 1080);
 
 let dst = convert(
     &src,
+    src_info,
     PixelFormat::Rgb24,
     &ConvertOptions {
         color_space: ColorSpace::Bt709Limited,
@@ -211,7 +209,7 @@ let dst = convert(
 ).expect("convert");
 ```
 
-`convert_in_place_if_same(src, dst_format)` is a zero-copy passthrough
+`convert_in_place_if_same(src, src_info, dst_format)` is a zero-copy passthrough
 you can call first to skip `convert()` when the source already matches.
 
 ## Colour science

@@ -1,10 +1,15 @@
 //! High-level `convert()` entry point.
 //!
 //! Every supported conversion flows through [`convert`], which dispatches
-//! on `(src.format, dst_format)` to the appropriate helper in
+//! on `(src_info.format, dst_format)` to the appropriate helper in
 //! [`crate::rgb`], [`crate::yuv`], [`crate::gray`], [`crate::palette`],
 //! or [`crate::pal8`]. Anything that isn't wired up yet returns
 //! `Error::Unsupported`.
+//!
+//! Stream-level properties (pixel format, width, height) live on the
+//! caller's [`oxideav_core::CodecParameters`], not on the [`VideoFrame`]
+//! itself, so every entry point takes them as an explicit
+//! [`FrameInfo`] argument alongside the frame.
 
 use oxideav_core::{Error, PixelFormat, Result, VideoFrame, VideoPlane};
 
@@ -14,6 +19,26 @@ use crate::pal8;
 use crate::palette::Palette;
 use crate::rgb;
 use crate::yuv::{self, YuvMatrix};
+
+/// Stream-level metadata that used to live on `VideoFrame`. Threaded
+/// through every conversion so the helpers know how to interpret the
+/// raw plane bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameInfo {
+    pub format: PixelFormat,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl FrameInfo {
+    pub const fn new(format: PixelFormat, width: u32, height: u32) -> Self {
+        Self {
+            format,
+            width,
+            height,
+        }
+    }
+}
 
 /// Dither strategy selected when down-quantising to a palette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -45,8 +70,12 @@ pub struct ConvertOptions {
 /// Return `Some(src)` when the caller's destination format already
 /// matches the source's format — useful to skip a pointless clone in
 /// hot paths.
-pub fn convert_in_place_if_same(src: &VideoFrame, dst_format: PixelFormat) -> Option<&VideoFrame> {
-    if src.format == dst_format {
+pub fn convert_in_place_if_same<'a>(
+    src: &'a VideoFrame,
+    src_info: FrameInfo,
+    dst_format: PixelFormat,
+) -> Option<&'a VideoFrame> {
+    if src_info.format == dst_format {
         Some(src)
     } else {
         None
@@ -56,19 +85,20 @@ pub fn convert_in_place_if_same(src: &VideoFrame, dst_format: PixelFormat) -> Op
 /// Convert `src` to `dst_format`, producing a newly allocated frame.
 pub fn convert(
     src: &VideoFrame,
+    src_info: FrameInfo,
     dst_format: PixelFormat,
     opts: &ConvertOptions,
 ) -> Result<VideoFrame> {
-    if src.format == dst_format {
+    if src_info.format == dst_format {
         return Ok(src.clone());
     }
-    let op = lookup(src.format, dst_format).ok_or_else(|| {
+    let op = lookup(src_info.format, dst_format).ok_or_else(|| {
         Error::unsupported(format!(
             "pixfmt: conversion {:?} → {:?} not implemented",
-            src.format, dst_format
+            src_info.format, dst_format
         ))
     })?;
-    op.apply(src, dst_format, opts)
+    op.apply(src, src_info, opts)
 }
 
 /// Coverage table — one entry per supported `(src, dst)` pair. The
@@ -260,46 +290,46 @@ impl ConvertOp {
     fn apply(
         &self,
         src: &VideoFrame,
-        dst_format: PixelFormat,
+        src_info: FrameInfo,
         opts: &ConvertOptions,
     ) -> Result<VideoFrame> {
         // The YUV paths always want the limited-range matrix; YuvJ
         // input/output goes through RescaleRange, not this matrix.
         let matrix = YuvMatrix::from_color_space(opts.color_space).with_range(true);
         match *self {
-            Self::Swizzle3 { src: sp, dst: dp } => swizzle3(src, dst_format, sp, dp),
-            Self::Swizzle4 { src: sp, dst: dp } => swizzle4(src, dst_format, sp, dp),
-            Self::Promote3To4 { src: sp, dst: dp } => promote3_to_4(src, dst_format, sp, dp),
-            Self::Demote4To3 { src: sp, dst: dp } => demote4_to_3(src, dst_format, sp, dp),
-            Self::Rgb48ToRgb24 => do_rgb48_to_rgb24(src, dst_format),
-            Self::Rgb24ToRgb48 => do_rgb24_to_rgb48(src, dst_format),
-            Self::Rgba64ToRgba => do_rgba64_to_rgba(src, dst_format),
-            Self::RgbaToRgba64 => do_rgba_to_rgba64(src, dst_format),
-            Self::Gray8ToPacked3 => gray_to_packed3(src, dst_format),
-            Self::Gray8ToPacked4 => gray_to_packed4(src, dst_format),
-            Self::Gray16ToGray8 => do_gray16_to_gray8(src, dst_format),
-            Self::Gray8ToGray16 => do_gray8_to_gray16(src, dst_format),
-            Self::MonoToGray { black_is_zero } => do_mono_to_gray(src, dst_format, black_is_zero),
-            Self::GrayToMono { black_is_zero } => do_gray_to_mono(src, dst_format, black_is_zero),
+            Self::Swizzle3 { src: sp, dst: dp } => swizzle3(src, src_info, sp, dp),
+            Self::Swizzle4 { src: sp, dst: dp } => swizzle4(src, src_info, sp, dp),
+            Self::Promote3To4 { src: sp, dst: dp } => promote3_to_4(src, src_info, sp, dp),
+            Self::Demote4To3 { src: sp, dst: dp } => demote4_to_3(src, src_info, sp, dp),
+            Self::Rgb48ToRgb24 => do_rgb48_to_rgb24(src, src_info),
+            Self::Rgb24ToRgb48 => do_rgb24_to_rgb48(src, src_info),
+            Self::Rgba64ToRgba => do_rgba64_to_rgba(src, src_info),
+            Self::RgbaToRgba64 => do_rgba_to_rgba64(src, src_info),
+            Self::Gray8ToPacked3 => gray_to_packed3(src, src_info),
+            Self::Gray8ToPacked4 => gray_to_packed4(src, src_info),
+            Self::Gray16ToGray8 => do_gray16_to_gray8(src, src_info),
+            Self::Gray8ToGray16 => do_gray8_to_gray16(src, src_info),
+            Self::MonoToGray { black_is_zero } => do_mono_to_gray(src, src_info, black_is_zero),
+            Self::GrayToMono { black_is_zero } => do_gray_to_mono(src, src_info, black_is_zero),
             Self::YuvToRgb { wsub, hsub, alpha } => {
-                do_yuv_to_rgb(src, dst_format, matrix, wsub, hsub, alpha)
+                do_yuv_to_rgb(src, src_info, matrix, wsub, hsub, alpha)
             }
             Self::RgbToYuv {
                 wsub,
                 hsub,
                 alpha_in,
-            } => do_rgb_to_yuv(src, dst_format, matrix, wsub, hsub, alpha_in),
+            } => do_rgb_to_yuv(src, src_info, matrix, wsub, hsub, alpha_in),
             Self::RescaleRange {
                 wsub,
                 hsub,
                 to_full,
-            } => rescale_range(src, dst_format, wsub, hsub, to_full),
-            Self::NvToYuv420p { is_nv12 } => nv_to_yuv420p(src, dst_format, is_nv12),
-            Self::Yuv420pToNv { is_nv12 } => yuv420p_to_nv(src, dst_format, is_nv12),
-            Self::Pal8ToRgb { alpha } => pal8_to_rgb(src, dst_format, opts, alpha),
-            Self::RgbToPal8 { alpha_in } => rgb_to_pal8(src, dst_format, opts, alpha_in),
-            Self::CmykToRgb { alpha } => do_cmyk_to_rgb(src, dst_format, alpha),
-            Self::RgbToCmyk { alpha_in } => do_rgb_to_cmyk(src, dst_format, alpha_in),
+            } => rescale_range(src, src_info, wsub, hsub, to_full),
+            Self::NvToYuv420p { is_nv12 } => nv_to_yuv420p(src, src_info, is_nv12),
+            Self::Yuv420pToNv { is_nv12 } => yuv420p_to_nv(src, src_info, is_nv12),
+            Self::Pal8ToRgb { alpha } => pal8_to_rgb(src, src_info, opts, alpha),
+            Self::RgbToPal8 { alpha_in } => rgb_to_pal8(src, src_info, opts, alpha_in),
+            Self::CmykToRgb { alpha } => do_cmyk_to_rgb(src, src_info, alpha),
+            Self::RgbToCmyk { alpha_in } => do_rgb_to_cmyk(src, src_info, alpha_in),
         }
     }
 }
@@ -307,13 +337,9 @@ impl ConvertOp {
 // -------------------------------------------------------------------------
 // Frame helpers.
 
-fn make_frame(src: &VideoFrame, format: PixelFormat, planes: Vec<VideoPlane>) -> VideoFrame {
+fn make_frame(src: &VideoFrame, planes: Vec<VideoPlane>) -> VideoFrame {
     VideoFrame {
-        format,
-        width: src.width,
-        height: src.height,
         pts: src.pts,
-        time_base: src.time_base,
         planes,
     }
 }
@@ -339,12 +365,12 @@ fn gather_tight(src: &[u8], stride: usize, w_bytes: usize, h: usize) -> Vec<u8> 
 
 fn swizzle3(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     src_pos: rgb::Rgb3,
     dst_pos: rgb::Rgb3,
 ) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 3];
     for row in 0..h {
@@ -359,7 +385,6 @@ fn swizzle3(
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 3,
             data: out,
@@ -369,12 +394,12 @@ fn swizzle3(
 
 fn swizzle4(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     src_pos: rgb::Rgba4,
     dst_pos: rgb::Rgba4,
 ) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 4];
     for row in 0..h {
@@ -389,7 +414,6 @@ fn swizzle4(
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 4,
             data: out,
@@ -399,12 +423,12 @@ fn swizzle4(
 
 fn promote3_to_4(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     src_pos: rgb::Rgb3,
     dst_pos: rgb::Rgba4,
 ) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 4];
     for row in 0..h {
@@ -419,7 +443,6 @@ fn promote3_to_4(
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 4,
             data: out,
@@ -429,12 +452,12 @@ fn promote3_to_4(
 
 fn demote4_to_3(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     src_pos: rgb::Rgba4,
     dst_pos: rgb::Rgb3,
 ) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 3];
     for row in 0..h {
@@ -449,7 +472,6 @@ fn demote4_to_3(
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 3,
             data: out,
@@ -460,9 +482,9 @@ fn demote4_to_3(
 // -------------------------------------------------------------------------
 // Deep RGB.
 
-fn do_rgb48_to_rgb24(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn do_rgb48_to_rgb24(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 3];
     for row in 0..h {
@@ -471,7 +493,6 @@ fn do_rgb48_to_rgb24(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoF
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 3,
             data: out,
@@ -479,9 +500,9 @@ fn do_rgb48_to_rgb24(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoF
     ))
 }
 
-fn do_rgb24_to_rgb48(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn do_rgb24_to_rgb48(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 6];
     for row in 0..h {
@@ -490,7 +511,6 @@ fn do_rgb24_to_rgb48(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoF
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 6,
             data: out,
@@ -498,9 +518,9 @@ fn do_rgb24_to_rgb48(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoF
     ))
 }
 
-fn do_rgba64_to_rgba(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn do_rgba64_to_rgba(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 4];
     for row in 0..h {
@@ -509,7 +529,6 @@ fn do_rgba64_to_rgba(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoF
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 4,
             data: out,
@@ -517,9 +536,9 @@ fn do_rgba64_to_rgba(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoF
     ))
 }
 
-fn do_rgba_to_rgba64(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn do_rgba_to_rgba64(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 8];
     for row in 0..h {
@@ -528,7 +547,6 @@ fn do_rgba_to_rgba64(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoF
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 8,
             data: out,
@@ -539,9 +557,9 @@ fn do_rgba_to_rgba64(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoF
 // -------------------------------------------------------------------------
 // Gray / Mono.
 
-fn gray_to_packed3(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn gray_to_packed3(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 3];
     for row in 0..h {
@@ -550,7 +568,6 @@ fn gray_to_packed3(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFra
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 3,
             data: out,
@@ -558,9 +575,9 @@ fn gray_to_packed3(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFra
     ))
 }
 
-fn gray_to_packed4(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn gray_to_packed4(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 4];
     for row in 0..h {
@@ -569,7 +586,6 @@ fn gray_to_packed4(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFra
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 4,
             data: out,
@@ -577,9 +593,9 @@ fn gray_to_packed4(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFra
     ))
 }
 
-fn do_gray16_to_gray8(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn do_gray16_to_gray8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h];
     for row in 0..h {
@@ -588,7 +604,6 @@ fn do_gray16_to_gray8(src: &VideoFrame, dst_format: PixelFormat) -> Result<Video
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w,
             data: out,
@@ -596,9 +611,9 @@ fn do_gray16_to_gray8(src: &VideoFrame, dst_format: PixelFormat) -> Result<Video
     ))
 }
 
-fn do_gray8_to_gray16(src: &VideoFrame, dst_format: PixelFormat) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn do_gray8_to_gray16(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 2];
     for row in 0..h {
@@ -607,7 +622,6 @@ fn do_gray8_to_gray16(src: &VideoFrame, dst_format: PixelFormat) -> Result<Video
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 2,
             data: out,
@@ -617,11 +631,11 @@ fn do_gray8_to_gray16(src: &VideoFrame, dst_format: PixelFormat) -> Result<Video
 
 fn do_mono_to_gray(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     black_is_zero: bool,
 ) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h];
     // Mono strides are often `(w + 7) / 8`, but honour the provided
@@ -631,7 +645,6 @@ fn do_mono_to_gray(
     gray::mono_to_gray8(&compact, &mut out, w, h, black_is_zero);
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w,
             data: out,
@@ -641,11 +654,11 @@ fn do_mono_to_gray(
 
 fn do_gray_to_mono(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     black_is_zero: bool,
 ) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let packed_stride = w.div_ceil(8);
     let src_tight = gather_tight(&in_plane.data, in_plane.stride, w, h);
@@ -653,7 +666,6 @@ fn do_gray_to_mono(
     gray::gray8_to_mono(&src_tight, &mut out, w, h, black_is_zero);
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: packed_stride,
             data: out,
@@ -677,7 +689,7 @@ fn gather_mono_rows(src: &[u8], stride: usize, packed: usize, h: usize) -> Vec<u
 
 fn do_yuv_to_rgb(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     matrix: YuvMatrix,
     wsub: usize,
     hsub: usize,
@@ -686,8 +698,8 @@ fn do_yuv_to_rgb(
     if src.planes.len() < 3 {
         return Err(Error::invalid("pixfmt: YUV source needs 3 planes"));
     }
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let cw = w / wsub;
     let ch = h / hsub;
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
@@ -705,7 +717,6 @@ fn do_yuv_to_rgb(
     if !alpha {
         return Ok(make_frame(
             src,
-            dst_format,
             vec![VideoPlane {
                 stride: w * 3,
                 data: rgb_buf,
@@ -721,7 +732,6 @@ fn do_yuv_to_rgb(
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 4,
             data: rgba,
@@ -731,14 +741,14 @@ fn do_yuv_to_rgb(
 
 fn do_rgb_to_yuv(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     matrix: YuvMatrix,
     wsub: usize,
     hsub: usize,
     alpha_in: bool,
 ) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     if w % wsub != 0 || h % hsub != 0 {
         return Err(Error::invalid(
             "pixfmt: RGB → YUV requires dimensions divisible by subsampling",
@@ -776,7 +786,6 @@ fn do_rgb_to_yuv(
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![
             VideoPlane {
                 stride: w,
@@ -796,7 +805,7 @@ fn do_rgb_to_yuv(
 
 fn rescale_range(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     wsub: usize,
     hsub: usize,
     to_full: bool,
@@ -804,8 +813,8 @@ fn rescale_range(
     if src.planes.len() < 3 {
         return Err(Error::invalid("pixfmt: YuvJ source needs 3 planes"));
     }
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let cw = w / wsub;
     let ch = h / hsub;
     let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
@@ -822,7 +831,6 @@ fn rescale_range(
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![
             VideoPlane {
                 stride: w,
@@ -840,12 +848,12 @@ fn rescale_range(
     ))
 }
 
-fn nv_to_yuv420p(src: &VideoFrame, dst_format: PixelFormat, is_nv12: bool) -> Result<VideoFrame> {
+fn nv_to_yuv420p(src: &VideoFrame, src_info: FrameInfo, is_nv12: bool) -> Result<VideoFrame> {
     if src.planes.len() < 2 {
         return Err(Error::invalid("pixfmt: NV source needs 2 planes"));
     }
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let cw = w / 2;
     let ch = h / 2;
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
@@ -859,7 +867,6 @@ fn nv_to_yuv420p(src: &VideoFrame, dst_format: PixelFormat, is_nv12: bool) -> Re
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![
             VideoPlane {
                 stride: w,
@@ -877,12 +884,12 @@ fn nv_to_yuv420p(src: &VideoFrame, dst_format: PixelFormat, is_nv12: bool) -> Re
     ))
 }
 
-fn yuv420p_to_nv(src: &VideoFrame, dst_format: PixelFormat, is_nv12: bool) -> Result<VideoFrame> {
+fn yuv420p_to_nv(src: &VideoFrame, src_info: FrameInfo, is_nv12: bool) -> Result<VideoFrame> {
     if src.planes.len() < 3 {
         return Err(Error::invalid("pixfmt: Yuv420P source needs 3 planes"));
     }
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let cw = w / 2;
     let ch = h / 2;
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
@@ -896,7 +903,6 @@ fn yuv420p_to_nv(src: &VideoFrame, dst_format: PixelFormat, is_nv12: bool) -> Re
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![
             VideoPlane {
                 stride: w,
@@ -915,7 +921,7 @@ fn yuv420p_to_nv(src: &VideoFrame, dst_format: PixelFormat, is_nv12: bool) -> Re
 
 fn pal8_to_rgb(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     opts: &ConvertOptions,
     alpha: bool,
 ) -> Result<VideoFrame> {
@@ -923,8 +929,8 @@ fn pal8_to_rgb(
         .palette
         .as_ref()
         .ok_or_else(|| Error::invalid("pixfmt: Pal8 → RGB requires ConvertOptions.palette"))?;
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     if alpha {
         let mut out = vec![0u8; w * h * 4];
@@ -934,7 +940,6 @@ fn pal8_to_rgb(
         }
         Ok(make_frame(
             src,
-            dst_format,
             vec![VideoPlane {
                 stride: w * 4,
                 data: out,
@@ -948,7 +953,6 @@ fn pal8_to_rgb(
         }
         Ok(make_frame(
             src,
-            dst_format,
             vec![VideoPlane {
                 stride: w * 3,
                 data: out,
@@ -959,7 +963,7 @@ fn pal8_to_rgb(
 
 fn rgb_to_pal8(
     src: &VideoFrame,
-    dst_format: PixelFormat,
+    src_info: FrameInfo,
     opts: &ConvertOptions,
     alpha_in: bool,
 ) -> Result<VideoFrame> {
@@ -967,8 +971,8 @@ fn rgb_to_pal8(
         .palette
         .as_ref()
         .ok_or_else(|| Error::invalid("pixfmt: RGB → Pal8 requires ConvertOptions.palette"))?;
-    let w = src.width as usize;
-    let h = src.height as usize;
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h];
     if alpha_in {
@@ -980,7 +984,6 @@ fn rgb_to_pal8(
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w,
             data: out,
@@ -991,9 +994,9 @@ fn rgb_to_pal8(
 // -------------------------------------------------------------------------
 // CMYK.
 
-fn do_cmyk_to_rgb(src: &VideoFrame, dst_format: PixelFormat, alpha: bool) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn do_cmyk_to_rgb(src: &VideoFrame, src_info: FrameInfo, alpha: bool) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let bpp_out = if alpha { 4 } else { 3 };
     let mut out = vec![0u8; w * h * bpp_out];
@@ -1008,7 +1011,6 @@ fn do_cmyk_to_rgb(src: &VideoFrame, dst_format: PixelFormat, alpha: bool) -> Res
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * bpp_out,
             data: out,
@@ -1016,9 +1018,9 @@ fn do_cmyk_to_rgb(src: &VideoFrame, dst_format: PixelFormat, alpha: bool) -> Res
     ))
 }
 
-fn do_rgb_to_cmyk(src: &VideoFrame, dst_format: PixelFormat, alpha_in: bool) -> Result<VideoFrame> {
-    let w = src.width as usize;
-    let h = src.height as usize;
+fn do_rgb_to_cmyk(src: &VideoFrame, src_info: FrameInfo, alpha_in: bool) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let bpp_in = if alpha_in { 4 } else { 3 };
     let mut out = vec![0u8; w * h * 4];
@@ -1033,7 +1035,6 @@ fn do_rgb_to_cmyk(src: &VideoFrame, dst_format: PixelFormat, alpha_in: bool) -> 
     }
     Ok(make_frame(
         src,
-        dst_format,
         vec![VideoPlane {
             stride: w * 4,
             data: out,

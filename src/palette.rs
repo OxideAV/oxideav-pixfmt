@@ -18,6 +18,8 @@
 
 use oxideav_core::{Error, PixelFormat, Result, VideoFrame};
 
+use crate::convert::FrameInfo;
+
 /// An indexed-colour palette.
 #[derive(Clone, Debug, Default)]
 pub struct Palette {
@@ -58,8 +60,13 @@ impl Default for PaletteGenOptions {
 
 /// Build a palette from a batch of frames. Every frame must be
 /// `Rgb24` or `Rgba` — use [`crate::convert`] to stage through one
-/// of those first.
-pub fn generate_palette(frames: &[&VideoFrame], opts: &PaletteGenOptions) -> Result<Palette> {
+/// of those first. Each frame is paired with its [`FrameInfo`]
+/// because stream-level properties (format, width, height) are no
+/// longer carried on [`VideoFrame`].
+pub fn generate_palette(
+    frames: &[(&VideoFrame, FrameInfo)],
+    opts: &PaletteGenOptions,
+) -> Result<Palette> {
     if frames.is_empty() {
         return Err(Error::invalid("generate_palette: no frames"));
     }
@@ -86,12 +93,12 @@ pub fn generate_palette(frames: &[&VideoFrame], opts: &PaletteGenOptions) -> Res
 
 /// Gather tightly packed (R, G, B, A) pixels from each frame, dropping
 /// stride padding.
-fn collect_pixels(frames: &[&VideoFrame]) -> Result<Vec<[u8; 4]>> {
+fn collect_pixels(frames: &[(&VideoFrame, FrameInfo)]) -> Result<Vec<[u8; 4]>> {
     let mut out = Vec::new();
-    for frame in frames {
-        let w = frame.width as usize;
-        let h = frame.height as usize;
-        match frame.format {
+    for (frame, info) in frames {
+        let w = info.width as usize;
+        let h = info.height as usize;
+        match info.format {
             PixelFormat::Rgb24 => {
                 let plane = &frame.planes[0];
                 for row in 0..h {

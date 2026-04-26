@@ -1,15 +1,12 @@
 //! Palette generation + Pal8 quantise → dequantise tests.
 
-use oxideav_core::{PixelFormat, TimeBase, VideoFrame, VideoPlane};
+use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, generate_palette, ConvertOptions, Dither, PaletteGenOptions, PaletteStrategy,
+    convert, generate_palette, ConvertOptions, Dither, FrameInfo, PaletteGenOptions,
+    PaletteStrategy,
 };
 
-fn tb() -> TimeBase {
-    TimeBase::new(1, 25)
-}
-
-fn deterministic_rgba(w: u32, h: u32, seed: u32) -> VideoFrame {
+fn deterministic_rgba(w: u32, h: u32, seed: u32) -> (VideoFrame, FrameInfo) {
     // Cheap xorshift for repeatability without a random crate.
     let mut state = seed | 1;
     let mut data = Vec::with_capacity((w * h * 4) as usize);
@@ -22,20 +19,19 @@ fn deterministic_rgba(w: u32, h: u32, seed: u32) -> VideoFrame {
         data.push(((state >> 16) & 0xff) as u8);
         data.push(((state >> 24) & 0xff) as u8);
     }
-    VideoFrame {
-        format: PixelFormat::Rgba,
-        width: w,
-        height: h,
-        pts: None,
-        time_base: tb(),
-        planes: vec![VideoPlane {
-            stride: (w * 4) as usize,
-            data,
-        }],
-    }
+    (
+        VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: (w * 4) as usize,
+                data,
+            }],
+        },
+        FrameInfo::new(PixelFormat::Rgba, w, h),
+    )
 }
 
-fn gradient_rgb24(w: u32, h: u32) -> VideoFrame {
+fn gradient_rgb24(w: u32, h: u32) -> (VideoFrame, FrameInfo) {
     let mut data = Vec::with_capacity((w * h * 3) as usize);
     for y in 0..h {
         for x in 0..w {
@@ -47,17 +43,16 @@ fn gradient_rgb24(w: u32, h: u32) -> VideoFrame {
             data.push(b);
         }
     }
-    VideoFrame {
-        format: PixelFormat::Rgb24,
-        width: w,
-        height: h,
-        pts: None,
-        time_base: tb(),
-        planes: vec![VideoPlane {
-            stride: (w * 3) as usize,
-            data,
-        }],
-    }
+    (
+        VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: (w * 3) as usize,
+                data,
+            }],
+        },
+        FrameInfo::new(PixelFormat::Rgb24, w, h),
+    )
 }
 
 fn psnr_rgb(a: &[u8], b: &[u8]) -> f64 {
@@ -76,9 +71,9 @@ fn psnr_rgb(a: &[u8], b: &[u8]) -> f64 {
 
 #[test]
 fn generate_palette_stays_under_256() {
-    let frame = deterministic_rgba(256, 256, 0xDEADBEEF);
+    let (frame, info) = deterministic_rgba(256, 256, 0xDEADBEEF);
     let opts = PaletteGenOptions::default();
-    let palette = generate_palette(&[&frame], &opts).unwrap();
+    let palette = generate_palette(&[(&frame, info)], &opts).unwrap();
     assert!(
         palette.colors.len() <= 256,
         "got {} colours",
@@ -89,9 +84,9 @@ fn generate_palette_stays_under_256() {
 
 #[test]
 fn octree_palette_respects_max_and_roundtrips() {
-    let src = gradient_rgb24(64, 64);
+    let (src, src_info) = gradient_rgb24(64, 64);
     let palette = generate_palette(
-        &[&src],
+        &[(&src, src_info)],
         &PaletteGenOptions {
             strategy: PaletteStrategy::Octree,
             max_colors: 64,
@@ -114,9 +109,11 @@ fn octree_palette_respects_max_and_roundtrips() {
         palette: Some(palette.clone()),
         color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
     };
-    let pal8 = convert(&src, PixelFormat::Pal8, &opts).unwrap();
+    let pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
+    let pal8_info = FrameInfo::new(PixelFormat::Pal8, src_info.width, src_info.height);
     let back = convert(
         &pal8,
+        pal8_info,
         PixelFormat::Rgb24,
         &ConvertOptions {
             dither: Dither::None,
@@ -131,9 +128,9 @@ fn octree_palette_respects_max_and_roundtrips() {
 
 #[test]
 fn octree_palette_small_max_caps_output() {
-    let frame = deterministic_rgba(128, 128, 0xCAFEF00D);
+    let (frame, info) = deterministic_rgba(128, 128, 0xCAFEF00D);
     let palette = generate_palette(
-        &[&frame],
+        &[(&frame, info)],
         &PaletteGenOptions {
             strategy: PaletteStrategy::Octree,
             max_colors: 16,
@@ -147,21 +144,21 @@ fn octree_palette_small_max_caps_output() {
 
 #[test]
 fn uniform_palette_has_256_entries() {
-    let frame = deterministic_rgba(64, 64, 0xB16B00B5);
+    let (frame, info) = deterministic_rgba(64, 64, 0xB16B00B5);
     let opts = PaletteGenOptions {
         strategy: PaletteStrategy::Uniform,
         max_colors: 255, // u8 max
         transparency: None,
     };
-    let palette = generate_palette(&[&frame], &opts).unwrap();
+    let palette = generate_palette(&[(&frame, info)], &opts).unwrap();
     assert_eq!(palette.colors.len(), 255);
 }
 
 #[test]
 fn pal8_roundtrip_exceeds_24_db() {
-    let src = gradient_rgb24(64, 64);
+    let (src, src_info) = gradient_rgb24(64, 64);
     let palette = generate_palette(
-        &[&src],
+        &[(&src, src_info)],
         &PaletteGenOptions {
             strategy: PaletteStrategy::MedianCut,
             max_colors: 64,
@@ -176,9 +173,11 @@ fn pal8_roundtrip_exceeds_24_db() {
         color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
     };
 
-    let pal8 = convert(&src, PixelFormat::Pal8, &opts).unwrap();
+    let pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
+    let pal8_info = FrameInfo::new(PixelFormat::Pal8, src_info.width, src_info.height);
     let back = convert(
         &pal8,
+        pal8_info,
         PixelFormat::Rgb24,
         &ConvertOptions {
             dither: Dither::None,
@@ -194,9 +193,9 @@ fn pal8_roundtrip_exceeds_24_db() {
 
 #[test]
 fn pal8_decode_missing_palette_errors() {
-    let src = gradient_rgb24(8, 4);
+    let (src, src_info) = gradient_rgb24(8, 4);
     let palette = generate_palette(
-        &[&src],
+        &[(&src, src_info)],
         &PaletteGenOptions {
             strategy: PaletteStrategy::MedianCut,
             max_colors: 16,
@@ -209,9 +208,10 @@ fn pal8_decode_missing_palette_errors() {
         palette: Some(palette),
         color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
     };
-    let pal8 = convert(&src, PixelFormat::Pal8, &opts).unwrap();
+    let pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
+    let pal8_info = FrameInfo::new(PixelFormat::Pal8, src_info.width, src_info.height);
     // Now omit the palette — must fail.
     let bare = ConvertOptions::default();
-    let res = convert(&pal8, PixelFormat::Rgb24, &bare);
+    let res = convert(&pal8, pal8_info, PixelFormat::Rgb24, &bare);
     assert!(res.is_err(), "palette omission must error");
 }

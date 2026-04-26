@@ -11,8 +11,9 @@
 //! # Entry points
 //!
 //! - [`convert`] — the single conversion function; dispatches on
-//!   `(src.format, dst_format)` and returns a freshly allocated
-//!   [`VideoFrame`].
+//!   `(src_info.format, dst_format)` (the caller provides the source
+//!   format / dimensions via [`FrameInfo`]) and returns a freshly
+//!   allocated [`VideoFrame`].
 //! - [`generate_palette`] — build a [`Palette`] from one or more source
 //!   frames, honouring the selected [`PaletteStrategy`].
 //! - [`convert_in_place_if_same`] — trivial passthrough helper for the
@@ -63,6 +64,8 @@ mod simd_dispatch;
 pub mod yuv;
 mod yuv_simd;
 
-pub use convert::{convert, convert_in_place_if_same, ColorSpace, ConvertOptions, Dither};
+pub use convert::{
+    convert, convert_in_place_if_same, ColorSpace, ConvertOptions, Dither, FrameInfo,
+};
 pub use format_info::FormatInfo;
 pub use palette::{generate_palette, Palette, PaletteGenOptions, PaletteStrategy};
