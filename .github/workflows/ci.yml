@@ -19,7 +19,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,7 +37,7 @@ jobs:
     name: rustfmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (with rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable
@@ -63,7 +63,7 @@ jobs:
     # std::simd path needs attention, but stable CI still gates merges.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (nightly)
         uses: dtolnay/rust-toolchain@nightly
@@ -94,7 +94,7 @@ jobs:
     # though it stays on a custom CI rather than the centralized shim
     # (because of the arm64 + nightly-features-job customizations).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (nightly + miri)
         uses: dtolnay/rust-toolchain@nightly
