@@ -84,3 +84,27 @@ jobs:
         env:
           OXIDEAV_PIXFMT_FORCE_PORTABLE_SIMD: "1"
         run: cargo test --features nightly
+
+  miri:
+    name: miri (nightly, strict-provenance)
+    runs-on: ubuntu-latest
+    # Catches UB regressions in the SIMD swizzle / palette / pixel-format
+    # conversion code, where raw-pointer arithmetic and unchecked casts
+    # are common. Org-wide policy is miri-on; pixfmt opts in here even
+    # though it stays on a custom CI rather than the centralized shim
+    # (because of the arm64 + nightly-features-job customizations).
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (nightly + miri)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: cargo miri setup
+        run: cargo miri setup
+
+      - name: cargo miri test
+        env:
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-disable-isolation"
+        run: cargo miri test --all-targets
