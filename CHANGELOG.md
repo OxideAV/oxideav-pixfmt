@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.3...v0.1.4) - 2026-05-03
+
+### Other
+
+- add Porter-Duff over + glyph-mask blit primitives
+- bump v4 -> v6
+- add miri job (org-wide policy, custom CI variant)
+
 ### Added
 
 - `alpha` module — Porter-Duff "over" composite primitives for RGBA
