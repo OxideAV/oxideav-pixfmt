@@ -38,6 +38,8 @@ impl FormatInfo {
             P::Yuv420P | P::YuvJ420P => Self::yuv(8, 2, 2),
             P::Yuv422P | P::YuvJ422P => Self::yuv(8, 2, 1),
             P::Yuv444P | P::YuvJ444P => Self::yuv(8, 1, 1),
+            // 4:1:1 — luma at full res, chroma horizontally subsampled by 4.
+            P::Yuv411P => Self::yuv(8, 4, 1),
             P::Yuv420P10Le => Self::yuv(10, 2, 2),
             P::Yuv422P10Le => Self::yuv(10, 2, 1),
             P::Yuv444P10Le => Self::yuv(10, 1, 1),

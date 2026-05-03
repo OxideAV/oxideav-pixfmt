@@ -65,7 +65,7 @@ variants and `convert()` paths will land over time.
 | 16-bit packed RGB        | `Rgb565Le/Be`, `Rgb555Le/Be`, `Rgb444Le/Be` (+ BGR mirrors)                |
 | Padded 4-byte packed RGB | `0Rgb`, `Rgb0`, `0Bgr`, `Bgr0` (no-alpha 32-bit, alignment-friendly)       |
 | GBR planar               | `Gbrp`, `Gbrp10/12/16Le` — JPEG-2000, ProRes 4444, lossless H.264 GBR mode |
-| Legacy planar YUV        | `Yuv411P`, `Yuv410P`, `Yuv440P` (+ `YuvJ*` mirrors) — DV, MJPEG, SD        |
+| Legacy planar YUV        | `Yuv410P`, `Yuv440P` (+ `YuvJ*` mirrors) — DV, MJPEG, SD                   |
 | 4:2:2 / 4:4:4 NV         | `Nv16`, `Nv24` — common on Android / embedded                              |
 | Alpha-bearing YUV        | `YuvA422P`, `YuvA444P`, plus 10/12/16Le siblings of `Yuva420P`             |
 
