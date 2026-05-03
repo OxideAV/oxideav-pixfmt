@@ -52,6 +52,7 @@
 //! Anything else returns `Error::Unsupported` — callers handle it or
 //! stage through a supported intermediate (most paths go via Rgba).
 
+pub mod alpha;
 pub mod cmyk;
 pub mod convert;
 pub mod dither;
@@ -64,6 +65,10 @@ mod simd_dispatch;
 pub mod yuv;
 mod yuv_simd;
 
+pub use alpha::{
+    blit_alpha_mask, modulate_alpha, over_buffer, over_premul, over_straight, premultiply,
+    unpremultiply,
+};
 pub use convert::{
     convert, convert_in_place_if_same, ColorSpace, ConvertOptions, Dither, FrameInfo,
 };

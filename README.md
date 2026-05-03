@@ -47,6 +47,7 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither |
 | Colour matrices         | BT.601 / BT.709, limited (studio) / full (JPEG) range                       |
 | Dither strategies       | None, 8×8 ordered Bayer, Floyd–Steinberg                                    |
+| Alpha / compositing     | Porter-Duff "over" (premul + straight), premul/unpremul, alpha-mask blit    |
 
 ## Roadmap
 
@@ -178,6 +179,48 @@ quantise_rgb24_to_pal8(&rgb24, &mut indices, w, h, &palette, Dither::FloydSteinb
 Decode back with `pal8::expand_row_to_rgb24` or `expand_row_to_rgba`,
 which take a row of palette indices plus the `Palette` and emit the
 corresponding RGB scanline.
+
+### Alpha-blending and compositing
+
+Porter-Duff "over" primitives — the small bricks font renderers,
+subtitle compositors and overlay pipelines build on top of:
+
+```rust
+use oxideav_pixfmt::{
+    blit_alpha_mask, modulate_alpha, over_buffer, over_premul,
+    over_straight, premultiply, unpremultiply,
+};
+
+// Per-pixel composite (premultiplied or straight):
+let out = over_premul([128, 0, 0, 128], [0, 0, 255, 255]);   // semi-red over blue
+let out = over_straight([255, 0, 0, 128], [0, 0, 255, 255]); // straight-alpha equivalent
+
+// Premultiply / unpremultiply roundtrip (lossless at A=255, lossy at low A):
+let p = premultiply([200, 100, 50, 128]);
+let s = unpremultiply(p);
+
+// Modulate the alpha channel by an opacity value:
+let dim = modulate_alpha([200, 100, 50, 255], 128); // 50% opacity
+
+// Blit a coloured glyph mask onto an RGBA framebuffer with edge-clipping:
+let (w, h) = (320, 240);
+let mut canvas = vec![0u8; w * h * 4];
+let glyph: Vec<u8> = /* mw * mh u8 alpha */ vec![255; 8 * 8];
+blit_alpha_mask(
+    &mut canvas, w as u32, h as u32, w * 4,
+    /* x = */ 16, /* y = */ 24,
+    &glyph, 8, 8, 8,
+    [255, 255, 255, 255], // colour the mask in white, fully opaque
+);
+
+// Bulk over-composite two same-size buffers:
+let mut dst = vec![0u8; w * h * 4];
+let src = vec![0u8; w * h * 4];
+over_buffer(&mut dst, &src, w as u32, h as u32, w * 4, /* premultiplied = */ true);
+```
+
+All `u8 × u8` math goes through a bit-exact rounded `(a × b + 128) / 256`
+shift trick — no division on the hot path, no third-party deps.
 
 ## High-level API — `VideoFrame` in, `VideoFrame` out
 

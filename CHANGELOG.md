@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `alpha` module — Porter-Duff "over" composite primitives for RGBA
+  buffers. Per-pixel `over_premul` / `over_straight`, `premultiply` /
+  `unpremultiply`, `modulate_alpha`, full-buffer `over_buffer`, and
+  glyph-style `blit_alpha_mask` (single-channel u8 mask × RGBA colour
+  → RGBA framebuffer, with destination clipping). All re-exported from
+  the crate root for the upcoming `oxideav-scribe` font crate and any
+  future subtitle / overlay compositor. No new third-party deps.
+
 ## [0.1.3](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.2...v0.1.3) - 2026-05-02
 
 ### Other
