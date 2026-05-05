@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `FormatInfo::of` arms for the 6 high-bit-depth planar GBR(A) variants
+  (`Gbrp10Le`, `Gbrap10Le`, `Gbrp12Le`, `Gbrap12Le`, `Gbrp14Le`,
+  `Gbrap14Le`) added in `oxideav-core` 0.1.18, plus the previously
+  missing `Yuv422P12Le` / `Yuv444P12Le`. Without these, dev/test
+  consumers tripped the wildcard arm's `debug_assert!` and got a
+  conservative single-plane fallback descriptor. Each new variant now
+  reports the correct plane count, bit depth, alpha flag and planar
+  layout. Tests pin every value.
+
 ## [0.1.5](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.4...v0.1.5) - 2026-05-03
 
 ### Other
