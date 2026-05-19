@@ -17,6 +17,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conservative single-plane fallback descriptor. Each new variant now
   reports the correct plane count, bit depth, alpha flag and planar
   layout. Tests pin every value.
+- `YuvMatrix::BT2020` plus `ColorSpace::Bt2020Limited` /
+  `ColorSpace::Bt2020Full` variants. The non-constant-luminance
+  Y'CbCr matrix from ITU-R BT.2020-2 Table 4 (`kr = 0.2627,
+  kb = 0.0593`) is now selectable via the same `ConvertOptions`
+  path as the BT.601 / BT.709 matrices. The same coefficients
+  cover BT.2100-3 Table 6 HDR signalling. Roundtrip tests pin
+  PSNR > 38 dB (limited) and > 42 dB (full) on a synthetic gradient,
+  and confirm neutral-grey (`R=G=B=128`) projects onto
+  `Cb=Cr=128 ± 1` for both range modes.
+- `transfer` module — opto-electronic / electro-optical transfer
+  functions on `f32`, sourced clean-room from
+  `docs/video/signal-metadata/`:
+  - `bt709_oetf` / `bt709_inverse_oetf` (10-bit constants per
+    BT.2020-2 Table 4).
+  - `bt2020_12_oetf` / `bt2020_12_inverse_oetf` (12-bit precision).
+  - `bt1886_eotf` / `bt1886_inverse_eotf` + `bt1886_eotf_with_levels`
+    for non-zero black / non-unity peak white (BT.1886 Annex 1,
+    γ = 2.40).
+  - `pq_eotf` / `pq_inverse_eotf` (SMPTE ST 2084 / BT.2100-3 Table 4,
+    peak 10 000 cd/m², constants m1, m2, c1, c2, c3 quoted in source).
+  - `hlg_oetf` / `hlg_inverse_oetf` + `hlg_apply_ootf` /
+    `hlg_inverse_ootf` (BT.2100-3 Table 5, with `a = 0.17883277,
+    b = 0.28466892, c = 0.55991073`).
+  - `hlg_system_gamma(l_w)` per BT.2100-3 Note 5f.
+  Tests pin (a) round-trip OETF/EOTF identity to ±5e-5 across the
+  unit interval, (b) spec anchor points (PQ E'=1 → 10 000 cd/m²;
+  HLG E=1/12 → E'=0.5; BT.1886 V=1 → L=1), and (c) monotonicity
+  across each curve.
 
 ## [0.1.5](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.4...v0.1.5) - 2026-05-03
 

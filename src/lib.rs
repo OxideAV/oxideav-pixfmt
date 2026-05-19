@@ -62,6 +62,7 @@ pub mod pal8;
 pub mod palette;
 pub mod rgb;
 mod simd_dispatch;
+pub mod transfer;
 pub mod yuv;
 mod yuv_simd;
 

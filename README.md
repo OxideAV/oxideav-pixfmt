@@ -260,17 +260,45 @@ you can call first to skip `convert()` when the source already matches.
 The matrix is selected at runtime via `ConvertOptions::color_space` (for
 `convert()`) or `YuvMatrix` (for the low-level entry points):
 
-| variant              | primaries | range   | use case                     |
-| -------------------- | --------- | ------- | ---------------------------- |
-| `Bt601Limited`       | BT.601    | 16–235  | SD video, MPEG/H.264 default |
-| `Bt601Full`          | BT.601    | 0–255   | JPEG with YCbCr SOF          |
-| `Bt709Limited`       | BT.709    | 16–235  | HD video                     |
-| `Bt709Full`          | BT.709    | 0–255   | full-range HD, certain codecs |
+| variant              | primaries | range   | use case                       |
+| -------------------- | --------- | ------- | ------------------------------ |
+| `Bt601Limited`       | BT.601    | 16–235  | SD video, MPEG/H.264 default   |
+| `Bt601Full`          | BT.601    | 0–255   | JPEG with YCbCr SOF            |
+| `Bt709Limited`       | BT.709    | 16–235  | HD video                       |
+| `Bt709Full`          | BT.709    | 0–255   | full-range HD, certain codecs  |
+| `Bt2020Limited`      | BT.2020   | 16–235  | UHDTV, HDR carriage (NCL)      |
+| `Bt2020Full`         | BT.2020   | 0–255   | full-range UHDTV               |
+
+BT.2020 uses the non-constant-luminance Y'CbCr coefficients from
+ITU-R BT.2020-2 Table 4 (`kr = 0.2627, kb = 0.0593`); the same matrix
+is reused for the BT.2100-3 Table 6 HDR signal format.
 
 Range rescaling between `YuvJ*` (full) and `Yuv*` (limited) planes is
 exposed both through `convert()` and directly as
 `yuv::{limited_to_full_luma, limited_to_full_chroma, full_to_limited_luma, full_to_limited_chroma}`
 so callers can flip range without going through RGB.
+
+### Transfer functions
+
+The `transfer` module exposes opto-electronic and electro-optical
+transfer functions on `f32`. They are orthogonal to the YUV/RGB matrix
+above — pair them as the HDR / SDR pipeline requires:
+
+| function                  | spec source                          |
+| ------------------------- | ------------------------------------ |
+| `bt709_oetf` (+ inverse)  | ITU-R BT.2020-2 Table 4 (10-bit α, β) |
+| `bt2020_12_oetf`          | ITU-R BT.2020-2 Table 4 (12-bit α, β) |
+| `bt1886_eotf` (+ inverse) | ITU-R BT.1886 Annex 1, γ = 2.40       |
+| `pq_eotf` / `pq_inverse_eotf` | SMPTE ST 2084 / ITU-R BT.2100-3 Table 4 |
+| `hlg_oetf` (+ inverse)    | ITU-R BT.2100-3 Table 5               |
+| `hlg_apply_ootf`          | BT.2100-3 Table 5 HLG OOTF row        |
+| `hlg_system_gamma(l_w)`   | BT.2100-3 Note 5f                     |
+
+PQ peak luminance is exposed as `PQ_PEAK_CDM2 = 10_000.0` (signal
+value 1.0 maps to that luminance per BT.2100-3 Table 4). The HLG
+inverse OETF returns relative scene light; pass it through
+`hlg_apply_ootf` with the user gain α and system gamma γ to obtain
+display-light values.
 
 ## Performance
 

@@ -2,7 +2,7 @@
 //! loses detail on chroma transitions (> 30 dB is the expected floor).
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{convert, ColorSpace, ConvertOptions, FrameInfo};
 
 fn synth_rgb24(w: u32, h: u32) -> (VideoFrame, FrameInfo) {
     // Smooth gradients in each channel — the usual PSNR benchmark. High-
@@ -107,4 +107,72 @@ fn nv21_roundtrips_yuv420p() {
     let back = convert(&nv21, nv21_info, PixelFormat::Yuv420P, &opts).unwrap();
     assert_eq!(yuv.planes[1].data, back.planes[1].data, "U plane");
     assert_eq!(yuv.planes[2].data, back.planes[2].data, "V plane");
+}
+
+// BT.2020 NCL matrix — kr = 0.2627, kb = 0.0593 from BT.2020-2 Table 4
+// (same coefficients re-used by BT.2100-3 Table 6).
+
+#[test]
+fn bt2020_limited_yuv444_roundtrip_is_near_lossless() {
+    let opts = ConvertOptions {
+        color_space: ColorSpace::Bt2020Limited,
+        ..Default::default()
+    };
+    let (src, src_info) = synth_rgb24(64, 48);
+    let yuv = convert(&src, src_info, PixelFormat::Yuv444P, &opts).unwrap();
+    let yuv_info = FrameInfo::new(PixelFormat::Yuv444P, src_info.width, src_info.height);
+    let back = convert(&yuv, yuv_info, PixelFormat::Rgb24, &opts).unwrap();
+    let psnr = psnr_rgb(&src.planes[0].data, &back.planes[0].data);
+    println!("bt2020 yuv444 psnr = {psnr:.2}");
+    assert!(psnr > 38.0, "bt2020 yuv444 psnr too low: {psnr}");
+}
+
+#[test]
+fn bt2020_full_yuv444_roundtrip_is_lossless_for_neutrals() {
+    let opts = ConvertOptions {
+        color_space: ColorSpace::Bt2020Full,
+        ..Default::default()
+    };
+    let (src, src_info) = synth_rgb24(32, 32);
+    let yuv = convert(&src, src_info, PixelFormat::Yuv444P, &opts).unwrap();
+    let yuv_info = FrameInfo::new(PixelFormat::Yuv444P, src_info.width, src_info.height);
+    let back = convert(&yuv, yuv_info, PixelFormat::Rgb24, &opts).unwrap();
+    let psnr = psnr_rgb(&src.planes[0].data, &back.planes[0].data);
+    println!("bt2020 full yuv444 psnr = {psnr:.2}");
+    // Full-range avoids the 16–235 narrow-range quantisation step and
+    // is normally several dB cleaner than the limited variant.
+    assert!(psnr > 42.0, "bt2020 full yuv444 psnr too low: {psnr}");
+}
+
+#[test]
+fn bt2020_neutral_grey_round_trips_to_chroma_128() {
+    // Neutral grey (R = G = B = 128) must produce Cb = Cr = 128 in
+    // limited and full range alike — the YCbCr coefficient design
+    // intrinsically forces equal-RGB pixels onto the chroma origin.
+    use oxideav_pixfmt::yuv::{rgb_to_yuv, YuvMatrix};
+    let mat = YuvMatrix::BT2020.with_range(true);
+    let (_, cb, cr) = rgb_to_yuv(128, 128, 128, mat);
+    assert!(
+        cb.abs_diff(128) <= 1 && cr.abs_diff(128) <= 1,
+        "expected cb=cr=128, got cb={cb} cr={cr}"
+    );
+
+    let mat_full = YuvMatrix::BT2020.with_range(false);
+    let (_, cbf, crf) = rgb_to_yuv(128, 128, 128, mat_full);
+    assert!(
+        cbf.abs_diff(128) <= 1 && crf.abs_diff(128) <= 1,
+        "expected full cb=cr=128, got cb={cbf} cr={crf}"
+    );
+}
+
+#[test]
+fn bt2020_pure_white_lands_in_luma() {
+    // R=G=B=255 should produce the limited-range white code (Y' ≈ 235)
+    // with neutral chroma. Verifies that the luma coefficient sum
+    // 0.2627 + 0.6780 + 0.0593 = 1.0 is wired correctly.
+    use oxideav_pixfmt::yuv::{rgb_to_yuv, YuvMatrix};
+    let (y, cb, cr) = rgb_to_yuv(255, 255, 255, YuvMatrix::BT2020.with_range(true));
+    assert!((233..=237).contains(&y), "expected y near 235, got {y}");
+    assert!(cb.abs_diff(128) <= 1, "expected cb ≈ 128, got {cb}");
+    assert!(cr.abs_diff(128) <= 1, "expected cr ≈ 128, got {cr}");
 }

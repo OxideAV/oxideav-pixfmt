@@ -50,6 +50,10 @@ pub enum Dither {
 }
 
 /// YUV / RGB matrix selection.
+///
+/// BT.2020 variants implement the non-constant-luminance Y'CbCr matrix
+/// from ITU-R BT.2020-2 Table 4 (kr=0.2627, kb=0.0593). The same
+/// coefficients are reused by ITU-R BT.2100-3 Table 6 for HDR video.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ColorSpace {
     #[default]
@@ -57,6 +61,8 @@ pub enum ColorSpace {
     Bt601Full,
     Bt709Limited,
     Bt709Full,
+    Bt2020Limited,
+    Bt2020Full,
 }
 
 /// Options bundle passed to [`convert`].

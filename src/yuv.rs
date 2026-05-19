@@ -30,6 +30,20 @@ impl YuvMatrix {
         kb: 0.0722,
         limited: true,
     };
+    /// BT.2020 non-constant luminance Y'CbCr coefficients per
+    /// `docs/video/signal-metadata/R-REC-BT.2020-2-201510-I.pdf` Table 4
+    /// (NCL column): `Y' = 0.2627 R' + 0.6780 G' + 0.0593 B'`. The Cb
+    /// divisor 1.8814 = 2*(1 - 0.0593) and Cr divisor 1.4746 = 2*(1 - 0.2627)
+    /// fall out of the standard k-coefficient construction shared with
+    /// BT.709, so the Q15 matrices generated here are correct without
+    /// additional special-casing. Also used (with identical NCL
+    /// coefficients) for BT.2100 Y'C'BC'R signal format per
+    /// `R-REC-BT.2100-3-202502-I.pdf` Table 6.
+    pub const BT2020: Self = Self {
+        kr: 0.2627,
+        kb: 0.0593,
+        limited: true,
+    };
     pub fn with_range(mut self, limited: bool) -> Self {
         self.limited = limited;
         self
@@ -41,6 +55,8 @@ impl YuvMatrix {
             ColorSpace::Bt601Full => Self::BT601.with_range(false),
             ColorSpace::Bt709Limited => Self::BT709.with_range(true),
             ColorSpace::Bt709Full => Self::BT709.with_range(false),
+            ColorSpace::Bt2020Limited => Self::BT2020.with_range(true),
+            ColorSpace::Bt2020Full => Self::BT2020.with_range(false),
         }
     }
 }
