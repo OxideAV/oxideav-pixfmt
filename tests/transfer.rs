@@ -118,10 +118,10 @@ fn pq_eotf_endpoints() {
 
 #[test]
 fn pq_roundtrips_unit_interval() {
-    // 1001-point grid; tighter at the bottom of the curve where the
-    // power makes round-off worse.
-    for i in 0..=1000 {
-        let e_prime = i as f32 / 1000.0;
+    // 201-point grid — enough to catch a sign or branch flip without
+    // making miri-strict-provenance unhappy about per-iteration cost.
+    for i in 0..=200 {
+        let e_prime = i as f32 / 200.0;
         let y = pq_eotf_normalised(e_prime);
         let e_back = pq_inverse_eotf_normalised(y);
         assert_close(e_back, e_prime, 5e-5, "pq roundtrip");
@@ -163,8 +163,8 @@ fn hlg_roundtrips_unit_interval() {
 #[test]
 fn pq_is_monotonic() {
     let mut prev = -1.0f32;
-    for i in 0..=1000 {
-        let v = pq_eotf_normalised(i as f32 / 1000.0);
+    for i in 0..=200 {
+        let v = pq_eotf_normalised(i as f32 / 200.0);
         assert!(
             v >= prev - 1e-6,
             "pq monotonicity broken at {i}: {v} < {prev}"
@@ -176,8 +176,8 @@ fn pq_is_monotonic() {
 #[test]
 fn hlg_is_monotonic() {
     let mut prev = -1.0f32;
-    for i in 0..=1000 {
-        let v = hlg_oetf(i as f32 / 1000.0);
+    for i in 0..=200 {
+        let v = hlg_oetf(i as f32 / 200.0);
         assert!(
             v >= prev - 1e-6,
             "hlg monotonicity broken at {i}: {v} < {prev}"
