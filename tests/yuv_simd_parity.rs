@@ -171,8 +171,15 @@ fn ref_yuv422(yp: &[u8], up: &[u8], vp: &[u8], w: usize, h: usize, m: YuvMatrix)
 fn simd_yuv420_matches_scalar_per_pixel() {
     // The per-pixel scalar yuv_to_rgb is the golden reference. The SIMD
     // batch path should agree with it within ±1 LSB at every pixel.
-    let sizes = [(64, 32), (128, 48), (1280, 32)];
-    for (w, h) in sizes {
+    // Under miri the 1280×32 entry dominates run-time without exercising
+    // the actual SIMD intrinsics (miri runs the scalar fall-back anyway),
+    // so we shrink the corpus there. cfg(miri) is the canonical miri-skip
+    // attribute — it's a build-time toggle, NOT `#[ignore]`.
+    #[cfg(miri)]
+    let sizes: &[(usize, usize)] = &[(32, 16)];
+    #[cfg(not(miri))]
+    let sizes: &[(usize, usize)] = &[(64, 32), (128, 48), (1280, 32)];
+    for &(w, h) in sizes {
         let cw = w / 2;
         let ch = h / 2;
         let yp = lcg_bytes(0xA1, w * h);
@@ -192,8 +199,11 @@ fn simd_yuv420_matches_scalar_per_pixel() {
 
 #[test]
 fn simd_yuv422_matches_scalar_per_pixel() {
-    let sizes = [(64, 32), (320, 16)];
-    for (w, h) in sizes {
+    #[cfg(miri)]
+    let sizes: &[(usize, usize)] = &[(32, 16)];
+    #[cfg(not(miri))]
+    let sizes: &[(usize, usize)] = &[(64, 32), (320, 16)];
+    for &(w, h) in sizes {
         let cw = w / 2;
         let yp = lcg_bytes(0x11, w * h);
         let up = lcg_bytes(0x22, cw * h);
@@ -212,8 +222,11 @@ fn simd_yuv422_matches_scalar_per_pixel() {
 
 #[test]
 fn simd_yuv444_matches_scalar_per_pixel() {
-    let sizes = [(32, 32), (320, 8)];
-    for (w, h) in sizes {
+    #[cfg(miri)]
+    let sizes: &[(usize, usize)] = &[(16, 8)];
+    #[cfg(not(miri))]
+    let sizes: &[(usize, usize)] = &[(32, 32), (320, 8)];
+    for &(w, h) in sizes {
         let yp = lcg_bytes(0xDE, w * h);
         let up = lcg_bytes(0xAD, w * h);
         let vp = lcg_bytes(0xBE, w * h);
@@ -231,8 +244,11 @@ fn simd_yuv444_matches_scalar_per_pixel() {
 
 #[test]
 fn simd_rgb24_to_yuv420_matches_scalar_per_pixel() {
-    let sizes = [(32, 16), (320, 16)];
-    for (w, h) in sizes {
+    #[cfg(miri)]
+    let sizes: &[(usize, usize)] = &[(16, 8)];
+    #[cfg(not(miri))]
+    let sizes: &[(usize, usize)] = &[(32, 16), (320, 16)];
+    for &(w, h) in sizes {
         let cw = w / 2;
         let ch = h / 2;
         let src = lcg_bytes(0x55, w * h * 3);
@@ -288,8 +304,11 @@ fn simd_rgb24_to_yuv420_matches_scalar_per_pixel() {
 
 #[test]
 fn simd_rgb24_to_yuv444_matches_scalar_per_pixel() {
-    let sizes = [(24, 8), (320, 4)];
-    for (w, h) in sizes {
+    #[cfg(miri)]
+    let sizes: &[(usize, usize)] = &[(16, 4)];
+    #[cfg(not(miri))]
+    let sizes: &[(usize, usize)] = &[(24, 8), (320, 4)];
+    for &(w, h) in sizes {
         let src = lcg_bytes(0x77, w * h * 3);
         for m in matrices() {
             let (y1, u1, v1) = rgb_to_yuv444(&src, w, h, m);
