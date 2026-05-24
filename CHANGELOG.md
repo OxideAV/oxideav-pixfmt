@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HLG E=1/12 → E'=0.5; BT.1886 V=1 → L=1), and (c) monotonicity
   across each curve.
 
+### Changed
+
+- `criterion` is now an optional dependency behind a new `bench` feature
+  (the two `[[bench]]` targets carry `required-features = ["bench"]`).
+  Criterion pulls the `alloca` native crate, whose glibc allocator hooks
+  abort the integration-test process on Linux (`Fatal glibc error:
+  malloc.c sysmalloc assertion failed`). Keeping criterion off the
+  default graph stops it linking into the test binaries; run benches with
+  `cargo bench --features bench`. No library-API change.
+
 ## [0.1.5](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.4...v0.1.5) - 2026-05-03
 
 ### Other

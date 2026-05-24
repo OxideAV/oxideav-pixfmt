@@ -16,16 +16,23 @@ categories = ["multimedia::video", "multimedia::images"]
 # Enable the `std::simd` (portable_simd) conversion path. Requires a
 # nightly toolchain because `core::simd` is unstable.
 nightly = []
+# Pull in criterion for the benches. Kept off by default so the
+# integration-test binaries do not link criterion's `alloca` native
+# dependency, whose glibc allocator hooks abort the process on Linux
+# (`Fatal glibc error: malloc.c sysmalloc assertion failed`). Run the
+# benches with `cargo bench --features bench`.
+bench = ["dep:criterion"]
 
 [dependencies]
 oxideav-core = "0.1"
-[dev-dependencies]
-criterion = "0.8"
+criterion = { version = "0.8", optional = true }
 
 [[bench]]
 name = "yuv_rgb"
 harness = false
+required-features = ["bench"]
 
 [[bench]]
 name = "pixel_ops"
 harness = false
+required-features = ["bench"]

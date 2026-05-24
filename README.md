@@ -357,18 +357,22 @@ then cached:
 
 ## Benchmarks
 
+Criterion is an optional dependency behind the `bench` feature (kept off
+the default graph so the test binaries don't link its `alloca` native
+dep), so the benches need `--features bench`:
+
 ```sh
-cargo bench                                      # all suites
-cargo bench --bench yuv_rgb                      # just YUV encode/decode
-cargo bench --bench pixel_ops                    # RGB swizzle, NV12, chroma resample, gray, deep-RGB
-OXIDEAV_PIXFMT_FORCE_SCALAR=1 cargo bench        # scalar baseline for comparison
+cargo bench --features bench                              # all suites
+cargo bench --features bench --bench yuv_rgb             # just YUV encode/decode
+cargo bench --features bench --bench pixel_ops          # RGB swizzle, NV12, chroma resample, gray, deep-RGB
+OXIDEAV_PIXFMT_FORCE_SCALAR=1 cargo bench --features bench  # scalar baseline for comparison
 ```
 
 Portable-SIMD numbers (nightly only):
 
 ```sh
-cargo +nightly bench --features nightly
-OXIDEAV_PIXFMT_FORCE_PORTABLE_SIMD=1 cargo +nightly bench --features nightly
+cargo +nightly bench --features bench,nightly
+OXIDEAV_PIXFMT_FORCE_PORTABLE_SIMD=1 cargo +nightly bench --features bench,nightly
 ```
 
 ## License
