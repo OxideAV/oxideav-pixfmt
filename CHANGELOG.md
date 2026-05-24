@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Randomised property / round-trip test suite (`tests/property.rs`).
+  A self-contained xorshift PRNG (no new dependency) sweeps the whole
+  conversion table with pseudo-random pixel buffers across many
+  dimensions and non-tight source strides. It pins the lossless families
+  as byte-exact (RGB swizzles, 3↔4 alpha promote/demote, 8↔16-bit
+  promote/demote, NV12/NV21 ↔ Yuv420P interleave, YuvJ↔Yuv rescale
+  stability), bounds the tolerance families (YUV↔RGB 4:4:4 through the
+  Q15 matrices at ≤3 LSB/channel — measured worst 2 over 300 000
+  pixels × 3 matrices × 2 ranges; `premultiply↔unpremultiply` at the
+  documented `ceil(255/a)`, ≤1 LSB for α ≥ 128), checks full-frame
+  YUV↔RGB PSNR floors (4:4:4 > 36 dB, 4:2:2 > 32 dB, 4:2:0 > 29 dB)
+  across all six colour spaces, and asserts panic-freedom (Ok-or-clean-
+  Err, never panic) for every supported pair plus the odd-dimension
+  RGB→4:2:0 divisibility guard. Hardening only — no behaviour change.
 - `FormatInfo::of` arms for the 6 high-bit-depth planar GBR(A) variants
   (`Gbrp10Le`, `Gbrap10Le`, `Gbrp12Le`, `Gbrap12Le`, `Gbrp14Le`,
   `Gbrap14Le`) added in `oxideav-core` 0.1.18, plus the previously
