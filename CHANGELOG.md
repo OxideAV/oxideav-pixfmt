@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Randomised property / round-trip test suite (`tests/property.rs`).
+- Randomised property / round-trip test suite (the `prop_*` tests in
+  `tests/conversions.rs`).
   A self-contained xorshift PRNG (no new dependency) sweeps the whole
   conversion table with pseudo-random pixel buffers across many
   dimensions and non-tight source strides. It pins the lossless families

@@ -306,10 +306,10 @@ Every converter has a scalar Q15 fixed-point reference; SIMD paths are
 validated against it to ±1 LSB in the test suite. Dispatch is lazy and
 cached on first call per process.
 
-A randomised property suite (`tests/property.rs`, self-contained
-xorshift PRNG, no extra deps) hammers the whole conversion table with
-pseudo-random buffers and non-tight strides: it pins the lossless
-round-trips (RGB swizzles, 3↔4 alpha promote/demote, 8↔16-bit,
+A randomised property suite (the `prop_*` tests in `tests/conversions.rs`,
+self-contained xorshift PRNG, no extra deps) hammers the whole conversion
+table with pseudo-random buffers and non-tight strides: it pins the
+lossless round-trips (RGB swizzles, 3↔4 alpha promote/demote, 8↔16-bit,
 NV12/NV21 ↔ Yuv420P) as byte-exact, bounds the YUV↔RGB 4:4:4 round-trip
 at ≤3 LSB/channel (measured 2) and `premultiply↔unpremultiply` at the
 documented `ceil(255/a)` (≤1 for α ≥ 128), and asserts panic-freedom
