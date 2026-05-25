@@ -46,6 +46,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HLG E=1/12 → E'=0.5; BT.1886 V=1 → L=1), and (c) monotonicity
   across each curve.
 
+### Fixed
+
+- **`rgb48_to_rgb24` AVX2 path was writing 4 bytes past the end of `dst`
+  on every call.** The SIMD inner loop stored a full 16-byte register
+  every 2 pixels (advancing the destination cursor by 6) and only
+  reserved a 2-pixel scalar tail (6 bytes), so the final iteration's
+  10-byte spill ran 4 bytes past `dst[..pixels*3]`. On multi-row
+  buffers the stomp landed in the next row (where it was promptly
+  overwritten); on the **final** row the bytes went past the backing
+  `Vec`'s allocation. When those happened to be glibc allocator
+  metadata, malloc's `sysmalloc` assertion fired and aborted the
+  process — observed on x86_64 Linux / Windows CI as
+  `Fatal glibc error: malloc.c:2599 (sysmalloc): assertion failed`
+  whenever a property-style sweep raised allocator churn enough to
+  surface the corruption (commit `80e1d09` → reverted). Fix: enlarge
+  the scalar-tail reserve from 2 to 6 pixels so the SIMD store's full
+  16-byte footprint always fits inside the destination slice, and pin
+  the contract with a regression unit test that runs `pixels = 1..=64`
+  through tightly-sized `Vec` destinations plus an alloc-churn loop.
+
 ### Changed
 
 - `criterion` is now an optional dependency behind a new `bench` feature
@@ -55,6 +75,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malloc.c sysmalloc assertion failed`). Keeping criterion off the
   default graph stops it linking into the test binaries; run benches with
   `cargo bench --features bench`. No library-API change.
+
+### Added
+
+- Re-introduce `tests/property.rs`: randomised xorshift PRNG sweep over
+  the conversion surface (RGB swizzles, 3↔4 alpha promote/demote,
+  8↔16-bit promote/demote, NV12/NV21↔Yuv420P interleave, YuvJ↔Yuv
+  range rescale, panic-freedom, YUV↔RGB tolerance/PSNR floors,
+  premul/unpremul bound). Originally landed in `80e1d09`, reverted in
+  `6ea6cc7` because it exposed the `rgb48_to_rgb24` AVX2 overflow
+  above. With that bug fixed the suite passes on every CI target.
 
 ## [0.1.5](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.4...v0.1.5) - 2026-05-03
 

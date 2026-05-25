@@ -153,16 +153,34 @@ unsafe fn rgb48_to_rgb24_avx2(src: &[u8], dst: &mut [u8], pixels: usize) {
     ];
     let shuf = _mm_loadu_si128(SHUF.as_ptr() as *const __m128i);
 
-    // Leave a 2-pixel tail so our 16-byte load never reads past end.
-    let simd_pixels = pixels.saturating_sub(2);
+    // Each SIMD iteration writes a full 16-byte register but only the
+    // first 6 bytes are meaningful, then advances the dst cursor by 6
+    // on the next iteration. The *final* SIMD iteration's 16-byte
+    // store must fit entirely within `dst[..pixels*3]` — otherwise it
+    // walks past the end of the destination slice and corrupts what
+    // follows (the next row of the parent buffer, or for the final
+    // row, the heap allocator headers right after the destination
+    // Vec).
+    //
+    // Required: chunks*6 + 16 ≤ pixels*3, so chunks ≤ (pixels*3 - 16)/6.
+    // Equivalently, the SIMD loop must leave at least
+    // ceil(16/3) = 6 dst-pixels' worth of room (18 bytes) for the tail
+    // to fall inside the slice. Reserve a 6-pixel tail.
+    //
+    // (The previous "2-pixel tail" reserve only protected the read
+    // side; the write side over-ran the slice by 4 bytes on every
+    // call. On x86_64 Linux CI this manifested as a glibc malloc
+    // sysmalloc assertion when the corrupted bytes happened to be
+    // allocator metadata.)
+    let simd_pixels = pixels.saturating_sub(6);
     let chunks = simd_pixels / 2;
     for c in 0..chunks {
         let soff = c * 12;
         let doff = c * 6;
         let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
         let out = _mm_shuffle_epi8(v, shuf);
-        // Store 16 bytes; next iteration (or scalar tail) overwrites
-        // the 10 zero bytes.
+        // Store 16 bytes; the next iteration's 6-byte advance and
+        // scalar tail together overwrite the 10 dead bytes.
         _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
     }
     let tail_start = chunks * 2;
@@ -208,6 +226,54 @@ pub fn rgba_to_rgba64(src: &[u8], dst: &mut [u8], pixels: usize) {
             let off = i * 8 + c * 2;
             dst[off] = (v & 0xFF) as u8;
             dst[off + 1] = (v >> 8) as u8;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: `rgb48_to_rgb24` used to write 4 bytes past the end of
+    /// `dst` because the SIMD path emitted a full 16-byte store every two
+    /// pixels and only reserved a 2-pixel scalar tail (6 bytes). On
+    /// x86_64 Linux CI the stomp tripped a glibc malloc sysmalloc
+    /// assertion at allocator-metadata boundaries. We pin the contract
+    /// here with a tight-fit `dst` whose backing Vec ends exactly at
+    /// `pixels*3` — any write past the slice corrupts memory the heap
+    /// is about to reuse.
+    #[test]
+    fn rgb48_to_rgb24_does_not_write_past_dst() {
+        // Try every pixel count from 1..=64 so we cover both the
+        // pre-SIMD short cases and the SIMD-with-tail case.
+        for pixels in 1..=64 {
+            let mut src = vec![0u8; pixels * 6];
+            for (i, b) in src.iter_mut().enumerate() {
+                *b = (i & 0xff) as u8;
+            }
+            let mut dst = vec![0u8; pixels * 3];
+            rgb48_to_rgb24(&src, &mut dst, pixels);
+            // Verify every dst byte matches the scalar reference.
+            for i in 0..pixels {
+                assert_eq!(dst[i * 3], src[i * 6 + 1], "px {i}/{pixels} R");
+                assert_eq!(dst[i * 3 + 1], src[i * 6 + 3], "px {i}/{pixels} G");
+                assert_eq!(dst[i * 3 + 2], src[i * 6 + 5], "px {i}/{pixels} B");
+            }
+        }
+    }
+
+    /// Hammer the SIMD path by allocating + freeing the dst Vec a few
+    /// thousand times — if any earlier call corrupted heap metadata,
+    /// glibc's malloc will trip a sysmalloc assertion on a subsequent
+    /// free.
+    #[test]
+    fn rgb48_to_rgb24_alloc_churn_does_not_corrupt_heap() {
+        for _ in 0..2000 {
+            let pixels = 32;
+            let src = vec![0xa5u8; pixels * 6];
+            let mut dst = vec![0u8; pixels * 3];
+            rgb48_to_rgb24(&src, &mut dst, pixels);
+            drop(dst);
         }
     }
 }
