@@ -86,6 +86,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   16-byte footprint always fits inside the destination slice, and pin
   the contract with a regression unit test that runs `pixels = 1..=64`
   through tightly-sized `Vec` destinations plus an alloc-churn loop.
+- **Pinned the over-store contract on the three sibling AVX2 swizzle
+  paths that share the `rgb48_to_rgb24` bug shape.** `swizzle3`
+  (15-byte advance, 16-byte store) and `rgba4_to_rgb3` (12-byte advance,
+  16-byte store) emit a full register per iteration and rely on a
+  reserved scalar tail (`pixels - 5` / `pixels - 4`) to keep the final
+  store inside `dst`. Both were already correct, but had no regression
+  test that would catch a shrunk tail reserve: the existing parity tests
+  compare against an oversized scratch buffer, so a reintroduced over-run
+  would stomp adjacent heap *without* failing a value assertion (exactly
+  the silent-corruption mode that turned into a glibc `sysmalloc` abort
+  for `rgb48_to_rgb24`). Added `src/rgb/swizzle_simd.rs` regression tests:
+  tight-fit `dst` Vecs (backing allocation ends exactly at the output
+  length) across `pixels = 1..=80`, plus a 2000-iteration alloc-churn
+  loop that trips the allocator on any leaked over-write. `swizzle4` and
+  `rgb3_to_rgba4` (store == advance, can't over-run) are covered too to
+  lock in their read-side tail reserves. +5 unit tests; no API change.
 
 ### Changed
 

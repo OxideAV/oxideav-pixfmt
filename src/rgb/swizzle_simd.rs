@@ -337,3 +337,110 @@ unsafe fn avx2_swizzle3(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 3]
         perm,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These three SIMD paths share the over-store pattern that caused the
+    // `rgb48_to_rgb24` glibc-abort regression (commit 2e821b7): each AVX2
+    // iteration writes a full 16-byte register but advances the dst cursor
+    // by fewer bytes (12 for rgba4→rgb3, 15 for swizzle3), relying on the
+    // reserved scalar tail to overwrite the dead bytes and keep the final
+    // iteration's 16-byte footprint inside `dst`. If a future edit shrinks
+    // the `-4` / `-5` tail reserve, the last store walks past the slice and
+    // corrupts adjacent heap — on x86_64 Linux that surfaces as a glibc
+    // `sysmalloc` assertion abort, *not* a value mismatch, so a content
+    // comparison against an oversized buffer would silently miss it. These
+    // tests pin the write footprint with tightly-sized `dst` Vecs (backing
+    // allocation ends exactly at the output length) plus an alloc-churn
+    // loop so a reintroduced over-run trips the allocator deterministically.
+    //
+    // `swizzle4` / `rgb3_to_rgba4` advance the dst cursor by the same number
+    // of bytes they store (16), so they can't over-run; they're covered here
+    // anyway for completeness and to lock in the read-side tail reserve.
+
+    fn ramp(n: usize) -> Vec<u8> {
+        (0..n).map(|i| (i & 0xff) as u8).collect()
+    }
+
+    #[test]
+    fn swizzle3_does_not_write_past_dst() {
+        // Identity 3-byte permutation; check value + tight write footprint
+        // across every pixel count spanning the 5-pixel AVX2 block + tail.
+        let perm = [0u8, 1, 2];
+        for pixels in 1..=80 {
+            let src = ramp(pixels * 3);
+            let mut dst = vec![0u8; pixels * 3];
+            swizzle3_perm(&src, &mut dst, pixels, perm);
+            assert_eq!(dst, src[..pixels * 3], "swizzle3 pixels={pixels}");
+        }
+    }
+
+    #[test]
+    fn rgba4_to_rgb3_does_not_write_past_dst() {
+        // perm4 picks src bytes 0,1,2 of each 4-byte group into the 3-byte
+        // output. Exercise the 4-pixel AVX2 block + 4-pixel reserved tail.
+        let perm4 = [0u8, 1, 2];
+        for pixels in 1..=80 {
+            let src = ramp(pixels * 4);
+            let mut dst = vec![0u8; pixels * 3];
+            rgba4_to_rgb3_perm(&src, &mut dst, pixels, perm4);
+            for i in 0..pixels {
+                assert_eq!(dst[i * 3], src[i * 4], "rgba4→rgb3 px {i}/{pixels}");
+                assert_eq!(dst[i * 3 + 1], src[i * 4 + 1], "rgba4→rgb3 px {i}/{pixels}");
+                assert_eq!(dst[i * 3 + 2], src[i * 4 + 2], "rgba4→rgb3 px {i}/{pixels}");
+            }
+        }
+    }
+
+    #[test]
+    fn rgb3_to_rgba4_does_not_read_or_write_past_bounds() {
+        // perm3: bytes 0,1,2 then a synthesised alpha (0xFF). Tight src AND
+        // dst so the 16-byte SIMD load can't over-read past src either.
+        let perm3 = [0u8, 1, 2, 0xFF];
+        for pixels in 1..=80 {
+            let src = ramp(pixels * 3);
+            let mut dst = vec![0u8; pixels * 4];
+            rgb3_to_rgba4_perm(&src, &mut dst, pixels, perm3);
+            for i in 0..pixels {
+                assert_eq!(dst[i * 4], src[i * 3], "rgb3→rgba4 px {i}/{pixels}");
+                assert_eq!(dst[i * 4 + 1], src[i * 3 + 1], "rgb3→rgba4 px {i}/{pixels}");
+                assert_eq!(dst[i * 4 + 2], src[i * 3 + 2], "rgb3→rgba4 px {i}/{pixels}");
+                assert_eq!(dst[i * 4 + 3], 255, "rgb3→rgba4 alpha px {i}/{pixels}");
+            }
+        }
+    }
+
+    #[test]
+    fn swizzle4_does_not_write_past_dst() {
+        let perm = [0u8, 1, 2, 3];
+        for pixels in 1..=80 {
+            let src = ramp(pixels * 4);
+            let mut dst = vec![0u8; pixels * 4];
+            swizzle4_perm(&src, &mut dst, pixels, perm);
+            assert_eq!(dst, src[..pixels * 4], "swizzle4 pixels={pixels}");
+        }
+    }
+
+    // Hammer the over-store paths by allocating + freeing tight dst Vecs
+    // thousands of times: a heap stomp from an earlier iteration trips
+    // glibc's malloc on a later free even when the comparison above passed
+    // (the spill may land in metadata the comparison never reads).
+    #[test]
+    fn swizzle_simd_alloc_churn_does_not_corrupt_heap() {
+        for _ in 0..2000 {
+            // swizzle3: 33 pixels = 6 full 5-pixel SIMD blocks + tail.
+            let s3 = vec![0xa5u8; 33 * 3];
+            let mut d3 = vec![0u8; 33 * 3];
+            swizzle3_perm(&s3, &mut d3, 33, [0, 1, 2]);
+            drop(d3);
+
+            // rgba4→rgb3: 33 pixels exercises the 12-byte-advance store.
+            let s4 = vec![0x5au8; 33 * 4];
+            let mut d4 = vec![0u8; 33 * 3];
+            rgba4_to_rgb3_perm(&s4, &mut d4, 33, [0, 1, 2]);
+            drop(d4);
+        }
+    }
+}
