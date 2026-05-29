@@ -39,6 +39,9 @@
 //! - YuvJ420P/422P/444P ↔ Yuv* equivalents — plane copy with range
 //!   rescale.
 //! - Nv12/Nv21 ↔ Yuv420P.
+//! - Yuyv422/Uyvy422 packed 4:2:2 ↔ Yuv422P, plus direct ↔ Rgb24/Rgba
+//!   under BT.601/709/2020 (limited or full range). Yuyv ↔ Uyvy is a
+//!   zero-math byte swap.
 //! - Gray8 ↔ Rgb24/Rgba broadcast.
 //! - Rgb48Le ↔ Rgb24, Rgba64Le ↔ Rgba (bit-shift).
 //! - Gray16Le ↔ Gray8.

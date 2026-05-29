@@ -42,6 +42,7 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | YUV planar ↔ RGB        | `Yuv420P` / `Yuv422P` / `Yuv444P` ↔ `Rgb24` / `Rgba`                        |
 | Chroma subsampling      | `4:4:4` ↔ `4:2:2` ↔ `4:2:0` (SIMD-accelerated up- and down-sample)          |
 | Semi-planar             | `NV12` / `NV21` ↔ `Yuv420P`                                                 |
+| Packed 4:2:2            | `Yuyv422` / `Uyvy422` ↔ `Yuv422P` / `Rgb24` / `Rgba` + Yuyv ↔ Uyvy swap     |
 | Full ↔ limited range    | `YuvJ420P` / `YuvJ422P` / `YuvJ444P` ↔ `Yuv*`                               |
 | Grayscale / mono        | `Gray8` / `Gray16Le`, `MonoBlack` / `MonoWhite` ↔ `Gray8`                   |
 | Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither |

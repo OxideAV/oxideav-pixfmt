@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Packed 4:2:2 conversions for `Yuyv422` (Y0 U0 Y1 V0) and `Uyvy422`
+  (U0 Y0 V0 Y1). Both variants had `FormatInfo::of` entries since
+  ~0.1.2 but no actual conversion path, so any caller hitting V4L2 /
+  USB-webcam / DV / AVI feeds with `YUYV` or `UYVY` codec tags got
+  `Error::Unsupported` from `convert()`. Now wired:
+  - `Yuyv422` ↔ `Yuv422P` and `Uyvy422` ↔ `Yuv422P` — pure
+    deinterleave / interleave shuffles with no colour math.
+  - `Yuyv422` ↔ `Uyvy422` — two byte-swaps per 4-byte quad
+    (`Y0 U` ↔ `U Y0`, `Y1 V` ↔ `V Y1`), exposed as the involutive
+    `yuv::yuyv_uyvy_swap` helper.
+  - `Yuyv422` / `Uyvy422` ↔ `Rgb24` / `Rgba` direct entries that
+    bridge through the existing planar 4:2:2 colour math under any
+    `ColorSpace` (BT.601/709/2020, limited/full). PSNR on a smooth
+    gradient round-trip stays > 46 dB at BT.601 limited.
+  - Odd widths are rejected with `Error::Invalid` (packed 4:2:2 has
+    no representation for an unpaired luma sample) rather than
+    silently truncating.
+  - New `tests/packed_yuv422.rs` plus 3 unit tests in `yuv.rs` pin
+    byte positions on hand-built 2×1 / 4×1 frames and check
+    bit-exact planar↔packed round-trips on 16×8 / 32×16 random
+    content. Total new test coverage: +13 tests.
 - `FormatInfo::of` arms for the 6 high-bit-depth planar GBR(A) variants
   (`Gbrp10Le`, `Gbrap10Le`, `Gbrp12Le`, `Gbrap12Le`, `Gbrp14Le`,
   `Gbrap14Le`) added in `oxideav-core` 0.1.18, plus the previously

@@ -704,6 +704,150 @@ pub fn nv21_vu_merge(up: &[u8], vp: &[u8], vu: &mut [u8], cw: usize, ch: usize) 
 }
 
 // ---------------------------------------------------------------------
+// Packed 4:2:2 (YUYV / UYVY) ↔ planar Yuv422P.
+//
+// YUYV (Y0 U0 Y1 V0) and UYVY (U0 Y0 V0 Y1) are the two byte orderings
+// used by every common 4:2:2 packed format. Each pair of horizontal
+// pixels shares one (U, V) chroma sample, identical to Yuv422P planar
+// chroma layout. Conversion is a pure shuffle — no colour math — so
+// the routines below are byte-permutations only.
+//
+// `w` is the pixel width; it MUST be even (the format has no concept
+// of an odd-width pair). `src` carries `w * h * 2` bytes (packed)
+// and `dst` planes carry `w * h` for luma, `(w/2) * h` for each
+// chroma plane. The caller is responsible for plane sizing; debug
+// asserts pin the contract.
+
+/// Split a packed YUYV (Y0 U0 Y1 V0) buffer into a Yuv422P planar
+/// layout (Y full-res, U and V each `w/2 × h`). Pure deinterleave —
+/// no colour math, no rounding.
+pub fn yuyv422_to_yuv422p(
+    src: &[u8],
+    yp: &mut [u8],
+    up: &mut [u8],
+    vp: &mut [u8],
+    w: usize,
+    h: usize,
+) {
+    debug_assert!(w % 2 == 0, "YUYV requires even width");
+    let cw = w / 2;
+    debug_assert!(src.len() >= w * h * 2);
+    debug_assert!(yp.len() >= w * h);
+    debug_assert!(up.len() >= cw * h);
+    debug_assert!(vp.len() >= cw * h);
+    for row in 0..h {
+        let s = &src[row * w * 2..row * w * 2 + w * 2];
+        let y_row = &mut yp[row * w..row * w + w];
+        let u_row = &mut up[row * cw..row * cw + cw];
+        let v_row = &mut vp[row * cw..row * cw + cw];
+        for cc in 0..cw {
+            // packed quad: Y0 U Y1 V
+            y_row[cc * 2] = s[cc * 4];
+            u_row[cc] = s[cc * 4 + 1];
+            y_row[cc * 2 + 1] = s[cc * 4 + 2];
+            v_row[cc] = s[cc * 4 + 3];
+        }
+    }
+}
+
+/// Split a packed UYVY (U0 Y0 V0 Y1) buffer into a Yuv422P planar
+/// layout. Identical to [`yuyv422_to_yuv422p`] with luma and chroma
+/// byte positions swapped within each quad.
+pub fn uyvy422_to_yuv422p(
+    src: &[u8],
+    yp: &mut [u8],
+    up: &mut [u8],
+    vp: &mut [u8],
+    w: usize,
+    h: usize,
+) {
+    debug_assert!(w % 2 == 0, "UYVY requires even width");
+    let cw = w / 2;
+    debug_assert!(src.len() >= w * h * 2);
+    debug_assert!(yp.len() >= w * h);
+    debug_assert!(up.len() >= cw * h);
+    debug_assert!(vp.len() >= cw * h);
+    for row in 0..h {
+        let s = &src[row * w * 2..row * w * 2 + w * 2];
+        let y_row = &mut yp[row * w..row * w + w];
+        let u_row = &mut up[row * cw..row * cw + cw];
+        let v_row = &mut vp[row * cw..row * cw + cw];
+        for cc in 0..cw {
+            // packed quad: U Y0 V Y1
+            u_row[cc] = s[cc * 4];
+            y_row[cc * 2] = s[cc * 4 + 1];
+            v_row[cc] = s[cc * 4 + 2];
+            y_row[cc * 2 + 1] = s[cc * 4 + 3];
+        }
+    }
+}
+
+/// Merge planar Yuv422P (`yp` full-res; `up`, `vp` each `w/2 × h`)
+/// into a packed YUYV byte stream `dst` of length `w * h * 2`.
+pub fn yuv422p_to_yuyv422(yp: &[u8], up: &[u8], vp: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    debug_assert!(w % 2 == 0, "YUYV requires even width");
+    let cw = w / 2;
+    debug_assert!(yp.len() >= w * h);
+    debug_assert!(up.len() >= cw * h);
+    debug_assert!(vp.len() >= cw * h);
+    debug_assert!(dst.len() >= w * h * 2);
+    for row in 0..h {
+        let y_row = &yp[row * w..row * w + w];
+        let u_row = &up[row * cw..row * cw + cw];
+        let v_row = &vp[row * cw..row * cw + cw];
+        let d = &mut dst[row * w * 2..row * w * 2 + w * 2];
+        for cc in 0..cw {
+            d[cc * 4] = y_row[cc * 2];
+            d[cc * 4 + 1] = u_row[cc];
+            d[cc * 4 + 2] = y_row[cc * 2 + 1];
+            d[cc * 4 + 3] = v_row[cc];
+        }
+    }
+}
+
+/// Merge planar Yuv422P into a packed UYVY byte stream. Mirror of
+/// [`yuv422p_to_yuyv422`] with luma and chroma byte positions swapped.
+pub fn yuv422p_to_uyvy422(yp: &[u8], up: &[u8], vp: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    debug_assert!(w % 2 == 0, "UYVY requires even width");
+    let cw = w / 2;
+    debug_assert!(yp.len() >= w * h);
+    debug_assert!(up.len() >= cw * h);
+    debug_assert!(vp.len() >= cw * h);
+    debug_assert!(dst.len() >= w * h * 2);
+    for row in 0..h {
+        let y_row = &yp[row * w..row * w + w];
+        let u_row = &up[row * cw..row * cw + cw];
+        let v_row = &vp[row * cw..row * cw + cw];
+        let d = &mut dst[row * w * 2..row * w * 2 + w * 2];
+        for cc in 0..cw {
+            d[cc * 4] = u_row[cc];
+            d[cc * 4 + 1] = y_row[cc * 2];
+            d[cc * 4 + 2] = v_row[cc];
+            d[cc * 4 + 3] = y_row[cc * 2 + 1];
+        }
+    }
+}
+
+/// In-place byte swap converting YUYV (Y0 U0 Y1 V0) to UYVY
+/// (U0 Y0 V0 Y1) by exchanging the two bytes inside each pair. Works
+/// in either direction (involutive on the four-byte quad).
+pub fn yuyv_uyvy_swap(buf: &mut [u8]) {
+    // YUYV quad = [Y0 U Y1 V]; UYVY quad = [U Y0 V Y1]:
+    //   index 0 ↔ index 1  (Y0 ↔ U)
+    //   index 2 ↔ index 3  (Y1 ↔ V)
+    debug_assert!(
+        buf.len() % 4 == 0,
+        "packed 4:2:2 buffer must be a multiple of 4 bytes"
+    );
+    let mut i = 0;
+    while i + 3 < buf.len() {
+        buf.swap(i, i + 1);
+        buf.swap(i + 2, i + 3);
+        i += 4;
+    }
+}
+
+// ---------------------------------------------------------------------
 // Full/limited range plane conversion for YuvJ* ↔ Yuv*.
 // Fixed-point per-byte scaling avoids f32 in the hot loop.
 
@@ -781,6 +925,56 @@ mod tests {
                 "V mismatch for ({r},{g},{b}): got {v}, want {ev}"
             );
         }
+    }
+
+    #[test]
+    fn yuyv_uyvy_swap_pins_byte_positions() {
+        // YUYV quad = [Y0 U Y1 V]; swap gives UYVY = [U Y0 V Y1].
+        let mut buf = vec![10u8, 20, 30, 40, 50, 60, 70, 80];
+        yuyv_uyvy_swap(&mut buf);
+        // Two quads:
+        //   [10 20 30 40] → [20 10 40 30]
+        //   [50 60 70 80] → [60 50 80 70]
+        assert_eq!(buf, vec![20u8, 10, 40, 30, 60, 50, 80, 70]);
+        // Involutive — second swap returns the original bytes.
+        yuyv_uyvy_swap(&mut buf);
+        assert_eq!(buf, vec![10u8, 20, 30, 40, 50, 60, 70, 80]);
+    }
+
+    #[test]
+    fn yuyv422_to_yuv422p_pins_byte_positions() {
+        // 4×1 YUYV: two quads.
+        // pixels (Y0=1,U=2,Y1=3,V=4) (Y0=5,U=6,Y1=7,V=8)
+        let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let mut yp = [0u8; 4];
+        let mut up = [0u8; 2];
+        let mut vp = [0u8; 2];
+        yuyv422_to_yuv422p(&src, &mut yp, &mut up, &mut vp, 4, 1);
+        assert_eq!(yp, [1, 3, 5, 7]);
+        assert_eq!(up, [2, 6]);
+        assert_eq!(vp, [4, 8]);
+        // Round-trip back to packed.
+        let mut out = [0u8; 8];
+        yuv422p_to_yuyv422(&yp, &up, &vp, &mut out, 4, 1);
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn uyvy422_to_yuv422p_pins_byte_positions() {
+        // 4×1 UYVY: two quads.
+        // pixels (U=2,Y0=1,V=4,Y1=3) (U=6,Y0=5,V=8,Y1=7)
+        let src = [2u8, 1, 4, 3, 6, 5, 8, 7];
+        let mut yp = [0u8; 4];
+        let mut up = [0u8; 2];
+        let mut vp = [0u8; 2];
+        uyvy422_to_yuv422p(&src, &mut yp, &mut up, &mut vp, 4, 1);
+        assert_eq!(yp, [1, 3, 5, 7]);
+        assert_eq!(up, [2, 6]);
+        assert_eq!(vp, [4, 8]);
+        // Round-trip back to packed.
+        let mut out = [0u8; 8];
+        yuv422p_to_uyvy422(&yp, &up, &vp, &mut out, 4, 1);
+        assert_eq!(out, src);
     }
 
     #[test]

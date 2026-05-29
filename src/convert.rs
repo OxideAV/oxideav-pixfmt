@@ -197,6 +197,27 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Yuv420P, P::Nv12, Yuv420pToNv { is_nv12: true }),
         (P::Yuv420P, P::Nv21, Yuv420pToNv { is_nv12: false }),
 
+        // Packed 4:2:2 (YUYV / UYVY) ↔ planar Yuv422P. Pure deinterleave
+        // / interleave; no colour math.
+        (P::Yuyv422, P::Yuv422P, Packed422ToYuv422p { is_yuyv: true }),
+        (P::Uyvy422, P::Yuv422P, Packed422ToYuv422p { is_yuyv: false }),
+        (P::Yuv422P, P::Yuyv422, Yuv422pToPacked422 { is_yuyv: true }),
+        (P::Yuv422P, P::Uyvy422, Yuv422pToPacked422 { is_yuyv: false }),
+        // YUYV ↔ UYVY: two byte-swaps per quad.
+        (P::Yuyv422, P::Uyvy422, Packed422Swap),
+        (P::Uyvy422, P::Yuyv422, Packed422Swap),
+        // Packed 4:2:2 ↔ RGB. Fused path that walks the packed buffer
+        // once per row, deinterleaves on the fly, and feeds the result
+        // into the same colour math used by the planar 4:2:2 route.
+        (P::Yuyv422, P::Rgb24, Packed422ToRgb { is_yuyv: true, alpha: false }),
+        (P::Uyvy422, P::Rgb24, Packed422ToRgb { is_yuyv: false, alpha: false }),
+        (P::Yuyv422, P::Rgba,  Packed422ToRgb { is_yuyv: true, alpha: true }),
+        (P::Uyvy422, P::Rgba,  Packed422ToRgb { is_yuyv: false, alpha: true }),
+        (P::Rgb24, P::Yuyv422, RgbToPacked422 { is_yuyv: true, alpha_in: false }),
+        (P::Rgb24, P::Uyvy422, RgbToPacked422 { is_yuyv: false, alpha_in: false }),
+        (P::Rgba,  P::Yuyv422, RgbToPacked422 { is_yuyv: true, alpha_in: true }),
+        (P::Rgba,  P::Uyvy422, RgbToPacked422 { is_yuyv: false, alpha_in: true }),
+
         // Palette.
         (P::Pal8, P::Rgb24, Pal8ToRgb { alpha: false }),
         (P::Pal8, P::Rgba,  Pal8ToRgb { alpha: true }),
@@ -276,6 +297,24 @@ enum ConvertOp {
     Yuv420pToNv {
         is_nv12: bool,
     },
+    Packed422ToYuv422p {
+        /// `true` for YUYV byte order, `false` for UYVY.
+        is_yuyv: bool,
+    },
+    Yuv422pToPacked422 {
+        is_yuyv: bool,
+    },
+    Packed422Swap,
+    Packed422ToRgb {
+        is_yuyv: bool,
+        /// `true` to emit RGBA, `false` to emit Rgb24.
+        alpha: bool,
+    },
+    RgbToPacked422 {
+        is_yuyv: bool,
+        /// `true` if source is RGBA (alpha consumed by skipping the 4th byte).
+        alpha_in: bool,
+    },
     Pal8ToRgb {
         alpha: bool,
     },
@@ -332,6 +371,15 @@ impl ConvertOp {
             } => rescale_range(src, src_info, wsub, hsub, to_full),
             Self::NvToYuv420p { is_nv12 } => nv_to_yuv420p(src, src_info, is_nv12),
             Self::Yuv420pToNv { is_nv12 } => yuv420p_to_nv(src, src_info, is_nv12),
+            Self::Packed422ToYuv422p { is_yuyv } => packed422_to_yuv422p(src, src_info, is_yuyv),
+            Self::Yuv422pToPacked422 { is_yuyv } => yuv422p_to_packed422(src, src_info, is_yuyv),
+            Self::Packed422Swap => packed422_swap(src, src_info),
+            Self::Packed422ToRgb { is_yuyv, alpha } => {
+                packed422_to_rgb(src, src_info, matrix, is_yuyv, alpha)
+            }
+            Self::RgbToPacked422 { is_yuyv, alpha_in } => {
+                rgb_to_packed422(src, src_info, matrix, is_yuyv, alpha_in)
+            }
             Self::Pal8ToRgb { alpha } => pal8_to_rgb(src, src_info, opts, alpha),
             Self::RgbToPal8 { alpha_in } => rgb_to_pal8(src, src_info, opts, alpha_in),
             Self::CmykToRgb { alpha } => do_cmyk_to_rgb(src, src_info, alpha),
@@ -919,6 +967,205 @@ fn yuv420p_to_nv(src: &VideoFrame, src_info: FrameInfo, is_nv12: bool) -> Result
                 data: uv,
             },
         ],
+    ))
+}
+
+// -------------------------------------------------------------------------
+// Packed 4:2:2 (YUYV / UYVY).
+//
+// Even-width frames are a hard requirement: the format pairs two luma
+// samples per chroma pair, so an odd width has no representation. We
+// return Error::Invalid rather than silently truncating.
+
+fn packed422_to_yuv422p(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    is_yuyv: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 {
+        return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
+    }
+    let cw = w / 2;
+    let in_plane = &src.planes[0];
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let mut yp = vec![0u8; w * h];
+    let mut up = vec![0u8; cw * h];
+    let mut vp = vec![0u8; cw * h];
+    if is_yuyv {
+        yuv::yuyv422_to_yuv422p(&packed, &mut yp, &mut up, &mut vp, w, h);
+    } else {
+        yuv::uyvy422_to_yuv422p(&packed, &mut yp, &mut up, &mut vp, w, h);
+    }
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw,
+                data: up,
+            },
+            VideoPlane {
+                stride: cw,
+                data: vp,
+            },
+        ],
+    ))
+}
+
+fn yuv422p_to_packed422(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    is_yuyv: bool,
+) -> Result<VideoFrame> {
+    if src.planes.len() < 3 {
+        return Err(Error::invalid("pixfmt: Yuv422P source needs 3 planes"));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 {
+        return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
+    }
+    let cw = w / 2;
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, h);
+    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, h);
+    let mut packed = vec![0u8; w * h * 2];
+    if is_yuyv {
+        yuv::yuv422p_to_yuyv422(&yp, &up, &vp, &mut packed, w, h);
+    } else {
+        yuv::yuv422p_to_uyvy422(&yp, &up, &vp, &mut packed, w, h);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: packed,
+        }],
+    ))
+}
+
+fn packed422_swap(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 {
+        return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
+    }
+    let in_plane = &src.planes[0];
+    let mut packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    yuv::yuyv_uyvy_swap(&mut packed);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: packed,
+        }],
+    ))
+}
+
+fn packed422_to_rgb(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    is_yuyv: bool,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 {
+        return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
+    }
+    let cw = w / 2;
+    let in_plane = &src.planes[0];
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    // Reuse the planar 4:2:2 → RGB path: deinterleave first, then go
+    // through the proven scalar/SIMD planar decoder.
+    let mut yp = vec![0u8; w * h];
+    let mut up = vec![0u8; cw * h];
+    let mut vp = vec![0u8; cw * h];
+    if is_yuyv {
+        yuv::yuyv422_to_yuv422p(&packed, &mut yp, &mut up, &mut vp, w, h);
+    } else {
+        yuv::uyvy422_to_yuv422p(&packed, &mut yp, &mut up, &mut vp, w, h);
+    }
+    let mut rgb_buf = vec![0u8; w * h * 3];
+    yuv::yuv422_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix);
+    if !alpha {
+        return Ok(make_frame(
+            src,
+            vec![VideoPlane {
+                stride: w * 3,
+                data: rgb_buf,
+            }],
+        ));
+    }
+    let mut rgba = vec![0u8; w * h * 4];
+    for i in 0..w * h {
+        rgba[i * 4] = rgb_buf[i * 3];
+        rgba[i * 4 + 1] = rgb_buf[i * 3 + 1];
+        rgba[i * 4 + 2] = rgb_buf[i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 4,
+            data: rgba,
+        }],
+    ))
+}
+
+fn rgb_to_packed422(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    is_yuyv: bool,
+    alpha_in: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 {
+        return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
+    }
+    let cw = w / 2;
+    let in_plane = &src.planes[0];
+    // Project the source to a tight RGB24 buffer first — matches the
+    // existing planar 4:2:2 encode path.
+    let rgb24: Vec<u8> = if alpha_in {
+        let mut out = Vec::with_capacity(w * h * 3);
+        for row in 0..h {
+            let row_bytes = w * 4;
+            let sr = tight_row(&in_plane.data, in_plane.stride, row, row_bytes);
+            for i in 0..w {
+                out.push(sr[i * 4]);
+                out.push(sr[i * 4 + 1]);
+                out.push(sr[i * 4 + 2]);
+            }
+        }
+        out
+    } else {
+        gather_tight(&in_plane.data, in_plane.stride, w * 3, h)
+    };
+    let mut yp = vec![0u8; w * h];
+    let mut up = vec![0u8; cw * h];
+    let mut vp = vec![0u8; cw * h];
+    yuv::rgb24_to_yuv422(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix);
+    let mut packed = vec![0u8; w * h * 2];
+    if is_yuyv {
+        yuv::yuv422p_to_yuyv422(&yp, &up, &vp, &mut packed, w, h);
+    } else {
+        yuv::yuv422p_to_uyvy422(&yp, &up, &vp, &mut packed, w, h);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: packed,
+        }],
     ))
 }
 
