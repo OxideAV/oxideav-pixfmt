@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `tests/alpha_property.rs` — 15-test PRNG-driven property sweep for the
+  Porter-Duff primitives (`over_premul`, `over_straight`, `over_buffer`,
+  `blit_alpha_mask`, `modulate_alpha`, `premultiply` / `unpremultiply`).
+  Sweeps cover: opaque-source = replacement, transparent-source = no-op,
+  premultiplied invariant (`C ≤ A`) preservation, alpha-formula accuracy
+  (`out.a = src.a + dst.a × (1 - src.a)` within ±1 LSB), monotonicity in
+  `src.a`, `over_buffer` element-wise parity with the per-pixel helpers,
+  and an `~10k`-placement `blit_alpha_mask` leak-freedom check that pads
+  the destination with sentinel bytes and asserts none are overwritten.
+  Backstops the alpha module's previously hand-picked anchor cases.
+- `benches/alpha.rs` — Criterion bench covering the Porter-Duff hot
+  path: per-pixel `over_premul` / `over_straight` (1 Mpx inner loop),
+  `over_buffer` at 1920×1080 (premul + straight), `blit_alpha_mask`
+  with 16×16 (ASCII-glyph) and 64×64 (CJK-glyph) mask sizes, and bulk
+  `premultiply` / `unpremultiply` / `modulate_alpha` (1 Mpx). Gated
+  behind the existing `bench` feature; documents the scalar baseline a
+  future SIMD pass would land against.
 - Packed 4:2:2 conversions for `Yuyv422` (Y0 U0 Y1 V0) and `Uyvy422`
   (U0 Y0 V0 Y1). Both variants had `FormatInfo::of` entries since
   ~0.1.2 but no actual conversion path, so any caller hitting V4L2 /

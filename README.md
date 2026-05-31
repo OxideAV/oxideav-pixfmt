@@ -327,6 +327,25 @@ The YUV decode path processes 16 pixels per AVX2 iteration; encode runs
 a fused 2-row luma + 2×2-chroma loop that does one `pshufb` deinterleave
 per 8 pixels and pair-sums the chroma via `pmaddubsw`.
 
+**Porter-Duff compositing (scalar, Apple M-series single core, indicative):**
+
+| operation                           | scalar throughput |
+| ----------------------------------- | ----------------- |
+| `over_premul` (per-pixel, 1 Mpx)    | ~3.5 GiB/s        |
+| `over_straight` (per-pixel, 1 Mpx)  | ~2.1 GiB/s        |
+| `over_buffer` premul (1920×1080)    | ~6.3 GiB/s        |
+| `over_buffer` straight (1920×1080)  | ~2.1 GiB/s        |
+| `blit_alpha_mask` 16×16 glyph       | ~276 MiB/s        |
+| `blit_alpha_mask` 64×64 glyph       | ~282 MiB/s        |
+| `premultiply` (1 Mpx)               | ~5.6 GiB/s        |
+| `unpremultiply` (1 Mpx, includes divide) | ~4.7 GiB/s   |
+| `modulate_alpha` (1 Mpx)            | ~6.3 GiB/s        |
+
+The compositing primitives are still scalar (no SIMD path yet); the
+numbers above are the headroom a future hand-vectorised pass would
+land against. `over_straight` is the floor because each pixel pays for
+the divide-by-`out.a` rebuild.
+
 ### Dispatch summary
 
 | target         | path                                                             |
@@ -357,6 +376,7 @@ dep), so the benches need `--features bench`:
 cargo bench --features bench                              # all suites
 cargo bench --features bench --bench yuv_rgb             # just YUV encode/decode
 cargo bench --features bench --bench pixel_ops          # RGB swizzle, NV12, chroma resample, gray, deep-RGB
+cargo bench --features bench --bench alpha              # Porter-Duff over/blit/premultiply
 OXIDEAV_PIXFMT_FORCE_SCALAR=1 cargo bench --features bench  # scalar baseline for comparison
 ```
 
