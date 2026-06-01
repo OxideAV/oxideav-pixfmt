@@ -12,8 +12,9 @@
 //!   (NV12/NV21 ↔ Yuv420P) and YuvJ↔Yuv range-rescale-of-neutrals.
 //! * **Tolerance-bounded** round-trips — YUV↔RGB through the Q15 fixed-
 //!   point matrices, and RGBA premultiply↔unpremultiply, with per-channel
-//!   bounds derived from the documented contracts (no ffmpeg/libyuv
-//!   reference — the matrices are textbook BT.601/709/2020).
+//!   bounds derived directly from the documented contracts. The matrices
+//!   themselves are the standard BT.601 / BT.709 / BT.2020 coefficients
+//!   given in the ITU-R recommendations.
 //!
 //! The PRNG is a self-contained xorshift (no external crate), seeded per
 //! case so every failure is exactly reproducible from its seed.

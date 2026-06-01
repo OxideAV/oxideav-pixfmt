@@ -167,6 +167,17 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Gray8, P::MonoBlack, GrayToMono { black_is_zero: true }),
         (P::Gray8, P::MonoWhite, GrayToMono { black_is_zero: false }),
 
+        // Ya8 (grey + alpha, 2 bytes/pixel) ↔ Gray8 / Rgb24 / Rgba.
+        // Promote/demote helpers for icon / glyph / single-channel-mask
+        // workflows that need to carry an alpha plane through the
+        // pipeline without going through a full YUVA path.
+        (P::Ya8,   P::Gray8, Ya8ToGray8),
+        (P::Gray8, P::Ya8,   Gray8ToYa8),
+        (P::Ya8,   P::Rgb24, Ya8ToRgb24),
+        (P::Ya8,   P::Rgba,  Ya8ToRgba),
+        (P::Rgb24, P::Ya8,   Rgb24ToYa8),
+        (P::Rgba,  P::Ya8,   RgbaToYa8),
+
         // YUV planar → packed RGB.
         (P::Yuv420P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 2, alpha: false }),
         (P::Yuv422P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 1, alpha: false }),
@@ -276,6 +287,12 @@ enum ConvertOp {
     GrayToMono {
         black_is_zero: bool,
     },
+    Ya8ToGray8,
+    Gray8ToYa8,
+    Ya8ToRgb24,
+    Ya8ToRgba,
+    Rgb24ToYa8,
+    RgbaToYa8,
     YuvToRgb {
         wsub: usize,
         hsub: usize,
@@ -356,6 +373,12 @@ impl ConvertOp {
             Self::Gray8ToGray16 => do_gray8_to_gray16(src, src_info),
             Self::MonoToGray { black_is_zero } => do_mono_to_gray(src, src_info, black_is_zero),
             Self::GrayToMono { black_is_zero } => do_gray_to_mono(src, src_info, black_is_zero),
+            Self::Ya8ToGray8 => do_ya8_to_gray8(src, src_info),
+            Self::Gray8ToYa8 => do_gray8_to_ya8(src, src_info),
+            Self::Ya8ToRgb24 => do_ya8_to_rgb24(src, src_info),
+            Self::Ya8ToRgba => do_ya8_to_rgba(src, src_info),
+            Self::Rgb24ToYa8 => do_rgb24_to_ya8(src, src_info),
+            Self::RgbaToYa8 => do_rgba_to_ya8(src, src_info),
             Self::YuvToRgb { wsub, hsub, alpha } => {
                 do_yuv_to_rgb(src, src_info, matrix, wsub, hsub, alpha)
             }
@@ -736,6 +759,117 @@ fn gather_mono_rows(src: &[u8], stride: usize, packed: usize, h: usize) -> Vec<u
         out.extend_from_slice(&src[row * stride..row * stride + packed]);
     }
     out
+}
+
+// -------------------------------------------------------------------------
+// Ya8 (grey + alpha, 2 bytes/pixel).
+
+fn do_ya8_to_gray8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let mut out = vec![0u8; w * h];
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 2);
+        gray::ya8_to_gray8(sr, &mut out[row * w..row * w + w], w);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w,
+            data: out,
+        }],
+    ))
+}
+
+fn do_gray8_to_ya8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let mut out = vec![0u8; w * h * 2];
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w);
+        gray::gray8_to_ya8(sr, &mut out[row * w * 2..row * w * 2 + w * 2], w);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: out,
+        }],
+    ))
+}
+
+fn do_ya8_to_rgb24(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let mut out = vec![0u8; w * h * 3];
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 2);
+        gray::ya8_to_rgb24(sr, &mut out[row * w * 3..row * w * 3 + w * 3], w);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 3,
+            data: out,
+        }],
+    ))
+}
+
+fn do_ya8_to_rgba(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let mut out = vec![0u8; w * h * 4];
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 2);
+        gray::ya8_to_rgba(sr, &mut out[row * w * 4..row * w * 4 + w * 4], w);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 4,
+            data: out,
+        }],
+    ))
+}
+
+fn do_rgb24_to_ya8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let mut out = vec![0u8; w * h * 2];
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 3);
+        gray::rgb24_to_ya8(sr, &mut out[row * w * 2..row * w * 2 + w * 2], w);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: out,
+        }],
+    ))
+}
+
+fn do_rgba_to_ya8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let mut out = vec![0u8; w * h * 2];
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
+        gray::rgba_to_ya8(sr, &mut out[row * w * 2..row * w * 2 + w * 2], w);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: out,
+        }],
+    ))
 }
 
 // -------------------------------------------------------------------------

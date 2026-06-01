@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Ya8` (grey + alpha, 2 bytes/pixel) conversion paths now wired into
+  the `convert()` dispatch table — previously every entry returned
+  `Error::Unsupported`. Six new pairs land: `Ya8 ↔ Gray8`,
+  `Ya8 → Rgb24`, `Ya8 ↔ Rgba`, and `Rgb24 → Ya8`. The Gray-side paths
+  are byte-stride helpers (drop / synthesise alpha as 255); the RGB
+  paths broadcast luma to R = G = B and derive Y on the reverse leg as
+  the rounded mean `(R + G + B + 1) / 3` so a `Ya8 → Rgba → Ya8`
+  round-trip is bit-exact for inputs that came out of `Ya8` in the
+  first place (R = G = B by construction). Helpers live in
+  `crate::gray::{ya8_to_gray8, ya8_to_alpha8, gray8_to_ya8,
+  ya8_to_rgb24, ya8_to_rgba, rgba_to_ya8, rgb24_to_ya8}`. Four new
+  exact-roundtrip tests in `tests/conversions.rs` pin the broadcast
+  + alpha invariants.
 - `tests/alpha_property.rs` — 15-test PRNG-driven property sweep for the
   Porter-Duff primitives (`over_premul`, `over_straight`, `over_buffer`,
   `blit_alpha_mask`, `modulate_alpha`, `premultiply` / `unpremultiply`).

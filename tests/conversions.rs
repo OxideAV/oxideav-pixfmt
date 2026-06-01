@@ -217,3 +217,121 @@ fn cmyk_roundtrip_via_rgba() {
     let back = convert(&cmyk, cmyk_info, PixelFormat::Rgba, &opts).unwrap();
     assert_eq!(back.planes[0].data, src.planes[0].data);
 }
+
+// -------- Ya8 (grey + alpha, 2 bytes/pixel) --------
+
+fn synth_ya8(w: u32, h: u32) -> (VideoFrame, FrameInfo) {
+    let mut data = Vec::with_capacity((w * h * 2) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            data.push((x * 13 + y * 7) as u8); // Y
+            data.push((x * 5 + y * 11) as u8); // A
+        }
+    }
+    (
+        VideoFrame {
+            pts: None,
+            planes: vec![VideoPlane {
+                stride: (w * 2) as usize,
+                data,
+            }],
+        },
+        FrameInfo::new(PixelFormat::Ya8, w, h),
+    )
+}
+
+#[test]
+fn ya8_gray8_roundtrip_via_alpha_drop() {
+    // Ya8 → Gray8 drops alpha; Gray8 → Ya8 restores alpha as 255.
+    // Equality holds only when the source alpha was already 255.
+    let opts = ConvertOptions::default();
+    let w = 16u32;
+    let h = 8u32;
+    let mut data = Vec::with_capacity((w * h * 2) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            data.push((x * 13 + y * 7) as u8); // Y
+            data.push(255); // A = opaque
+        }
+    }
+    let src = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: (w * 2) as usize,
+            data,
+        }],
+    };
+    let src_info = FrameInfo::new(PixelFormat::Ya8, w, h);
+    let gray = convert(&src, src_info, PixelFormat::Gray8, &opts).unwrap();
+    let gray_info = FrameInfo::new(PixelFormat::Gray8, w, h);
+    let back = convert(&gray, gray_info, PixelFormat::Ya8, &opts).unwrap();
+    assert_eq!(back.planes[0].data, src.planes[0].data);
+}
+
+#[test]
+fn ya8_to_rgba_preserves_alpha() {
+    // Ya8 → Rgba: luma is broadcast to R = G = B; alpha is carried
+    // through bit-exact. Going back via rgba_to_ya8 must reproduce the
+    // original because R = G = B → mean = R = Y.
+    let opts = ConvertOptions::default();
+    let (src, src_info) = synth_ya8(16, 8);
+    let rgba = convert(&src, src_info, PixelFormat::Rgba, &opts).unwrap();
+    // Spot-check the broadcast.
+    for px in 0..(16 * 8) {
+        let y = src.planes[0].data[px * 2];
+        let a = src.planes[0].data[px * 2 + 1];
+        assert_eq!(rgba.planes[0].data[px * 4], y);
+        assert_eq!(rgba.planes[0].data[px * 4 + 1], y);
+        assert_eq!(rgba.planes[0].data[px * 4 + 2], y);
+        assert_eq!(rgba.planes[0].data[px * 4 + 3], a);
+    }
+    let rgba_info = FrameInfo::new(PixelFormat::Rgba, src_info.width, src_info.height);
+    let back = convert(&rgba, rgba_info, PixelFormat::Ya8, &opts).unwrap();
+    assert_eq!(back.planes[0].data, src.planes[0].data);
+}
+
+#[test]
+fn ya8_to_rgb24_drops_alpha_and_broadcasts() {
+    let opts = ConvertOptions::default();
+    let (src, src_info) = synth_ya8(16, 8);
+    let rgb = convert(&src, src_info, PixelFormat::Rgb24, &opts).unwrap();
+    for px in 0..(16 * 8) {
+        let y = src.planes[0].data[px * 2];
+        assert_eq!(rgb.planes[0].data[px * 3], y);
+        assert_eq!(rgb.planes[0].data[px * 3 + 1], y);
+        assert_eq!(rgb.planes[0].data[px * 3 + 2], y);
+    }
+    // Rgb24 → Ya8 derives Y as mean(R, G, B) = Y (since R = G = B)
+    // and sets A = 255.
+    let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+    let back = convert(&rgb, rgb_info, PixelFormat::Ya8, &opts).unwrap();
+    for px in 0..(16 * 8) {
+        assert_eq!(back.planes[0].data[px * 2], src.planes[0].data[px * 2]);
+        assert_eq!(back.planes[0].data[px * 2 + 1], 255);
+    }
+}
+
+#[test]
+fn rgb24_to_ya8_luma_is_rounded_mean() {
+    // Verify the rounded-mean formula: y = (r + g + b + 1) / 3.
+    let opts = ConvertOptions::default();
+    let w = 4u32;
+    let h = 1u32;
+    // Pick (r, g, b) triples with deterministic means.
+    let data: Vec<u8> = vec![
+        0, 0, 0, // mean 0
+        255, 255, 255, // mean 255
+        10, 20, 30, // mean (60+1)/3 = 20
+        100, 200, 0, // mean (300+1)/3 = 100
+    ];
+    let src = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: (w * 3) as usize,
+            data,
+        }],
+    };
+    let src_info = FrameInfo::new(PixelFormat::Rgb24, w, h);
+    let ya = convert(&src, src_info, PixelFormat::Ya8, &opts).unwrap();
+    assert_eq!(ya.planes[0].data, vec![0, 255, 255, 255, 20, 255, 100, 255]);
+}

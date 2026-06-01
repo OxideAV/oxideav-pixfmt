@@ -43,6 +43,9 @@
 //!   under BT.601/709/2020 (limited or full range). Yuyv ↔ Uyvy is a
 //!   zero-math byte swap.
 //! - Gray8 ↔ Rgb24/Rgba broadcast.
+//! - Ya8 ↔ Gray8/Rgb24/Rgba (luma broadcast; alpha is carried through to
+//!   Rgba, dropped on the way to Rgb24, and synthesised as opaque 255 on
+//!   the return paths from Gray8/Rgb24).
 //! - Rgb48Le ↔ Rgb24, Rgba64Le ↔ Rgba (bit-shift).
 //! - Gray16Le ↔ Gray8.
 //! - MonoBlack/MonoWhite ↔ Gray8.

@@ -45,6 +45,7 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Packed 4:2:2            | `Yuyv422` / `Uyvy422` ↔ `Yuv422P` / `Rgb24` / `Rgba` + Yuyv ↔ Uyvy swap     |
 | Full ↔ limited range    | `YuvJ420P` / `YuvJ422P` / `YuvJ444P` ↔ `Yuv*`                               |
 | Grayscale / mono        | `Gray8` / `Gray16Le`, `MonoBlack` / `MonoWhite` ↔ `Gray8`                   |
+| Grey + alpha            | `Ya8` ↔ `Gray8` / `Rgb24` / `Rgba` (luma broadcast, alpha carried through)  |
 | Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither |
 | Colour matrices         | BT.601 / BT.709, limited (studio) / full (JPEG) range                       |
 | Dither strategies       | None, 8×8 ordered Bayer, Floyd–Steinberg                                    |
@@ -52,8 +53,9 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 
 ## Roadmap
 
-ffmpeg's `-pix_fmts` lists ~200 entries; this crate currently covers
-~28. The remaining gap is mostly long-tail or hardware-specific. The
+The pixel-format universe used by general-purpose video tooling runs
+to roughly two hundred entries; this crate currently covers ~28. The
+remaining gap is mostly long-tail or hardware-specific. The
 formats below are *planned* — they're not implemented yet, but they
 have real callers in the codecs/containers we want to support, so the
 [`PixelFormat`](https://docs.rs/oxideav-core/latest/oxideav_core/enum.PixelFormat.html)

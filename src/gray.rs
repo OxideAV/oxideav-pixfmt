@@ -104,6 +104,87 @@ pub fn mono_to_gray8(src: &[u8], dst: &mut [u8], w: usize, h: usize, black_is_ze
     }
 }
 
+/// Ya8 → Gray8 (drop the alpha channel; keep the luma byte at index 0 of
+/// each 2-byte pair). The companion `ya8_to_alpha8` extracts the alpha
+/// plane instead, for callers that want to keep both halves.
+pub fn ya8_to_gray8(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        dst[i] = src[i * 2];
+    }
+}
+
+/// Ya8 → 8-bit alpha plane (keep only the second byte of each pair).
+pub fn ya8_to_alpha8(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        dst[i] = src[i * 2 + 1];
+    }
+}
+
+/// Gray8 → Ya8 (broadcast the luma byte to Y; alpha = 255 → opaque).
+pub fn gray8_to_ya8(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        dst[i * 2] = src[i];
+        dst[i * 2 + 1] = 255;
+    }
+}
+
+/// Ya8 → Rgb24 (broadcast luma to R/G/B; alpha is dropped — Rgb24 has no
+/// alpha channel).
+pub fn ya8_to_rgb24(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let y = src[i * 2];
+        dst[i * 3] = y;
+        dst[i * 3 + 1] = y;
+        dst[i * 3 + 2] = y;
+    }
+}
+
+/// Ya8 → Rgba (broadcast luma to R/G/B; preserve the per-pixel alpha
+/// byte). Round-trips through `rgba_to_ya8` when the input was already
+/// grey-on-alpha (R = G = B).
+pub fn ya8_to_rgba(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let y = src[i * 2];
+        let a = src[i * 2 + 1];
+        dst[i * 4] = y;
+        dst[i * 4 + 1] = y;
+        dst[i * 4 + 2] = y;
+        dst[i * 4 + 3] = a;
+    }
+}
+
+/// Rgba → Ya8. Luma is derived as the integer average of R, G, B
+/// (rounded to nearest). The colour-aware path is to take the Y plane
+/// from [`crate::yuv::rgb_to_yuv`] under the desired matrix; this helper
+/// is the cheap arithmetic shortcut used for icon / glyph buffers that
+/// were already monochrome on input.
+pub fn rgba_to_ya8(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let r = src[i * 4] as u32;
+        let g = src[i * 4 + 1] as u32;
+        let b = src[i * 4 + 2] as u32;
+        let a = src[i * 4 + 3];
+        // Rounded mean of (R, G, B): +1 in the numerator gives the
+        // round-half-up bias matching the BT.601 reference rounding.
+        let y = ((r + g + b + 1) / 3) as u8;
+        dst[i * 2] = y;
+        dst[i * 2 + 1] = a;
+    }
+}
+
+/// Rgb24 → Ya8. Same luma derivation as `rgba_to_ya8`; alpha is set to
+/// 255 because the source has no alpha channel.
+pub fn rgb24_to_ya8(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let r = src[i * 3] as u32;
+        let g = src[i * 3 + 1] as u32;
+        let b = src[i * 3 + 2] as u32;
+        let y = ((r + g + b + 1) / 3) as u8;
+        dst[i * 2] = y;
+        dst[i * 2 + 1] = 255;
+    }
+}
+
 /// Gray8 → 1 bpp (MSB-first). A threshold of 128 decides bit value.
 pub fn gray8_to_mono(src: &[u8], dst: &mut [u8], w: usize, h: usize, black_is_zero: bool) {
     let stride = w.div_ceil(8);
