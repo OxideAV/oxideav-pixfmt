@@ -207,6 +207,18 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Nv21, P::Yuv420P, NvToYuv420p { is_nv12: false }),
         (P::Yuv420P, P::Nv12, Yuv420pToNv { is_nv12: true }),
         (P::Yuv420P, P::Nv21, Yuv420pToNv { is_nv12: false }),
+        // NV12 / NV21 ↔ RGB direct. Fused path: walk the interleaved
+        // UV plane once per row pair, split into a transient (U, V)
+        // plane pair, then run the proven planar 4:2:0 → RGB decoder.
+        // Avoids the caller having to stage through Yuv420P.
+        (P::Nv12, P::Rgb24, NvToRgb { is_nv12: true, alpha: false }),
+        (P::Nv21, P::Rgb24, NvToRgb { is_nv12: false, alpha: false }),
+        (P::Nv12, P::Rgba,  NvToRgb { is_nv12: true, alpha: true }),
+        (P::Nv21, P::Rgba,  NvToRgb { is_nv12: false, alpha: true }),
+        (P::Rgb24, P::Nv12, RgbToNv { is_nv12: true, alpha_in: false }),
+        (P::Rgb24, P::Nv21, RgbToNv { is_nv12: false, alpha_in: false }),
+        (P::Rgba,  P::Nv12, RgbToNv { is_nv12: true, alpha_in: true }),
+        (P::Rgba,  P::Nv21, RgbToNv { is_nv12: false, alpha_in: true }),
 
         // Packed 4:2:2 (YUYV / UYVY) ↔ planar Yuv422P. Pure deinterleave
         // / interleave; no colour math.
@@ -314,6 +326,16 @@ enum ConvertOp {
     Yuv420pToNv {
         is_nv12: bool,
     },
+    NvToRgb {
+        is_nv12: bool,
+        /// `true` to emit RGBA, `false` to emit Rgb24.
+        alpha: bool,
+    },
+    RgbToNv {
+        is_nv12: bool,
+        /// `true` if source is RGBA (alpha consumed by skipping the 4th byte).
+        alpha_in: bool,
+    },
     Packed422ToYuv422p {
         /// `true` for YUYV byte order, `false` for UYVY.
         is_yuyv: bool,
@@ -394,6 +416,10 @@ impl ConvertOp {
             } => rescale_range(src, src_info, wsub, hsub, to_full),
             Self::NvToYuv420p { is_nv12 } => nv_to_yuv420p(src, src_info, is_nv12),
             Self::Yuv420pToNv { is_nv12 } => yuv420p_to_nv(src, src_info, is_nv12),
+            Self::NvToRgb { is_nv12, alpha } => nv_to_rgb(src, src_info, matrix, is_nv12, alpha),
+            Self::RgbToNv { is_nv12, alpha_in } => {
+                rgb_to_nv(src, src_info, matrix, is_nv12, alpha_in)
+            }
             Self::Packed422ToYuv422p { is_yuyv } => packed422_to_yuv422p(src, src_info, is_yuyv),
             Self::Yuv422pToPacked422 { is_yuyv } => yuv422p_to_packed422(src, src_info, is_yuyv),
             Self::Packed422Swap => packed422_swap(src, src_info),
@@ -1083,6 +1109,127 @@ fn yuv420p_to_nv(src: &VideoFrame, src_info: FrameInfo, is_nv12: bool) -> Result
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
     let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
     let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
+    let mut uv = vec![0u8; cw * ch * 2];
+    if is_nv12 {
+        yuv::nv12_uv_merge(&up, &vp, &mut uv, cw, ch);
+    } else {
+        yuv::nv21_vu_merge(&up, &vp, &mut uv, cw, ch);
+    }
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: uv,
+            },
+        ],
+    ))
+}
+
+/// NV12 / NV21 → packed RGB. Fused path: deinterleave the UV plane
+/// into transient U / V planes, then run the proven planar 4:2:0 →
+/// RGB decoder. Saves the caller a `Nv → Yuv420P → Rgb` two-step.
+///
+/// 4:2:0 subsampling pins width and height to multiples of 2; an odd
+/// dimension is rejected with `Error::Invalid` (the format has no
+/// representation for a half-pixel row or column).
+fn nv_to_rgb(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    is_nv12: bool,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    if src.planes.len() < 2 {
+        return Err(Error::invalid("pixfmt: NV source needs 2 planes"));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 || h % 2 != 0 {
+        return Err(Error::invalid(
+            "pixfmt: NV12/NV21 requires even width and height",
+        ));
+    }
+    let cw = w / 2;
+    let ch = h / 2;
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let uv = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch);
+    let mut up = vec![0u8; cw * ch];
+    let mut vp = vec![0u8; cw * ch];
+    if is_nv12 {
+        yuv::nv12_uv_split(&uv, &mut up, &mut vp, cw, ch);
+    } else {
+        yuv::nv21_vu_split(&uv, &mut up, &mut vp, cw, ch);
+    }
+    let mut rgb_buf = vec![0u8; w * h * 3];
+    yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix);
+    if !alpha {
+        return Ok(make_frame(
+            src,
+            vec![VideoPlane {
+                stride: w * 3,
+                data: rgb_buf,
+            }],
+        ));
+    }
+    let mut rgba = vec![0u8; w * h * 4];
+    for i in 0..w * h {
+        rgba[i * 4] = rgb_buf[i * 3];
+        rgba[i * 4 + 1] = rgb_buf[i * 3 + 1];
+        rgba[i * 4 + 2] = rgb_buf[i * 3 + 2];
+        rgba[i * 4 + 3] = 255;
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 4,
+            data: rgba,
+        }],
+    ))
+}
+
+/// Packed RGB → NV12 / NV21. Reuses the planar 4:2:0 encoder, then
+/// interleaves the resulting (U, V) planes back into the NV layout.
+fn rgb_to_nv(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    is_nv12: bool,
+    alpha_in: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 || h % 2 != 0 {
+        return Err(Error::invalid(
+            "pixfmt: NV12/NV21 requires even width and height",
+        ));
+    }
+    let cw = w / 2;
+    let ch = h / 2;
+    let in_plane = &src.planes[0];
+    let rgb24: Vec<u8> = if alpha_in {
+        let mut out = Vec::with_capacity(w * h * 3);
+        for row in 0..h {
+            let row_bytes = w * 4;
+            let sr = tight_row(&in_plane.data, in_plane.stride, row, row_bytes);
+            for i in 0..w {
+                out.push(sr[i * 4]);
+                out.push(sr[i * 4 + 1]);
+                out.push(sr[i * 4 + 2]);
+            }
+        }
+        out
+    } else {
+        gather_tight(&in_plane.data, in_plane.stride, w * 3, h)
+    };
+    let mut yp = vec![0u8; w * h];
+    let mut up = vec![0u8; cw * ch];
+    let mut vp = vec![0u8; cw * ch];
+    yuv::rgb24_to_yuv420(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix);
     let mut uv = vec![0u8; cw * ch * 2];
     if is_nv12 {
         yuv::nv12_uv_merge(&up, &vp, &mut uv, cw, ch);

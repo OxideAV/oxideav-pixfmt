@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Direct `Nv12` / `Nv21` ↔ `Rgb24` / `Rgba` conversions wired into the
+  `convert()` dispatch table. Previously the only NV path was via
+  `Yuv420P`; the eight new pairs (`Nv12 → Rgb24`, `Nv12 → Rgba`,
+  `Nv21 → Rgb24`, `Nv21 → Rgba`, `Rgb24 → Nv12`, `Rgb24 → Nv21`,
+  `Rgba → Nv12`, `Rgba → Nv21`) save callers an explicit
+  `Yuv420P` staging step. The fused path runs the proven planar
+  4:2:0 encoder / decoder under the hood, so output bytes are
+  bit-exact to the previous two-step route — the dispatch saves one
+  intermediate `VideoFrame` allocation. Odd width or height is
+  rejected with `Error::Invalid` (4:2:0 has no representation for a
+  half pixel). Six new tests in `tests/yuv_rgb.rs` cross-check the
+  direct path against the staged route, verify opaque alpha synthesis
+  on the `→ Rgba` direction, and pin the Rgb24 round-trip PSNR above
+  the same 30 dB floor as the planar 4:2:0 path.
 - `Ya8` (grey + alpha, 2 bytes/pixel) conversion paths now wired into
   the `convert()` dispatch table — previously every entry returned
   `Error::Unsupported`. Six new pairs land: `Ya8 ↔ Gray8`,
