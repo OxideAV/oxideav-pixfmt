@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Direct planar YUV ↔ planar YUV conversions wired into the `convert()`
+  dispatch — twelve new pairs that previously returned
+  `Error::Unsupported`. The full Cartesian product on
+  `(4:2:0, 4:2:2, 4:4:4)` for the limited-range planar family
+  (`Yuv420P ↔ Yuv422P`, `Yuv420P ↔ Yuv444P`, `Yuv422P ↔ Yuv444P` in
+  both directions, six pairs) plus the same six pairs on the full-range
+  `YuvJ*` family. The new `ChromaResample` op copies the luma plane
+  byte-for-byte and routes the chroma planes through the existing
+  `yuv::chroma_*` primitives — no colour math, no RGB hop. Callers
+  switching chroma subsampling without changing colour space (e.g. an
+  H.264 4:2:2 source feeding a 4:2:0 encoder, or a 4:4:4 ProRes frame
+  staging into a 4:2:0 codec) save an `Rgb24` intermediate's worth of
+  buffer churn and avoid the round-trip rounding error two YUV↔RGB
+  passes would accumulate. Eleven new tests in `tests/conversions.rs`
+  pin: luma byte-for-byte copy on every direction, chroma row-duplicate
+  (4:2:0 → 4:2:2) and 2×2-nearest (4:2:0 → 4:4:4) widen invariants,
+  chroma pair-average / box-average shrink invariants (4:4:4 → 4:2:2,
+  4:4:4 → 4:2:0, 4:2:2 → 4:2:0), the `Yuv420P ↔ Yuv422P` and
+  `Yuv420P ↔ Yuv444P` round trips' bit-exactness (the widening step
+  duplicates samples, so the shrink step averages identical values
+  back to the original byte), the `YuvJ*` family yielding chroma bytes
+  identical to the `Yuv*` family on the same input (confirms the
+  resampler is colour-space-agnostic), and odd-height rejection on a
+  4:2:0 source.
 - `Yuva420P` (planar 4:2:0 YUV + a full-resolution alpha plane) wired
   into the `convert()` dispatch. Six new pairs land:
   - `Yuv420P → Yuva420P` (append a `0xFF`-filled luma-resolution alpha

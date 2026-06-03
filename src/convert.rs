@@ -220,6 +220,28 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgba,  P::Nv12, RgbToNv { is_nv12: true, alpha_in: true }),
         (P::Rgba,  P::Nv21, RgbToNv { is_nv12: false, alpha_in: true }),
 
+        // Direct planar YUV ↔ planar YUV (chroma resample only — luma
+        // copied byte-for-byte). Limited-range BT.x carriage where the
+        // YUV ↔ YUV step never visits RGB. Six entries cover every
+        // ordered pair on (4:2:0, 4:2:2, 4:4:4).
+        (P::Yuv420P, P::Yuv422P, ChromaResample { src_wsub: 2, src_hsub: 2, dst_wsub: 2, dst_hsub: 1 }),
+        (P::Yuv420P, P::Yuv444P, ChromaResample { src_wsub: 2, src_hsub: 2, dst_wsub: 1, dst_hsub: 1 }),
+        (P::Yuv422P, P::Yuv420P, ChromaResample { src_wsub: 2, src_hsub: 1, dst_wsub: 2, dst_hsub: 2 }),
+        (P::Yuv422P, P::Yuv444P, ChromaResample { src_wsub: 2, src_hsub: 1, dst_wsub: 1, dst_hsub: 1 }),
+        (P::Yuv444P, P::Yuv420P, ChromaResample { src_wsub: 1, src_hsub: 1, dst_wsub: 2, dst_hsub: 2 }),
+        (P::Yuv444P, P::Yuv422P, ChromaResample { src_wsub: 1, src_hsub: 1, dst_wsub: 2, dst_hsub: 1 }),
+
+        // Same six pairs on the full-range "J" planar family. The
+        // matrix is the same as the limited-range op (no luma/chroma
+        // rescale enters here — only chroma subsampling changes), so
+        // these reuse `ChromaResample` directly.
+        (P::YuvJ420P, P::YuvJ422P, ChromaResample { src_wsub: 2, src_hsub: 2, dst_wsub: 2, dst_hsub: 1 }),
+        (P::YuvJ420P, P::YuvJ444P, ChromaResample { src_wsub: 2, src_hsub: 2, dst_wsub: 1, dst_hsub: 1 }),
+        (P::YuvJ422P, P::YuvJ420P, ChromaResample { src_wsub: 2, src_hsub: 1, dst_wsub: 2, dst_hsub: 2 }),
+        (P::YuvJ422P, P::YuvJ444P, ChromaResample { src_wsub: 2, src_hsub: 1, dst_wsub: 1, dst_hsub: 1 }),
+        (P::YuvJ444P, P::YuvJ420P, ChromaResample { src_wsub: 1, src_hsub: 1, dst_wsub: 2, dst_hsub: 2 }),
+        (P::YuvJ444P, P::YuvJ422P, ChromaResample { src_wsub: 1, src_hsub: 1, dst_wsub: 2, dst_hsub: 1 }),
+
         // Packed 4:2:2 (YUYV / UYVY) ↔ planar Yuv422P. Pure deinterleave
         // / interleave; no colour math.
         (P::Yuyv422, P::Yuv422P, Packed422ToYuv422p { is_yuyv: true }),
@@ -331,6 +353,17 @@ enum ConvertOp {
         wsub: usize,
         hsub: usize,
         to_full: bool,
+    },
+    /// Planar YUV → planar YUV with the luma plane copied byte-for-byte
+    /// and the chroma planes resampled between two subsampling layouts.
+    /// `src_wsub` / `src_hsub` describe the source's chroma division;
+    /// `dst_wsub` / `dst_hsub` the destination's. Equal sub factors on
+    /// both sides would be a no-op and are not registered.
+    ChromaResample {
+        src_wsub: usize,
+        src_hsub: usize,
+        dst_wsub: usize,
+        dst_hsub: usize,
     },
     NvToYuv420p {
         is_nv12: bool,
@@ -445,6 +478,12 @@ impl ConvertOp {
                 hsub,
                 to_full,
             } => rescale_range(src, src_info, wsub, hsub, to_full),
+            Self::ChromaResample {
+                src_wsub,
+                src_hsub,
+                dst_wsub,
+                dst_hsub,
+            } => chroma_resample(src, src_info, src_wsub, src_hsub, dst_wsub, dst_hsub),
             Self::NvToYuv420p { is_nv12 } => nv_to_yuv420p(src, src_info, is_nv12),
             Self::Yuv420pToNv { is_nv12 } => yuv420p_to_nv(src, src_info, is_nv12),
             Self::NvToRgb { is_nv12, alpha } => nv_to_rgb(src, src_info, matrix, is_nv12, alpha),
@@ -1092,6 +1131,119 @@ fn rescale_range(
             VideoPlane {
                 stride: cw,
                 data: vp,
+            },
+        ],
+    ))
+}
+
+/// Planar YUV → planar YUV with the luma plane copied byte-for-byte and
+/// the chroma planes resampled between two subsampling layouts. Caller
+/// supplies the source and destination chroma division factors; the
+/// helper routes them through the appropriate `yuv::chroma_*` primitive
+/// (`444 ↔ 422`, `444 ↔ 420`, `422 ↔ 420`).
+///
+/// Dimensions are rejected when the source's chroma-width or height
+/// does not divide cleanly into the destination's chroma grid (e.g.
+/// odd width on a `4:2:2` source). The dispatch table only registers
+/// six pairs — every combination on `(4:2:0, 4:2:2, 4:4:4)` — so the
+/// match arms below are total.
+fn chroma_resample(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    src_wsub: usize,
+    src_hsub: usize,
+    dst_wsub: usize,
+    dst_hsub: usize,
+) -> Result<VideoFrame> {
+    if src.planes.len() < 3 {
+        return Err(Error::invalid(
+            "pixfmt: planar YUV source needs 3 planes (Y, U, V)",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    // The dimension constraint is the LCM of the two layouts' chroma
+    // grids — both src and dst need to express their U/V planes
+    // tightly, so width must be a multiple of `max(src_wsub, dst_wsub)`
+    // and height a multiple of `max(src_hsub, dst_hsub)`.
+    let wsub_max = src_wsub.max(dst_wsub);
+    let hsub_max = src_hsub.max(dst_hsub);
+    if w % wsub_max != 0 || h % hsub_max != 0 {
+        return Err(Error::invalid(
+            "pixfmt: planar YUV chroma resample needs dimensions divisible by the wider subsampling",
+        ));
+    }
+    let src_cw = w / src_wsub;
+    let src_ch = h / src_hsub;
+    let dst_cw = w / dst_wsub;
+    let dst_ch = h / dst_hsub;
+
+    // Luma plane: byte-for-byte copy (gather_tight already drops stride
+    // padding).
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    // Chroma planes: gather then route through the appropriate
+    // resampler. `u_src` and `v_src` are independent so the helper is
+    // invoked twice with identical parameters.
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, src_cw, src_ch);
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, src_cw, src_ch);
+    let mut u_dst = vec![0u8; dst_cw * dst_ch];
+    let mut v_dst = vec![0u8; dst_cw * dst_ch];
+
+    // The dispatch table only registers the six ordered pairs over
+    // `(4:2:0, 4:2:2, 4:4:4)`; any other combination is a registry
+    // bug so we route through `unreachable!`.
+    match (src_wsub, src_hsub, dst_wsub, dst_hsub) {
+        // 4:4:4 → 4:2:2  (horizontal pair-average)
+        (1, 1, 2, 1) => {
+            yuv::chroma_444_to_422(&u_src, &mut u_dst, w, h);
+            yuv::chroma_444_to_422(&v_src, &mut v_dst, w, h);
+        }
+        // 4:2:2 → 4:4:4  (horizontal duplicate)
+        (2, 1, 1, 1) => {
+            yuv::chroma_422_to_444(&u_src, &mut u_dst, w, h);
+            yuv::chroma_422_to_444(&v_src, &mut v_dst, w, h);
+        }
+        // 4:4:4 → 4:2:0  (2×2 box average)
+        (1, 1, 2, 2) => {
+            yuv::chroma_444_to_420(&u_src, &mut u_dst, w, h);
+            yuv::chroma_444_to_420(&v_src, &mut v_dst, w, h);
+        }
+        // 4:2:0 → 4:4:4  (2×2 nearest)
+        (2, 2, 1, 1) => {
+            yuv::chroma_420_to_444(&u_src, &mut u_dst, w, h);
+            yuv::chroma_420_to_444(&v_src, &mut v_dst, w, h);
+        }
+        // 4:2:2 → 4:2:0  (vertical pair-average; chroma width unchanged)
+        (2, 1, 2, 2) => {
+            yuv::chroma_422_to_420(&u_src, &mut u_dst, w, h);
+            yuv::chroma_422_to_420(&v_src, &mut v_dst, w, h);
+        }
+        // 4:2:0 → 4:2:2  (vertical duplicate; chroma width unchanged)
+        (2, 2, 2, 1) => {
+            yuv::chroma_420_to_422(&u_src, &mut u_dst, w, h);
+            yuv::chroma_420_to_422(&v_src, &mut v_dst, w, h);
+        }
+        _ => {
+            return Err(Error::unsupported(
+                "pixfmt: unregistered planar YUV chroma resample pair",
+            ))
+        }
+    }
+
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: dst_cw,
+                data: u_dst,
+            },
+            VideoPlane {
+                stride: dst_cw,
+                data: v_dst,
             },
         ],
     ))

@@ -567,3 +567,299 @@ fn yuv420p_to_yuva420p_rejects_odd_dimensions() {
     let bad_info = FrameInfo::new(PixelFormat::Yuv420P, 15, 8);
     assert!(convert(&bad, bad_info, PixelFormat::Yuva420P, &opts).is_err());
 }
+
+// ---------------------------------------------------------------------
+// Direct planar YUV ↔ planar YUV chroma resample. The dispatch now
+// covers six ordered pairs over `(4:2:0, 4:2:2, 4:4:4)` plus the same
+// six on the full-range "J" family — twelve new entries that previously
+// returned `Error::Unsupported`. Callers that need to switch chroma
+// subsampling without colour-space conversion no longer have to stage
+// through `Rgb24`.
+
+/// Build a tightly-packed planar YUV frame from synthetic content. The
+/// luma plane is a 2-axis ramp; the chroma planes are gentler ramps
+/// offset around 128. Returns the frame plus its `FrameInfo`.
+fn synth_planar_yuv(format: PixelFormat, w: u32, h: u32) -> (VideoFrame, FrameInfo) {
+    let (wsub, hsub) = match format {
+        PixelFormat::Yuv420P | PixelFormat::YuvJ420P => (2, 2),
+        PixelFormat::Yuv422P | PixelFormat::YuvJ422P => (2, 1),
+        PixelFormat::Yuv444P | PixelFormat::YuvJ444P => (1, 1),
+        _ => panic!("synth_planar_yuv: unsupported format {format:?}"),
+    };
+    let cw = (w as usize) / wsub;
+    let ch = (h as usize) / hsub;
+    let mut yp = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            yp.push(((x * 7 + y * 11) & 0xFF) as u8);
+        }
+    }
+    let mut up = Vec::with_capacity(cw * ch);
+    let mut vp = Vec::with_capacity(cw * ch);
+    for y in 0..ch {
+        for x in 0..cw {
+            up.push(128u8.wrapping_add(((x * 3 + y * 5) & 0x3F) as u8));
+            vp.push(128u8.wrapping_add(((x * 5 + y * 3) & 0x3F) as u8));
+        }
+    }
+    let frame = VideoFrame {
+        pts: None,
+        planes: vec![
+            VideoPlane {
+                stride: w as usize,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw,
+                data: up,
+            },
+            VideoPlane {
+                stride: cw,
+                data: vp,
+            },
+        ],
+    };
+    (frame, FrameInfo::new(format, w, h))
+}
+
+#[test]
+fn yuv420p_to_yuv422p_direct_copies_luma_and_widens_chroma() {
+    // 4:2:0 → 4:2:2: chroma width unchanged, height doubled by
+    // vertical replication. Luma copies byte-for-byte.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv420P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv422P, &opts).expect("420 → 422");
+    assert_eq!(out.planes.len(), 3);
+    assert_eq!(out.planes[0].stride, 16);
+    assert_eq!(out.planes[1].stride, 8);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    // Chroma plane height doubles via row-duplicate; each source row at
+    // chroma index `cr` lands at destination rows `cr*2` and `cr*2+1`.
+    let cw = 8;
+    let ch_src = 4;
+    for cr in 0..ch_src {
+        let src_row = &src.planes[1].data[cr * cw..(cr + 1) * cw];
+        let dst_row_a = &out.planes[1].data[(cr * 2) * cw..(cr * 2 + 1) * cw];
+        let dst_row_b = &out.planes[1].data[(cr * 2 + 1) * cw..(cr * 2 + 2) * cw];
+        assert_eq!(src_row, dst_row_a, "U row {cr} top");
+        assert_eq!(src_row, dst_row_b, "U row {cr} bottom");
+    }
+}
+
+#[test]
+fn yuv420p_to_yuv444p_direct_doubles_both_chroma_axes() {
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv420P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv444P, &opts).expect("420 → 444");
+    assert_eq!(out.planes[1].stride, 16);
+    assert_eq!(out.planes[1].data.len(), 16 * 8);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    // Nearest-neighbour: each source chroma sample populates a 2×2
+    // square in the destination.
+    let cw_src = 8;
+    let w_dst = 16;
+    for cr in 0..4 {
+        for cc in 0..cw_src {
+            let s = src.planes[1].data[cr * cw_src + cc];
+            let r0 = cr * 2;
+            let r1 = cr * 2 + 1;
+            let c0 = cc * 2;
+            let c1 = cc * 2 + 1;
+            assert_eq!(out.planes[1].data[r0 * w_dst + c0], s);
+            assert_eq!(out.planes[1].data[r0 * w_dst + c1], s);
+            assert_eq!(out.planes[1].data[r1 * w_dst + c0], s);
+            assert_eq!(out.planes[1].data[r1 * w_dst + c1], s);
+        }
+    }
+}
+
+#[test]
+fn yuv422p_to_yuv420p_direct_halves_chroma_height() {
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv422P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv420P, &opts).expect("422 → 420");
+    assert_eq!(out.planes[1].stride, 8);
+    assert_eq!(out.planes[1].data.len(), 8 * 4);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    // Vertical pair-average with rounding: dst[cr,cc] = round((a + b)/2)
+    // where a = src[2*cr, cc], b = src[2*cr + 1, cc]. Spot-check a few.
+    let cw = 8;
+    for cr in 0..4 {
+        for cc in 0..cw {
+            let a = src.planes[1].data[(cr * 2) * cw + cc] as u16;
+            let b = src.planes[1].data[(cr * 2 + 1) * cw + cc] as u16;
+            // round-half-up on a u16 sum — matches the chroma resampler's
+            // expression `(a + b).div_ceil(2)`.
+            let want = (a + b).div_ceil(2);
+            assert_eq!(
+                out.planes[1].data[cr * cw + cc] as u16,
+                want,
+                "cr={cr} cc={cc}"
+            );
+        }
+    }
+}
+
+#[test]
+fn yuv422p_to_yuv444p_direct_widens_chroma_width() {
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv422P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv444P, &opts).expect("422 → 444");
+    assert_eq!(out.planes[1].stride, 16);
+    assert_eq!(out.planes[1].data.len(), 16 * 8);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    // Horizontal duplicate: each source byte appears twice consecutively.
+    let cw_src = 8;
+    let w_dst = 16;
+    for row in 0..8 {
+        for cc in 0..cw_src {
+            let s = src.planes[1].data[row * cw_src + cc];
+            assert_eq!(out.planes[1].data[row * w_dst + cc * 2], s);
+            assert_eq!(out.planes[1].data[row * w_dst + cc * 2 + 1], s);
+        }
+    }
+}
+
+#[test]
+fn yuv444p_to_yuv422p_direct_averages_horizontal_pairs() {
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv444P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv422P, &opts).expect("444 → 422");
+    assert_eq!(out.planes[1].stride, 8);
+    assert_eq!(out.planes[1].data.len(), 8 * 8);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    // Horizontal pair-average with rounding.
+    let cw_src = 16;
+    let cw_dst = 8;
+    for row in 0..8 {
+        for cc in 0..cw_dst {
+            let a = src.planes[1].data[row * cw_src + cc * 2] as u16;
+            let b = src.planes[1].data[row * cw_src + cc * 2 + 1] as u16;
+            let want = (a + b).div_ceil(2);
+            assert_eq!(out.planes[1].data[row * cw_dst + cc] as u16, want);
+        }
+    }
+}
+
+#[test]
+fn yuv444p_to_yuv420p_direct_averages_2x2_blocks() {
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv444P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv420P, &opts).expect("444 → 420");
+    assert_eq!(out.planes[1].stride, 8);
+    assert_eq!(out.planes[1].data.len(), 8 * 4);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    // 2×2 box average: dst[cr,cc] = round((a + b + c + d)/4) with +2
+    // rounding before /4 to match the helper's expression `(s + 2) / 4`.
+    let cw_src = 16;
+    let cw_dst = 8;
+    for cr in 0..4 {
+        for cc in 0..cw_dst {
+            let mut s = 0u32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    s += src.planes[1].data[(cr * 2 + dy) * cw_src + cc * 2 + dx] as u32;
+                }
+            }
+            let want = (s + 2) / 4;
+            assert_eq!(out.planes[1].data[cr * cw_dst + cc] as u32, want);
+        }
+    }
+}
+
+#[test]
+fn yuv420p_to_yuv444p_round_trip_back_to_420p_is_bit_exact() {
+    // 4:2:0 → 4:4:4 widens chroma by nearest-neighbour (duplicating
+    // each sample into a 2×2 block). Round-tripping through 4:4:4 and
+    // back averages those four identical samples, which gives the
+    // original byte exactly — so the round trip is bit-exact.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv420P, 16, 8);
+    let stage = convert(&src, info, PixelFormat::Yuv444P, &opts).expect("→444");
+    let stage_info = FrameInfo::new(PixelFormat::Yuv444P, 16, 8);
+    let back = convert(&stage, stage_info, PixelFormat::Yuv420P, &opts).expect("→420 back");
+    assert_eq!(back.planes[0].data, src.planes[0].data, "luma round trip");
+    assert_eq!(back.planes[1].data, src.planes[1].data, "U round trip");
+    assert_eq!(back.planes[2].data, src.planes[2].data, "V round trip");
+}
+
+#[test]
+fn yuv420p_to_yuv422p_round_trip_back_to_420p_is_bit_exact() {
+    // 4:2:0 → 4:2:2 widens chroma by row-duplicate; the reverse step
+    // averages the duplicate rows back to the original byte. Result is
+    // bit-exact.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv420P, 16, 8);
+    let stage = convert(&src, info, PixelFormat::Yuv422P, &opts).expect("→422");
+    let stage_info = FrameInfo::new(PixelFormat::Yuv422P, 16, 8);
+    let back = convert(&stage, stage_info, PixelFormat::Yuv420P, &opts).expect("→420 back");
+    assert_eq!(back.planes[0].data, src.planes[0].data);
+    assert_eq!(back.planes[1].data, src.planes[1].data);
+    assert_eq!(back.planes[2].data, src.planes[2].data);
+}
+
+#[test]
+fn yuvj_planar_inter_conversions_route_through_same_chroma_resampler() {
+    // The "J" full-range family reuses the same chroma resampler — the
+    // matrix coefficient table never enters here, only chroma
+    // subsampling. So a `YuvJ420P → YuvJ444P` conversion should
+    // produce bit-identical chroma to a `Yuv420P → Yuv444P` conversion
+    // run on the same byte content.
+    let opts = ConvertOptions::default();
+    let (limited, limited_info) = synth_planar_yuv(PixelFormat::Yuv420P, 16, 8);
+    let mut full = limited.clone();
+    let full_info = FrameInfo::new(PixelFormat::YuvJ420P, 16, 8);
+
+    let limited_444 = convert(&limited, limited_info, PixelFormat::Yuv444P, &opts).unwrap();
+    let full_444 = convert(&full, full_info, PixelFormat::YuvJ444P, &opts).unwrap();
+    assert_eq!(limited_444.planes[0].data, full_444.planes[0].data);
+    assert_eq!(limited_444.planes[1].data, full_444.planes[1].data);
+    assert_eq!(limited_444.planes[2].data, full_444.planes[2].data);
+
+    // And the reverse direction also matches.
+    let limited_back = convert(
+        &limited_444,
+        FrameInfo::new(PixelFormat::Yuv444P, 16, 8),
+        PixelFormat::Yuv420P,
+        &opts,
+    )
+    .unwrap();
+    let full_back = convert(
+        &full_444,
+        FrameInfo::new(PixelFormat::YuvJ444P, 16, 8),
+        PixelFormat::YuvJ420P,
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(limited_back.planes[1].data, full_back.planes[1].data);
+
+    // Suppress unused-mut warning on `full` while keeping the local
+    // explicit for readability.
+    let _ = &mut full;
+}
+
+#[test]
+fn yuv420p_to_yuv422p_rejects_odd_height() {
+    // 4:2:0 source has half-height chroma; odd luma height has no
+    // 4:2:0 chroma representation. Error::Invalid expected.
+    let opts = ConvertOptions::default();
+    let bad = VideoFrame {
+        pts: None,
+        planes: vec![
+            VideoPlane {
+                stride: 16,
+                data: vec![0; 16 * 5],
+            },
+            VideoPlane {
+                stride: 8,
+                data: vec![128; 8 * 2],
+            },
+            VideoPlane {
+                stride: 8,
+                data: vec![128; 8 * 2],
+            },
+        ],
+    };
+    let bad_info = FrameInfo::new(PixelFormat::Yuv420P, 16, 5);
+    assert!(convert(&bad, bad_info, PixelFormat::Yuv422P, &opts).is_err());
+}

@@ -36,6 +36,9 @@
 //! - RGB family (Rgb24/Bgr24/Rgba/Bgra/Argb/Abgr) all-to-all.
 //! - Yuv420P/422P/444P ↔ Rgb24 / Rgba under BT.601 and BT.709, limited
 //!   and full range.
+//! - Yuv420P/422P/444P all-to-all direct (chroma resample only — luma
+//!   copied byte-for-byte, no RGB hop), plus the same six pairs on the
+//!   full-range `YuvJ*` family.
 //! - YuvJ420P/422P/444P ↔ Yuv* equivalents — plane copy with range
 //!   rescale.
 //! - Nv12/Nv21 ↔ Yuv420P, plus direct ↔ Rgb24/Rgba via a fused path
