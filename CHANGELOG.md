@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Yuva420P` (planar 4:2:0 YUV + a full-resolution alpha plane) wired
+  into the `convert()` dispatch. Six new pairs land:
+  - `Yuv420P → Yuva420P` (append a `0xFF`-filled luma-resolution alpha
+    plane to the existing Y/U/V triple; Y/U/V copied byte-for-byte).
+  - `Yuva420P → Yuv420P` (drop the trailing alpha plane).
+  - `Yuva420P → Rgba` / `Yuva420P → Rgb24` (decode the YUV part through
+    the existing 4:2:0 → RGB scalar/SIMD path; for `Rgba` the source's
+    alpha plane is carried into the 4th destination byte bit-exact, no
+    chroma-style averaging).
+  - `Rgba → Yuva420P` (split the source's alpha column into the trailing
+    plane bit-exact; YUV from the proven 4:2:0 encoder).
+  - `Rgb24 → Yuva420P` (synthesise an opaque luma-resolution alpha
+    plane).
+  Odd width or height is rejected with `Error::Invalid` (4:2:0 has no
+  representation for a half pixel). Seven new tests in
+  `tests/conversions.rs` pin the alpha-plane bit-exactness invariant
+  (`Yuva420P → Rgba`, `Rgba → Yuva420P`, and the
+  `Rgba → Yuva420P → Rgba` round-trip's alpha column), check that the
+  Rgb24 and Rgba destinations agree on the R/G/B columns, verify
+  opaque-alpha synthesis on the `Rgb24 → Yuva420P` direction, lock in
+  the `Yuv420P ↔ Yuva420P` lossless round-trip, and assert odd-size
+  rejection. Without these paths, every `Yuva420P` source / destination
+  through `convert()` returned `Error::Unsupported`.
 - Direct `Nv12` / `Nv21` ↔ `Rgb24` / `Rgba` conversions wired into the
   `convert()` dispatch table. Previously the only NV path was via
   `Yuv420P`; the eight new pairs (`Nv12 → Rgb24`, `Nv12 → Rgba`,

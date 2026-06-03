@@ -46,6 +46,7 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Full ↔ limited range    | `YuvJ420P` / `YuvJ422P` / `YuvJ444P` ↔ `Yuv*`                               |
 | Grayscale / mono        | `Gray8` / `Gray16Le`, `MonoBlack` / `MonoWhite` ↔ `Gray8`                   |
 | Grey + alpha            | `Ya8` ↔ `Gray8` / `Rgb24` / `Rgba` (luma broadcast, alpha carried through)  |
+| YUV + alpha             | `Yuva420P` ↔ `Yuv420P` / `Rgb24` / `Rgba` (alpha plane carried bit-exact)   |
 | Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither |
 | Colour matrices         | BT.601 / BT.709, limited (studio) / full (JPEG) range                       |
 | Dither strategies       | None, 8×8 ordered Bayer, Floyd–Steinberg                                    |
@@ -70,7 +71,7 @@ variants and `convert()` paths will land over time.
 | GBR planar               | `Gbrp`, `Gbrp10/12/16Le` — JPEG-2000, ProRes 4444, lossless H.264 GBR mode |
 | Legacy planar YUV        | `Yuv410P`, `Yuv440P` (+ `YuvJ*` mirrors) — DV, MJPEG, SD                   |
 | 4:2:2 / 4:4:4 NV         | `Nv16`, `Nv24` — common on Android / embedded                              |
-| Alpha-bearing YUV        | `YuvA422P`, `YuvA444P`, plus 10/12/16Le siblings of `Yuva420P`             |
+| Alpha-bearing YUV        | `YuvA422P`, `YuvA444P` (8-bit `Yuva420P` shipped — see table above)        |
 
 **Tier 2 — mid-term:**
 

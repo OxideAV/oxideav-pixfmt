@@ -253,6 +253,18 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Cmyk,  P::Rgba,  CmykToRgb { alpha: true }),
         (P::Rgb24, P::Cmyk,  RgbToCmyk { alpha_in: false }),
         (P::Rgba,  P::Cmyk,  RgbToCmyk { alpha_in: true }),
+
+        // Yuva420P (planar 4:2:0 YUV + a full-resolution alpha plane).
+        // The YUV planes match Yuv420P byte-for-byte; the trailing alpha
+        // plane is at luma resolution. Conversions reuse the proven 4:2:0
+        // YUV ↔ RGB paths and either drop, synthesise opaque, or carry
+        // the alpha plane through unchanged.
+        (P::Yuv420P,  P::Yuva420P, Yuv420pToYuva420p),
+        (P::Yuva420P, P::Yuv420P,  Yuva420pToYuv420p),
+        (P::Yuva420P, P::Rgb24,    Yuva420pToRgb { alpha: false }),
+        (P::Yuva420P, P::Rgba,     Yuva420pToRgb { alpha: true }),
+        (P::Rgb24,    P::Yuva420P, RgbToYuva420p { alpha_in: false }),
+        (P::Rgba,     P::Yuva420P, RgbToYuva420p { alpha_in: true }),
     ]
 };
 
@@ -368,6 +380,25 @@ enum ConvertOp {
         /// When true, source is RGBA (alpha ignored). When false, Rgb24.
         alpha_in: bool,
     },
+    /// `Yuv420P` (3 planes) → `Yuva420P` (4 planes) by appending an
+    /// opaque full-resolution alpha plane.
+    Yuv420pToYuva420p,
+    /// `Yuva420P` → `Yuv420P` by dropping the trailing alpha plane.
+    Yuva420pToYuv420p,
+    /// `Yuva420P` → packed RGB. The YUV math runs through the existing
+    /// 4:2:0 decoder; the full-resolution alpha plane is either dropped
+    /// (`alpha = false`, emit `Rgb24`) or interleaved into the output
+    /// (`alpha = true`, emit `Rgba`).
+    Yuva420pToRgb {
+        alpha: bool,
+    },
+    /// Packed RGB → `Yuva420P`. The YUV math runs through the existing
+    /// 4:2:0 encoder; the alpha plane is either synthesised opaque
+    /// (`alpha_in = false`, source is `Rgb24`) or split out of the input
+    /// (`alpha_in = true`, source is `Rgba`).
+    RgbToYuva420p {
+        alpha_in: bool,
+    },
 }
 
 impl ConvertOp {
@@ -433,6 +464,10 @@ impl ConvertOp {
             Self::RgbToPal8 { alpha_in } => rgb_to_pal8(src, src_info, opts, alpha_in),
             Self::CmykToRgb { alpha } => do_cmyk_to_rgb(src, src_info, alpha),
             Self::RgbToCmyk { alpha_in } => do_rgb_to_cmyk(src, src_info, alpha_in),
+            Self::Yuv420pToYuva420p => do_yuv420p_to_yuva420p(src, src_info),
+            Self::Yuva420pToYuv420p => do_yuva420p_to_yuv420p(src, src_info),
+            Self::Yuva420pToRgb { alpha } => do_yuva420p_to_rgb(src, src_info, matrix, alpha),
+            Self::RgbToYuva420p { alpha_in } => do_rgb_to_yuva420p(src, src_info, matrix, alpha_in),
         }
     }
 }
@@ -1573,5 +1608,221 @@ fn do_rgb_to_cmyk(src: &VideoFrame, src_info: FrameInfo, alpha_in: bool) -> Resu
             stride: w * 4,
             data: out,
         }],
+    ))
+}
+
+// -------------------------------------------------------------------------
+// Yuva420P — planar 4:2:0 YUV with an additional full-resolution alpha
+// plane. The YUV planes (Y, U, V) are byte-identical to `Yuv420P`, so
+// every conversion path here borrows the existing 4:2:0 encoder/decoder
+// and only differs in how the trailing alpha plane is created, dropped,
+// or carried through.
+
+/// `Yuv420P` → `Yuva420P`: copy Y / U / V verbatim and append a full
+/// `w × h` plane of `0xFF` (opaque) alpha. Tight-strided output.
+fn do_yuv420p_to_yuva420p(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    if src.planes.len() < 3 {
+        return Err(Error::invalid(
+            "pixfmt: Yuv420P source needs 3 planes (Y, U, V)",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 || h % 2 != 0 {
+        return Err(Error::invalid(
+            "pixfmt: Yuv420P → Yuva420P requires even dimensions",
+        ));
+    }
+    let cw = w / 2;
+    let ch = h / 2;
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
+    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
+    let ap = vec![0xFFu8; w * h];
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw,
+                data: up,
+            },
+            VideoPlane {
+                stride: cw,
+                data: vp,
+            },
+            VideoPlane {
+                stride: w,
+                data: ap,
+            },
+        ],
+    ))
+}
+
+/// `Yuva420P` → `Yuv420P`: copy the leading three planes; drop alpha.
+fn do_yuva420p_to_yuv420p(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    if src.planes.len() < 4 {
+        return Err(Error::invalid(
+            "pixfmt: Yuva420P source needs 4 planes (Y, U, V, A)",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 || h % 2 != 0 {
+        return Err(Error::invalid(
+            "pixfmt: Yuva420P → Yuv420P requires even dimensions",
+        ));
+    }
+    let cw = w / 2;
+    let ch = h / 2;
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
+    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw,
+                data: up,
+            },
+            VideoPlane {
+                stride: cw,
+                data: vp,
+            },
+        ],
+    ))
+}
+
+/// `Yuva420P` → `Rgb24` / `Rgba`: decode the 4:2:0 YUV part through the
+/// existing scalar/SIMD path, then either drop the source's alpha plane
+/// (`alpha = false`, output `Rgb24`) or interleave it into the
+/// destination's fourth byte (`alpha = true`, output `Rgba`).
+fn do_yuva420p_to_rgb(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    if src.planes.len() < 4 {
+        return Err(Error::invalid(
+            "pixfmt: Yuva420P source needs 4 planes (Y, U, V, A)",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 || h % 2 != 0 {
+        return Err(Error::invalid(
+            "pixfmt: Yuva420P → RGB requires even dimensions",
+        ));
+    }
+    let cw = w / 2;
+    let ch = h / 2;
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
+    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
+
+    let mut rgb_buf = vec![0u8; w * h * 3];
+    yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix);
+
+    if !alpha {
+        return Ok(make_frame(
+            src,
+            vec![VideoPlane {
+                stride: w * 3,
+                data: rgb_buf,
+            }],
+        ));
+    }
+
+    // Gather the alpha plane at luma resolution, then interleave into
+    // the RGBA destination at the fourth byte of each pixel.
+    let ap = gather_tight(&src.planes[3].data, src.planes[3].stride, w, h);
+    let mut rgba = vec![0u8; w * h * 4];
+    for i in 0..w * h {
+        rgba[i * 4] = rgb_buf[i * 3];
+        rgba[i * 4 + 1] = rgb_buf[i * 3 + 1];
+        rgba[i * 4 + 2] = rgb_buf[i * 3 + 2];
+        rgba[i * 4 + 3] = ap[i];
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 4,
+            data: rgba,
+        }],
+    ))
+}
+
+/// `Rgb24` / `Rgba` → `Yuva420P`: encode 4:2:0 YUV through the existing
+/// path, then either synthesise an opaque alpha plane (`alpha_in = false`,
+/// source is `Rgb24`) or split the source's alpha out into the trailing
+/// plane (`alpha_in = true`, source is `Rgba`).
+fn do_rgb_to_yuva420p(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    alpha_in: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 || h % 2 != 0 {
+        return Err(Error::invalid(
+            "pixfmt: RGB → Yuva420P requires even dimensions",
+        ));
+    }
+    let cw = w / 2;
+    let ch = h / 2;
+
+    let in_plane = &src.planes[0];
+    // Tight RGB24 + alpha plane (full resolution; opaque if input is Rgb24).
+    let mut rgb24: Vec<u8> = Vec::with_capacity(w * h * 3);
+    let mut ap: Vec<u8> = vec![0xFFu8; w * h];
+    if alpha_in {
+        for row in 0..h {
+            let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
+            for i in 0..w {
+                rgb24.push(sr[i * 4]);
+                rgb24.push(sr[i * 4 + 1]);
+                rgb24.push(sr[i * 4 + 2]);
+                ap[row * w + i] = sr[i * 4 + 3];
+            }
+        }
+    } else {
+        rgb24 = gather_tight(&in_plane.data, in_plane.stride, w * 3, h);
+        // ap stays opaque (all 0xFF).
+    }
+
+    let mut yp = vec![0u8; w * h];
+    let mut up = vec![0u8; cw * ch];
+    let mut vp = vec![0u8; cw * ch];
+    yuv::rgb24_to_yuv420(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix);
+
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw,
+                data: up,
+            },
+            VideoPlane {
+                stride: cw,
+                data: vp,
+            },
+            VideoPlane {
+                stride: w,
+                data: ap,
+            },
+        ],
     ))
 }
