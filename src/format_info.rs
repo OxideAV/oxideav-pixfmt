@@ -75,8 +75,19 @@ impl FormatInfo {
                 has_alpha: false,
                 is_palette: false,
             },
-            // Packed 4:2:2
-            P::Yuyv422 | P::Uyvy422 => Self::packed(8, false),
+            // Packed 4:2:2 — single byte-stream plane, but chroma is
+            // horizontally subsampled by 2 (one U/V pair shared
+            // between two luma samples), matching the field doc that
+            // says "2 for 4:2:x".
+            P::Yuyv422 | P::Uyvy422 => Self {
+                bit_depth: 8,
+                planes: 1,
+                chroma_w_sub: 2,
+                chroma_h_sub: 1,
+                is_planar: false,
+                has_alpha: false,
+                is_palette: false,
+            },
             // RGB family
             P::Rgb24 | P::Bgr24 => Self::packed(8, false),
             P::Rgba | P::Bgra | P::Argb | P::Abgr => Self::packed(8, true),
@@ -157,6 +168,110 @@ impl FormatInfo {
             is_palette: false,
         }
     }
+
+    /// Typed view of the chroma subsampling for a YUV-style format.
+    ///
+    /// Translates the raw `chroma_w_sub` / `chroma_h_sub` factor pair
+    /// into the named 4:n:m convention the rest of the framework
+    /// addresses by name — useful for callers that branch on the
+    /// scheme (e.g. picking a packed-422 or NV12 dispatch path) without
+    /// open-coding the `(w, h) == (2, 2)` etc. checks at every site.
+    ///
+    /// Returns:
+    ///
+    /// - [`ChromaSubsampling::None`] for formats with no chroma plane
+    ///   (RGB family, grayscale, mono, palette, packed CMYK, packed
+    ///   GBR(A) — anything where `chroma_w_sub == chroma_h_sub == 1`
+    ///   and `is_planar == false`, or the planar GBR(A) variants where
+    ///   the three colour planes are co-sited at 4:4:4 but the format
+    ///   is RGB rather than YUV).
+    /// - [`ChromaSubsampling::C444`] for 1×1 chroma siting on a YUV
+    ///   carrier (`Yuv444P*`, `YuvJ444P`).
+    /// - [`ChromaSubsampling::C422`] for 2×1 chroma siting
+    ///   (`Yuv422P*`, `YuvJ422P`, `Yuyv422`, `Uyvy422`).
+    /// - [`ChromaSubsampling::C420`] for 2×2 chroma siting
+    ///   (`Yuv420P*`, `YuvJ420P`, `Nv12`, `Nv21`, `Yuva420P`).
+    /// - [`ChromaSubsampling::C411`] for 4×1 chroma siting
+    ///   (`Yuv411P` — native NTSC DV-25 layout).
+    /// - [`ChromaSubsampling::Other`] for any future YUV variant whose
+    ///   `(w, h)` pair this method doesn't yet name. Lets callers
+    ///   detect "subsampled but not one of the four common schemes"
+    ///   without losing the raw factors carried on the `FormatInfo`.
+    pub const fn chroma_subsampling(&self) -> ChromaSubsampling {
+        // Palette indices and any RGB/grayscale carrier with no chroma
+        // subsampling map to None.
+        if self.is_palette {
+            return ChromaSubsampling::None;
+        }
+        // A chroma-less carrier shows up as (1, 1) on a non-planar
+        // format: RGB / grayscale / mono / packed CMYK. Planar layouts
+        // with (1, 1) are either YUV 4:4:4 or planar GBR(A) — both
+        // collapse to C444 below (callers that need to distinguish
+        // YUV-vs-GBR look at PixelFormat directly).
+        if self.chroma_w_sub == 1 && self.chroma_h_sub == 1 && !self.is_planar {
+            return ChromaSubsampling::None;
+        }
+        if self.chroma_w_sub == 1 && self.chroma_h_sub == 1 {
+            // YUV 4:4:4 has 3 planes and no alpha (or 4 with alpha on
+            // a future variant); planar GBR also has 3-or-4. The
+            // difference is whether this is a YUV carrier. We can't
+            // tell that from `FormatInfo` alone, so we map both 4:4:4
+            // planar layouts to `C444` here — callers that need to
+            // distinguish "luma+chroma 4:4:4" from "GBR 4:4:4" should
+            // branch on the `PixelFormat` directly. This matches how
+            // the rest of the conversion surface treats them: the
+            // chroma-subsample factor pair is the conservative answer.
+            return ChromaSubsampling::C444;
+        }
+        match (self.chroma_w_sub, self.chroma_h_sub) {
+            (2, 2) => ChromaSubsampling::C420,
+            (2, 1) => ChromaSubsampling::C422,
+            (4, 1) => ChromaSubsampling::C411,
+            _ => ChromaSubsampling::Other,
+        }
+    }
+
+    /// True when the format carries chroma planes at less than full
+    /// luma resolution (`C422`, `C420`, `C411`, or `Other`). Sugar
+    /// over [`Self::chroma_subsampling`] for the common
+    /// "is this losing chroma detail relative to 4:4:4?" predicate.
+    pub const fn is_chroma_subsampled(&self) -> bool {
+        matches!(
+            self.chroma_subsampling(),
+            ChromaSubsampling::C422
+                | ChromaSubsampling::C420
+                | ChromaSubsampling::C411
+                | ChromaSubsampling::Other,
+        )
+    }
+}
+
+/// Named view of the 4:n:m chroma siting scheme on a YUV-style format.
+///
+/// Returned by [`FormatInfo::chroma_subsampling`]. The variants line up
+/// with how the rest of the framework addresses chroma layouts by name
+/// — see [`oxideav_core::PixelFormat`] for the per-variant docs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChromaSubsampling {
+    /// No chroma plane at all — RGB / grayscale / mono / palette /
+    /// packed-CMYK carriers.
+    None,
+    /// 4:4:4 chroma siting (`chroma_w_sub == chroma_h_sub == 1`) on a
+    /// planar carrier.
+    C444,
+    /// 4:2:2 chroma siting (horizontal subsample by 2, vertical full).
+    C422,
+    /// 4:2:0 chroma siting (horizontal AND vertical subsample by 2).
+    C420,
+    /// 4:1:1 chroma siting (horizontal subsample by 4, vertical full).
+    /// Used by NTSC DV-25 and as a legal JPEG sampling layout.
+    C411,
+    /// Any other `(chroma_w_sub, chroma_h_sub)` pair on a YUV carrier
+    /// that this enum doesn't yet name. Callers that need the exact
+    /// factors should read [`FormatInfo::chroma_w_sub`] and
+    /// [`FormatInfo::chroma_h_sub`] directly.
+    Other,
 }
 
 #[cfg(test)]
@@ -255,6 +370,158 @@ mod tests {
         assert_eq!(info.chroma_h_sub, 1);
         assert!(info.is_planar);
         assert!(!info.has_alpha);
+    }
+
+    #[test]
+    fn chroma_subsampling_named_view() {
+        use ChromaSubsampling as C;
+
+        // 4:2:0 — both 8-bit and full-range, planar and semi-planar
+        // carriers map to C420.
+        for fmt in [P::Yuv420P, P::YuvJ420P, P::Nv12, P::Nv21, P::Yuva420P] {
+            assert_eq!(
+                FormatInfo::of(fmt).chroma_subsampling(),
+                C::C420,
+                "expected C420 for {fmt:?}",
+            );
+        }
+        // 10/12-bit 4:2:0 mirror the 8-bit answer — bit depth is
+        // orthogonal to chroma siting.
+        for fmt in [P::Yuv420P10Le, P::Yuv420P12Le] {
+            assert_eq!(FormatInfo::of(fmt).chroma_subsampling(), C::C420);
+        }
+
+        // 4:2:2 — planar + packed carriers, all bit depths.
+        for fmt in [
+            P::Yuv422P,
+            P::YuvJ422P,
+            P::Yuyv422,
+            P::Uyvy422,
+            P::Yuv422P10Le,
+            P::Yuv422P12Le,
+        ] {
+            assert_eq!(
+                FormatInfo::of(fmt).chroma_subsampling(),
+                C::C422,
+                "expected C422 for {fmt:?}",
+            );
+        }
+
+        // 4:4:4 — all bit depths. Planar GBR(A) lands on C444 too
+        // because its sample siting is 4:4:4 — callers that need to
+        // distinguish YUV-vs-GBR look at PixelFormat directly.
+        for fmt in [
+            P::Yuv444P,
+            P::YuvJ444P,
+            P::Yuv444P10Le,
+            P::Yuv444P12Le,
+            P::Gbrp10Le,
+            P::Gbrap10Le,
+            P::Gbrp12Le,
+            P::Gbrap12Le,
+            P::Gbrp14Le,
+            P::Gbrap14Le,
+        ] {
+            assert_eq!(
+                FormatInfo::of(fmt).chroma_subsampling(),
+                C::C444,
+                "expected C444 for {fmt:?}",
+            );
+        }
+
+        // 4:1:1 — NTSC DV-25 layout.
+        assert_eq!(FormatInfo::of(P::Yuv411P).chroma_subsampling(), C::C411,);
+
+        // Chroma-less carriers — RGB family, grayscale, mono, palette,
+        // packed CMYK. All map to None and `is_chroma_subsampled`
+        // returns false.
+        for fmt in [
+            P::Rgb24,
+            P::Bgr24,
+            P::Rgba,
+            P::Bgra,
+            P::Argb,
+            P::Abgr,
+            P::Rgb48Le,
+            P::Rgba64Le,
+            P::Gray8,
+            P::Gray16Le,
+            P::Gray10Le,
+            P::Gray12Le,
+            P::Ya8,
+            P::MonoBlack,
+            P::MonoWhite,
+            P::Pal8,
+            P::Cmyk,
+        ] {
+            let info = FormatInfo::of(fmt);
+            assert_eq!(
+                info.chroma_subsampling(),
+                C::None,
+                "expected None for {fmt:?}",
+            );
+            assert!(
+                !info.is_chroma_subsampled(),
+                "{fmt:?} unexpectedly flagged as chroma-subsampled",
+            );
+        }
+
+        // `is_chroma_subsampled` discriminates C422 / C420 / C411
+        // (true) from C444 / None (false).
+        assert!(FormatInfo::of(P::Yuv420P).is_chroma_subsampled());
+        assert!(FormatInfo::of(P::Yuv422P).is_chroma_subsampled());
+        assert!(FormatInfo::of(P::Yuv411P).is_chroma_subsampled());
+        assert!(!FormatInfo::of(P::Yuv444P).is_chroma_subsampled());
+        assert!(!FormatInfo::of(P::Gbrp10Le).is_chroma_subsampled());
+    }
+
+    #[test]
+    fn chroma_subsampling_matches_raw_factors() {
+        // Every variant the static `FormatInfo::of` table covers must
+        // line up: chroma_subsampling()'s decision agrees with the
+        // raw (chroma_w_sub, chroma_h_sub) pair.
+        use ChromaSubsampling as C;
+        let cases: &[(P, C)] = &[
+            (P::Yuv420P, C::C420),
+            (P::Yuv422P, C::C422),
+            (P::Yuv444P, C::C444),
+            (P::Yuv411P, C::C411),
+            (P::Nv12, C::C420),
+            (P::Yuva420P, C::C420),
+            (P::Rgb24, C::None),
+            (P::Gray8, C::None),
+            (P::Gbrp10Le, C::C444),
+        ];
+        for &(fmt, expected) in cases {
+            let info = FormatInfo::of(fmt);
+            assert_eq!(info.chroma_subsampling(), expected);
+            // Sanity: factors and the named view agree.
+            match expected {
+                C::C420 => {
+                    assert_eq!(info.chroma_w_sub, 2);
+                    assert_eq!(info.chroma_h_sub, 2);
+                }
+                C::C422 => {
+                    assert_eq!(info.chroma_w_sub, 2);
+                    assert_eq!(info.chroma_h_sub, 1);
+                }
+                C::C411 => {
+                    assert_eq!(info.chroma_w_sub, 4);
+                    assert_eq!(info.chroma_h_sub, 1);
+                }
+                C::C444 => {
+                    assert_eq!(info.chroma_w_sub, 1);
+                    assert_eq!(info.chroma_h_sub, 1);
+                }
+                C::None => {
+                    // For chroma-less carriers the factors are also
+                    // trivially 1×1.
+                    assert_eq!(info.chroma_w_sub, 1);
+                    assert_eq!(info.chroma_h_sub, 1);
+                }
+                C::Other => {}
+            }
+        }
     }
 
     #[test]

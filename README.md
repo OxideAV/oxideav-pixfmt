@@ -52,6 +52,7 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Colour matrices         | BT.601 / BT.709, limited (studio) / full (JPEG) range                       |
 | Dither strategies       | None, 8×8 ordered Bayer, Floyd–Steinberg                                    |
 | Alpha / compositing     | Porter-Duff "over" (premul + straight), premul/unpremul, alpha-mask blit    |
+| Format introspection    | `FormatInfo::of(fmt)` → planes / bit-depth / `ChromaSubsampling` typed view |
 
 ## Roadmap
 

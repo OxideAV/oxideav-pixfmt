@@ -83,5 +83,5 @@ pub use alpha::{
 pub use convert::{
     convert, convert_in_place_if_same, ColorSpace, ConvertOptions, Dither, FrameInfo,
 };
-pub use format_info::FormatInfo;
+pub use format_info::{ChromaSubsampling, FormatInfo};
 pub use palette::{generate_palette, Palette, PaletteGenOptions, PaletteStrategy};

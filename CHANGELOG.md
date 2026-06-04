@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FormatInfo::chroma_subsampling()` typed view returning a new
+  `ChromaSubsampling` enum (`None` / `C444` / `C422` / `C420` / `C411` /
+  `Other`), plus a `FormatInfo::is_chroma_subsampled()` predicate. Lets
+  callers branch on the named 4:n:m scheme — e.g. picking a 4:2:0,
+  4:2:2, or 4:4:4 dispatch path — without open-coding the
+  `(chroma_w_sub, chroma_h_sub) == (2, 2)` etc. tuple checks at every
+  call site. The mapping is derived from the same factor pair already
+  carried on `FormatInfo`, so the answer agrees by construction with
+  the raw fields; the enum is `#[non_exhaustive]` so future schemes
+  (4:4:0, 4:1:0, …) can land without a breaking change.
 - Direct planar YUV ↔ planar YUV conversions wired into the `convert()`
   dispatch — twelve new pairs that previously returned
   `Error::Unsupported`. The full Cartesian product on
