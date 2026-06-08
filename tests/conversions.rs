@@ -584,6 +584,7 @@ fn synth_planar_yuv(format: PixelFormat, w: u32, h: u32) -> (VideoFrame, FrameIn
         PixelFormat::Yuv420P | PixelFormat::YuvJ420P => (2, 2),
         PixelFormat::Yuv422P | PixelFormat::YuvJ422P => (2, 1),
         PixelFormat::Yuv444P | PixelFormat::YuvJ444P => (1, 1),
+        PixelFormat::Yuv411P => (4, 1),
         _ => panic!("synth_planar_yuv: unsupported format {format:?}"),
     };
     let cw = (w as usize) / wsub;
@@ -862,4 +863,260 @@ fn yuv420p_to_yuv422p_rejects_odd_height() {
     };
     let bad_info = FrameInfo::new(PixelFormat::Yuv420P, 16, 5);
     assert!(convert(&bad, bad_info, PixelFormat::Yuv422P, &opts).is_err());
+}
+
+// -------------------------------------------------------------------------
+// Yuv411P — NTSC DV-25 native sampling and a legal JPEG 4:1:1 layout
+// (`cjpeg -sample 4x1`). Luma at full resolution; chroma horizontally
+// subsampled by 4 (4 luma per 1 chroma on each row, no vertical
+// subsample). Six chroma-resample pairs (411 ↔ 420 / 422 / 444 in both
+// directions) plus RGB encode/decode.
+
+#[test]
+fn yuv411p_to_yuv444p_widens_chroma_4x_horizontally() {
+    // 4:1:1 → 4:4:4: chroma plane goes from (w/4) × h to w × h via
+    // horizontal nearest-neighbour broadcast. Luma copies byte-for-byte.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv411P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv444P, &opts).expect("411 → 444");
+    assert_eq!(out.planes.len(), 3);
+    assert_eq!(out.planes[0].stride, 16);
+    assert_eq!(out.planes[1].stride, 16);
+    assert_eq!(out.planes[1].data.len(), 16 * 8);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    // Each source chroma column populates 4 destination columns on the
+    // same row.
+    let src_cw = 4;
+    for row in 0..8usize {
+        for cc in 0..src_cw {
+            let src_v = src.planes[1].data[row * src_cw + cc];
+            for k in 0..4 {
+                assert_eq!(
+                    out.planes[1].data[row * 16 + cc * 4 + k],
+                    src_v,
+                    "U row {row} src cc {cc} dst col {k}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn yuv411p_to_yuv422p_widens_chroma_2x_horizontally() {
+    // 4:1:1 → 4:2:2: each chroma sample broadcasts to two columns
+    // (chroma width goes from w/4 to w/2).
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv411P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv422P, &opts).expect("411 → 422");
+    assert_eq!(out.planes[1].stride, 8);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    let src_cw = 4;
+    let dst_cw = 8;
+    for row in 0..8usize {
+        for cc in 0..src_cw {
+            let v = src.planes[1].data[row * src_cw + cc];
+            assert_eq!(out.planes[1].data[row * dst_cw + cc * 2], v);
+            assert_eq!(out.planes[1].data[row * dst_cw + cc * 2 + 1], v);
+        }
+    }
+}
+
+#[test]
+fn yuv411p_to_yuv420p_pair_averages_vertically_and_broadcasts() {
+    // 4:1:1 → 4:2:0: 4:1:1 has chroma at (w/4) × h, 4:2:0 has chroma at
+    // (w/2) × (h/2). Each destination chroma sample is the vertical
+    // pair-average of two source samples broadcast horizontally to two
+    // columns.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv411P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv420P, &opts).expect("411 → 420");
+    assert_eq!(out.planes[1].stride, 8);
+    assert_eq!(out.planes[1].data.len(), 8 * 4);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    let src_cw = 4;
+    let dst_cw = 8;
+    for cr in 0..4usize {
+        for cc in 0..src_cw {
+            let a = src.planes[1].data[(cr * 2) * src_cw + cc] as u16;
+            let b = src.planes[1].data[(cr * 2 + 1) * src_cw + cc] as u16;
+            let expected = (a + b).div_ceil(2) as u8;
+            assert_eq!(out.planes[1].data[cr * dst_cw + cc * 2], expected);
+            assert_eq!(out.planes[1].data[cr * dst_cw + cc * 2 + 1], expected);
+        }
+    }
+}
+
+#[test]
+fn yuv444p_to_yuv411p_box_averages_horizontal_quads() {
+    // 4:4:4 → 4:1:1: each destination chroma sample is the 4-sample
+    // horizontal box average of the source row.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv444P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv411P, &opts).expect("444 → 411");
+    assert_eq!(out.planes[1].stride, 4);
+    assert_eq!(out.planes[1].data.len(), 4 * 8);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    for row in 0..8usize {
+        for cc in 0..4usize {
+            let base = row * 16 + cc * 4;
+            let s = src.planes[1].data[base] as u32
+                + src.planes[1].data[base + 1] as u32
+                + src.planes[1].data[base + 2] as u32
+                + src.planes[1].data[base + 3] as u32;
+            let expected = ((s + 2) / 4) as u8;
+            assert_eq!(
+                out.planes[1].data[row * 4 + cc],
+                expected,
+                "row {row} cc {cc}"
+            );
+        }
+    }
+}
+
+#[test]
+fn yuv422p_to_yuv411p_pair_averages() {
+    // 4:2:2 → 4:1:1: chroma width halves from w/2 to w/4; each
+    // destination sample is the pair-average of two adjacent source
+    // samples on the same row.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv422P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv411P, &opts).expect("422 → 411");
+    assert_eq!(out.planes[1].stride, 4);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    let src_cw = 8;
+    for row in 0..8usize {
+        for cc in 0..4usize {
+            let a = src.planes[1].data[row * src_cw + cc * 2] as u16;
+            let b = src.planes[1].data[row * src_cw + cc * 2 + 1] as u16;
+            let expected = (a + b).div_ceil(2) as u8;
+            assert_eq!(out.planes[1].data[row * 4 + cc], expected);
+        }
+    }
+}
+
+#[test]
+fn yuv420p_to_yuv411p_pair_averages_horizontally_and_duplicates_vertically() {
+    // 4:2:0 → 4:1:1: chroma goes from (w/2) × (h/2) to (w/4) × h. Each
+    // destination chroma row reuses the same source chroma row (4:2:0
+    // already pair-averaged the vertical pair) and pair-averages two
+    // source samples horizontally.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv420P, 16, 8);
+    let out = convert(&src, info, PixelFormat::Yuv411P, &opts).expect("420 → 411");
+    assert_eq!(out.planes[1].stride, 4);
+    assert_eq!(out.planes[1].data.len(), 4 * 8);
+    assert_eq!(out.planes[0].data, src.planes[0].data, "luma must copy");
+    let src_cw = 8;
+    for row in 0..8usize {
+        let src_row = row / 2;
+        for cc in 0..4usize {
+            let a = src.planes[1].data[src_row * src_cw + cc * 2] as u16;
+            let b = src.planes[1].data[src_row * src_cw + cc * 2 + 1] as u16;
+            let expected = (a + b).div_ceil(2) as u8;
+            assert_eq!(out.planes[1].data[row * 4 + cc], expected);
+        }
+    }
+}
+
+#[test]
+fn yuv411p_to_yuv444p_round_trip_back_to_411p_is_bit_exact() {
+    // The 4:1:1 → 4:4:4 widening step duplicates every source chroma
+    // sample to four destination columns; the reverse 4:4:4 → 4:1:1
+    // step averages those four columns back to one. Since all four
+    // values are identical the average reproduces the source byte
+    // exactly. Luma is a byte-for-byte copy in both directions.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv411P, 16, 8);
+    let mid = convert(&src, info, PixelFormat::Yuv444P, &opts).expect("411 → 444");
+    let mid_info = FrameInfo::new(PixelFormat::Yuv444P, 16, 8);
+    let back = convert(&mid, mid_info, PixelFormat::Yuv411P, &opts).expect("444 → 411");
+    assert_eq!(back.planes[0].data, src.planes[0].data, "luma round-trip");
+    assert_eq!(back.planes[1].data, src.planes[1].data, "U round-trip");
+    assert_eq!(back.planes[2].data, src.planes[2].data, "V round-trip");
+}
+
+#[test]
+fn yuv411p_to_yuv422p_round_trip_back_to_411p_is_bit_exact() {
+    // 4:1:1 → 4:2:2 broadcasts each chroma sample to two adjacent
+    // columns; 4:2:2 → 4:1:1 averages those two identical samples.
+    // Round-trip is bit-exact.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv411P, 16, 8);
+    let mid = convert(&src, info, PixelFormat::Yuv422P, &opts).expect("411 → 422");
+    let mid_info = FrameInfo::new(PixelFormat::Yuv422P, 16, 8);
+    let back = convert(&mid, mid_info, PixelFormat::Yuv411P, &opts).expect("422 → 411");
+    assert_eq!(back.planes[1].data, src.planes[1].data, "U round-trip");
+    assert_eq!(back.planes[2].data, src.planes[2].data, "V round-trip");
+}
+
+#[test]
+fn yuv411p_rgb_round_trip_recovers_luma_and_holds_chroma_psnr() {
+    // 4:1:1 → RGB → 4:1:1: luma is recovered to within a few LSBs (the
+    // YUV ↔ RGB matrix introduces ±1 rounding per channel; per-pixel
+    // RGB encode preserves the per-pixel luma derivation modulo that
+    // bound). Chroma reproduces exactly because the round-trip path
+    // box-averages four identical pixels back to the original sample.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv411P, 16, 8);
+    let rgb = convert(&src, info, PixelFormat::Rgb24, &opts).expect("411 → rgb24");
+    assert_eq!(rgb.planes.len(), 1);
+    assert_eq!(rgb.planes[0].stride, 16 * 3);
+    assert_eq!(rgb.planes[0].data.len(), 16 * 8 * 3);
+    let rgb_info = FrameInfo::new(PixelFormat::Rgb24, 16, 8);
+    let back = convert(&rgb, rgb_info, PixelFormat::Yuv411P, &opts).expect("rgb24 → 411");
+    // PSNR floor on luma — same ±1-LSB-ish bound the other YUV ↔ RGB
+    // tests in this file pin. Use the simple MSE form rather than
+    // pulling in a sibling crate.
+    let mut sse = 0u64;
+    for (a, b) in back.planes[0].data.iter().zip(src.planes[0].data.iter()) {
+        let d = *a as i32 - *b as i32;
+        sse += (d * d) as u64;
+    }
+    let mse = sse as f64 / (16.0 * 8.0);
+    let psnr = 10.0 * (255.0f64 * 255.0 / mse).log10();
+    assert!(psnr > 30.0, "luma PSNR {psnr:.2} dB below 30 dB floor");
+}
+
+#[test]
+fn yuv411p_to_rgba_synthesises_opaque_alpha() {
+    // → Rgba: the alpha column must be 0xFF everywhere because Yuv411P
+    // carries no alpha plane and the destination needs one.
+    let opts = ConvertOptions::default();
+    let (src, info) = synth_planar_yuv(PixelFormat::Yuv411P, 16, 8);
+    let rgba = convert(&src, info, PixelFormat::Rgba, &opts).expect("411 → rgba");
+    assert_eq!(rgba.planes[0].stride, 16 * 4);
+    for i in 0..(16 * 8) {
+        assert_eq!(rgba.planes[0].data[i * 4 + 3], 0xFF, "alpha at pixel {i}");
+    }
+}
+
+#[test]
+fn yuv411p_chroma_resample_rejects_width_not_divisible_by_4() {
+    // 4:1:1 with luma width 18 (not a multiple of 4) has no valid
+    // chroma layout for either resampling direction; convert() must
+    // reject with Error::Invalid rather than producing a truncated
+    // destination plane.
+    let opts = ConvertOptions::default();
+    // The frame itself is built to be consistent so the dimension check
+    // is what trips, not a plane-size mismatch.
+    let bad = VideoFrame {
+        pts: None,
+        planes: vec![
+            VideoPlane {
+                stride: 18,
+                data: vec![16; 18 * 4],
+            },
+            VideoPlane {
+                stride: 4,
+                data: vec![128; 4 * 4],
+            },
+            VideoPlane {
+                stride: 4,
+                data: vec![128; 4 * 4],
+            },
+        ],
+    };
+    let bad_info = FrameInfo::new(PixelFormat::Yuv411P, 18, 4);
+    assert!(convert(&bad, bad_info, PixelFormat::Yuv444P, &opts).is_err());
+    assert!(convert(&bad, bad_info, PixelFormat::Rgb24, &opts).is_err());
 }

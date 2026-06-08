@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Yuv411P` (4:1:1 planar — luma at full resolution, chroma horizontally
+  subsampled by 4) wired into the `convert()` dispatch table. Until now
+  every src/dst with `Yuv411P` returned `Error::Unsupported`, even
+  though the variant had a `FormatInfo::of` entry and an OxideAV-core
+  enum discriminant since 0.1.5. Ten new pairs land:
+  - `Yuv411P ↔ Yuv420P / Yuv422P / Yuv444P` (six pairs, chroma resample
+    only — luma copied byte-for-byte, no RGB hop). The widening
+    directions (411 → 444 / 422) broadcast each chroma sample
+    horizontally to the four (or two) luma columns it covers; the
+    shrinking directions (444 / 422 → 411) horizontally box-average four
+    (or two) source samples per destination sample. 411 ↔ 420 combines
+    a vertical pair-average with the horizontal step.
+  - `Yuv411P ↔ Rgb24 / Rgba` under any `ColorSpace` (BT.601 / 709 /
+    2020, limited or full range). The RGB encode/decode stages through
+    a transient 4:4:4 chroma intermediate before calling the proven
+    scalar 4:4:4 ↔ RGB matrix, so no new colour math enters the crate.
+    The `→ Rgba` direction synthesises an opaque alpha plane (0xFF
+    everywhere); the `Rgba → Yuv411P` encode ignores the source's alpha
+    column.
+  Width must be a multiple of 4 (4:1:1 has no representation for a 1-,
+  2-, or 3-luma trailing column) — odd-by-4 widths reject with
+  `Error::Invalid` instead of silently truncating. Six new
+  `chroma_411_*` primitives in `yuv::` (`chroma_444_to_411`,
+  `chroma_411_to_444`, `chroma_422_to_411`, `chroma_411_to_422`,
+  `chroma_420_to_411`, `chroma_411_to_420`) are public so low-level
+  callers can drive the chroma step directly. Ten new tests in
+  `tests/conversions.rs` pin the luma byte-for-byte invariant on every
+  direction, the chroma broadcast (411 → 444 / 422) and box-average
+  (444 / 422 / 420 → 411) shapes against hand-computed expected values,
+  the 411 ↔ 444 and 411 ↔ 422 round-trip bit-exactness (the widening
+  step broadcasts identical samples so the shrink step averages them
+  back to the original byte), an `Yuv411P` ↔ `Rgb24` round-trip PSNR
+  floor above 30 dB on a synthetic luma ramp, opaque-alpha synthesis on
+  `→ Rgba`, and odd-by-4 width rejection. Closes the long-standing gap
+  the `FormatInfo::chroma_subsampling()` enum's `C411` variant was
+  added for in `[Unreleased]` above.
 - `FormatInfo::chroma_subsampling()` typed view returning a new
   `ChromaSubsampling` enum (`None` / `C444` / `C422` / `C420` / `C411` /
   `Other`), plus a `FormatInfo::is_chroma_subsampled()` predicate. Lets

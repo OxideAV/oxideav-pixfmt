@@ -619,6 +619,135 @@ pub fn chroma_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 }
 
 // ---------------------------------------------------------------------
+// 4:1:1 chroma resamplers — horizontal subsample by 4 (one chroma sample
+// per 4 luma samples on the same row). `Yuv411P` is the native NTSC
+// DV-25 layout and a legal JPEG sampling pattern (luma h_samp=4,
+// chroma h_samp=1). The vertical dimension is unchanged from 4:4:4 /
+// 4:2:2, so the shrinkers box-average four horizontal samples and the
+// expanders broadcast each chroma sample to four luma columns —
+// horizontal mirrors of the 4:2:2 ↔ 4:4:4 helpers above.
+
+/// 4:4:4 chroma → 4:1:1 chroma (horizontal 4-sample box average; vertical
+/// dimension unchanged). `w` is the destination's full image width — the
+/// source plane is `w × h`, the destination is `(w / 4) × h`. `w` must
+/// be a multiple of 4 (4:1:1 has no representation for a 1-, 2-, or
+/// 3-luma trailing column).
+pub fn chroma_444_to_411(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let cw = w / 4;
+    debug_assert_eq!(w, cw * 4, "chroma_444_to_411: width must be /4");
+    for row in 0..h {
+        for cc in 0..cw {
+            let base = row * w + cc * 4;
+            // +2 rounds to nearest on the four-sample sum (matches the
+            // (a + b + 2) / 4 rounding already used by chroma_444_to_420).
+            let s = src[base] as u32
+                + src[base + 1] as u32
+                + src[base + 2] as u32
+                + src[base + 3] as u32;
+            dst[row * cw + cc] = ((s + 2) / 4) as u8;
+        }
+    }
+}
+
+/// 4:1:1 chroma → 4:4:4 chroma (horizontal nearest, broadcasting each
+/// chroma sample to four luma columns; vertical dimension unchanged).
+/// `w` is the destination's full image width; the source plane is
+/// `(w / 4) × h`, the destination is `w × h`.
+pub fn chroma_411_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let cw = w / 4;
+    debug_assert_eq!(w, cw * 4, "chroma_411_to_444: width must be /4");
+    for row in 0..h {
+        for cc in 0..cw {
+            let v = src[row * cw + cc];
+            let off = row * w + cc * 4;
+            dst[off] = v;
+            dst[off + 1] = v;
+            dst[off + 2] = v;
+            dst[off + 3] = v;
+        }
+    }
+}
+
+/// 4:2:2 chroma → 4:1:1 chroma (horizontal pair-average; vertical
+/// unchanged). `w` is the image width; source is `(w / 2) × h`,
+/// destination is `(w / 4) × h`.
+pub fn chroma_422_to_411(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let src_cw = w / 2;
+    let dst_cw = w / 4;
+    debug_assert_eq!(w, dst_cw * 4, "chroma_422_to_411: width must be /4");
+    for row in 0..h {
+        for cc in 0..dst_cw {
+            let base = row * src_cw + cc * 2;
+            let s = src[base] as u16 + src[base + 1] as u16;
+            dst[row * dst_cw + cc] = s.div_ceil(2) as u8;
+        }
+    }
+}
+
+/// 4:1:1 chroma → 4:2:2 chroma (horizontal pair-duplicate; vertical
+/// unchanged). Source is `(w / 4) × h`, destination is `(w / 2) × h`.
+pub fn chroma_411_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let src_cw = w / 4;
+    let dst_cw = w / 2;
+    debug_assert_eq!(w, src_cw * 4, "chroma_411_to_422: width must be /4");
+    for row in 0..h {
+        for cc in 0..src_cw {
+            let v = src[row * src_cw + cc];
+            let off = row * dst_cw + cc * 2;
+            dst[off] = v;
+            dst[off + 1] = v;
+        }
+    }
+}
+
+/// 4:2:0 chroma → 4:1:1 chroma. 4:2:0 is `(w / 2) × (h / 2)` and 4:1:1
+/// is `(w / 4) × h`. Each destination row consumes the same source
+/// chroma row (since 4:2:0 already pair-averaged the vertical pair, the
+/// 4:1:1 row above and the 4:1:1 row below share the chroma value) and
+/// horizontally pair-averages two source samples into one destination
+/// sample. `w` and `h` must both be even (4:2:0 requirement) and `w`
+/// must additionally be a multiple of 4.
+pub fn chroma_420_to_411(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let src_cw = w / 2;
+    let src_ch = h / 2;
+    let dst_cw = w / 4;
+    debug_assert_eq!(w, dst_cw * 4, "chroma_420_to_411: width must be /4");
+    debug_assert_eq!(h, src_ch * 2, "chroma_420_to_411: height must be /2");
+    for row in 0..h {
+        let src_row = row / 2;
+        for cc in 0..dst_cw {
+            let base = src_row * src_cw + cc * 2;
+            let s = src[base] as u16 + src[base + 1] as u16;
+            dst[row * dst_cw + cc] = s.div_ceil(2) as u8;
+        }
+    }
+}
+
+/// 4:1:1 chroma → 4:2:0 chroma. 4:1:1 is `(w / 4) × h` and 4:2:0 is
+/// `(w / 2) × (h / 2)`. Each destination chroma row is the vertical
+/// average of two source rows; each destination sample is the horizontal
+/// duplicate of the source sample broadcast to two columns.
+pub fn chroma_411_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let src_cw = w / 4;
+    let dst_cw = w / 2;
+    let dst_ch = h / 2;
+    debug_assert_eq!(w, src_cw * 4, "chroma_411_to_420: width must be /4");
+    debug_assert_eq!(h, dst_ch * 2, "chroma_411_to_420: height must be /2");
+    for cr in 0..dst_ch {
+        for cc in 0..src_cw {
+            let a = src[(cr * 2) * src_cw + cc] as u16;
+            let b = src[(cr * 2 + 1) * src_cw + cc] as u16;
+            let v = (a + b).div_ceil(2) as u8;
+            // Broadcast vertical-averaged chroma sample to two destination
+            // columns (4:2:0 has cw = src_cw * 2).
+            let off = cr * dst_cw + cc * 2;
+            dst[off] = v;
+            dst[off + 1] = v;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // NV12 / NV21 ↔ Yuv420P.
 
 pub fn nv12_uv_split(uv: &[u8], up: &mut [u8], vp: &mut [u8], cw: usize, ch: usize) {

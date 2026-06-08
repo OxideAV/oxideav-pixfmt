@@ -39,6 +39,11 @@
 //! - Yuv420P/422P/444P all-to-all direct (chroma resample only — luma
 //!   copied byte-for-byte, no RGB hop), plus the same six pairs on the
 //!   full-range `YuvJ*` family.
+//! - Yuv411P ↔ Yuv420P/422P/444P (chroma resample only — luma copied),
+//!   plus Yuv411P ↔ Rgb24/Rgba under BT.601/709/2020. The 4:1:1 layout
+//!   has chroma horizontally subsampled by 4 (NTSC DV-25 / JPEG
+//!   `-sample 4x1`); RGB encode and decode stage through a 4:4:4
+//!   chroma intermediate so no new colour math is introduced.
 //! - YuvJ420P/422P/444P ↔ Yuv* equivalents — plane copy with range
 //!   rescale.
 //! - Nv12/Nv21 ↔ Yuv420P, plus direct ↔ Rgb24/Rgba via a fused path

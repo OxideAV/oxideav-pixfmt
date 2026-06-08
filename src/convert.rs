@@ -276,6 +276,26 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgb24, P::Cmyk,  RgbToCmyk { alpha_in: false }),
         (P::Rgba,  P::Cmyk,  RgbToCmyk { alpha_in: true }),
 
+        // Yuv411P (4:1:1 planar — luma full res, chroma horizontally
+        // subsampled by 4). Native NTSC DV-25 layout and a legal JPEG
+        // sampling pattern (`cjpeg -sample 4x1`). Six chroma-resample
+        // pairs (411 ↔ 420 / 422 / 444 in both directions) plus
+        // RGB encode/decode under any `ColorSpace`. Width must be a
+        // multiple of 4; odd-by-4 widths reject with `Error::Invalid`.
+        (P::Yuv411P, P::Yuv444P, ChromaResample { src_wsub: 4, src_hsub: 1, dst_wsub: 1, dst_hsub: 1 }),
+        (P::Yuv411P, P::Yuv422P, ChromaResample { src_wsub: 4, src_hsub: 1, dst_wsub: 2, dst_hsub: 1 }),
+        (P::Yuv411P, P::Yuv420P, ChromaResample { src_wsub: 4, src_hsub: 1, dst_wsub: 2, dst_hsub: 2 }),
+        (P::Yuv444P, P::Yuv411P, ChromaResample { src_wsub: 1, src_hsub: 1, dst_wsub: 4, dst_hsub: 1 }),
+        (P::Yuv422P, P::Yuv411P, ChromaResample { src_wsub: 2, src_hsub: 1, dst_wsub: 4, dst_hsub: 1 }),
+        (P::Yuv420P, P::Yuv411P, ChromaResample { src_wsub: 2, src_hsub: 2, dst_wsub: 4, dst_hsub: 1 }),
+        // Yuv411P ↔ RGB. The 4:1:1 ↔ 4:4:4 chroma step stages through
+        // a transient full-resolution chroma pair before calling the
+        // proven scalar 4:4:4 ↔ RGB matrix; no new colour math.
+        (P::Yuv411P, P::Rgb24, YuvToRgb { wsub: 4, hsub: 1, alpha: false }),
+        (P::Yuv411P, P::Rgba,  YuvToRgb { wsub: 4, hsub: 1, alpha: true }),
+        (P::Rgb24,   P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: false }),
+        (P::Rgba,    P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: true }),
+
         // Yuva420P (planar 4:2:0 YUV + a full-resolution alpha plane).
         // The YUV planes match Yuv420P byte-for-byte; the trailing alpha
         // plane is at luma resolution. Conversions reuse the proven 4:2:0
@@ -999,6 +1019,25 @@ fn do_yuv_to_rgb(
         (1, 1) => yuv::yuv444_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
         (2, 1) => yuv::yuv422_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
         (2, 2) => yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
+        // 4:1:1 → RGB: upsample U / V from `(w/4) × h` to `w × h` by
+        // horizontally broadcasting each chroma sample to the four luma
+        // columns it covers, then run the proven 4:4:4 → RGB path on
+        // the staged planes. Width must be a multiple of 4 — the
+        // `chroma_411_*` helpers `debug_assert!` this; the public-API
+        // guard is in `convert()`'s up-front dispatch where 4:1:1
+        // sources reject odd luma columns with `Error::Invalid`.
+        (4, 1) => {
+            if w % 4 != 0 {
+                return Err(Error::invalid(
+                    "pixfmt: 4:1:1 YUV requires width divisible by 4",
+                ));
+            }
+            let mut u444 = vec![0u8; w * h];
+            let mut v444 = vec![0u8; w * h];
+            yuv::chroma_411_to_444(&up, &mut u444, w, h);
+            yuv::chroma_411_to_444(&vp, &mut v444, w, h);
+            yuv::yuv444_to_rgb24(&yp, &u444, &v444, &mut rgb_buf, w, h, matrix);
+        }
         _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
     }
 
@@ -1070,6 +1109,19 @@ fn do_rgb_to_yuv(
         (1, 1) => yuv::rgb24_to_yuv444(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
         (2, 1) => yuv::rgb24_to_yuv422(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
         (2, 2) => yuv::rgb24_to_yuv420(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
+        // RGB → 4:1:1: encode to 4:4:4 first (luma byte-for-byte from
+        // R/G/B, full-resolution chroma from the same per-pixel
+        // R/G/B → Cb/Cr matrix), then horizontally box-average chroma
+        // down to one sample per four luma columns. Matches what a
+        // 4:1:1 JPEG encoder produces from `cjpeg -sample 4x1`.
+        (4, 1) => {
+            // Width-divisibility was already checked above (w % wsub).
+            let mut u444 = vec![0u8; w * h];
+            let mut v444 = vec![0u8; w * h];
+            yuv::rgb24_to_yuv444(&rgb24, &mut yp, &mut u444, &mut v444, w, h, matrix);
+            yuv::chroma_444_to_411(&u444, &mut up, w, h);
+            yuv::chroma_444_to_411(&v444, &mut vp, w, h);
+        }
         _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
     }
     Ok(make_frame(
@@ -1189,9 +1241,10 @@ fn chroma_resample(
     let mut u_dst = vec![0u8; dst_cw * dst_ch];
     let mut v_dst = vec![0u8; dst_cw * dst_ch];
 
-    // The dispatch table only registers the six ordered pairs over
-    // `(4:2:0, 4:2:2, 4:4:4)`; any other combination is a registry
-    // bug so we route through `unreachable!`.
+    // The dispatch table registers ordered pairs over `(4:2:0, 4:2:2,
+    // 4:4:4, 4:1:1)` — every combination not equal to the identity.
+    // Anything else is a registry bug so we route through
+    // `Error::unsupported`.
     match (src_wsub, src_hsub, dst_wsub, dst_hsub) {
         // 4:4:4 → 4:2:2  (horizontal pair-average)
         (1, 1, 2, 1) => {
@@ -1222,6 +1275,37 @@ fn chroma_resample(
         (2, 2, 2, 1) => {
             yuv::chroma_420_to_422(&u_src, &mut u_dst, w, h);
             yuv::chroma_420_to_422(&v_src, &mut v_dst, w, h);
+        }
+        // 4:4:4 → 4:1:1  (horizontal 4-sample box average)
+        (1, 1, 4, 1) => {
+            yuv::chroma_444_to_411(&u_src, &mut u_dst, w, h);
+            yuv::chroma_444_to_411(&v_src, &mut v_dst, w, h);
+        }
+        // 4:1:1 → 4:4:4  (horizontal 4× duplicate)
+        (4, 1, 1, 1) => {
+            yuv::chroma_411_to_444(&u_src, &mut u_dst, w, h);
+            yuv::chroma_411_to_444(&v_src, &mut v_dst, w, h);
+        }
+        // 4:2:2 → 4:1:1  (horizontal pair-average; vertical unchanged)
+        (2, 1, 4, 1) => {
+            yuv::chroma_422_to_411(&u_src, &mut u_dst, w, h);
+            yuv::chroma_422_to_411(&v_src, &mut v_dst, w, h);
+        }
+        // 4:1:1 → 4:2:2  (horizontal pair-duplicate; vertical unchanged)
+        (4, 1, 2, 1) => {
+            yuv::chroma_411_to_422(&u_src, &mut u_dst, w, h);
+            yuv::chroma_411_to_422(&v_src, &mut v_dst, w, h);
+        }
+        // 4:2:0 → 4:1:1  (horizontal pair-average + vertical duplicate)
+        (2, 2, 4, 1) => {
+            yuv::chroma_420_to_411(&u_src, &mut u_dst, w, h);
+            yuv::chroma_420_to_411(&v_src, &mut v_dst, w, h);
+        }
+        // 4:1:1 → 4:2:0  (horizontal duplicate to 4:2:2 wsub + vertical
+        // pair-average)
+        (4, 1, 2, 2) => {
+            yuv::chroma_411_to_420(&u_src, &mut u_dst, w, h);
+            yuv::chroma_411_to_420(&v_src, &mut v_dst, w, h);
         }
         _ => {
             return Err(Error::unsupported(
