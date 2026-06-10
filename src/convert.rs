@@ -307,6 +307,28 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Yuva420P, P::Rgba,     Yuva420pToRgb { alpha: true }),
         (P::Rgb24,    P::Yuva420P, RgbToYuva420p { alpha_in: false }),
         (P::Rgba,     P::Yuva420P, RgbToYuva420p { alpha_in: true }),
+
+        // Planar GBR(A) ↔ packed deep RGB. GBR stores RGB as three (or
+        // four with alpha) planes in G, B, R order, each sample a 16-bit
+        // LE word carrying `bits` significant low bits (per the
+        // oxideav-core `Gbrp*Le` / `Gbrap*Le` variant docs). The packed
+        // `Rgb48Le` / `Rgba64Le` targets carry 16 significant bits in
+        // R, G, B(, A) byte order. The conversion is a pure
+        // deinterleave/interleave plus a `16 - bits` left-shift toward
+        // the 16-bit container (and the reverse right-shift on the way
+        // back) — no colour matrix. No `ColorSpace` knob applies.
+        (P::Gbrp10Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 10, alpha: false }),
+        (P::Gbrp12Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 12, alpha: false }),
+        (P::Gbrp14Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 14, alpha: false }),
+        (P::Gbrap10Le, P::Rgba64Le, GbrToPackedDeep { bits: 10, alpha: true }),
+        (P::Gbrap12Le, P::Rgba64Le, GbrToPackedDeep { bits: 12, alpha: true }),
+        (P::Gbrap14Le, P::Rgba64Le, GbrToPackedDeep { bits: 14, alpha: true }),
+        (P::Rgb48Le,  P::Gbrp10Le,  PackedDeepToGbr { bits: 10, alpha: false }),
+        (P::Rgb48Le,  P::Gbrp12Le,  PackedDeepToGbr { bits: 12, alpha: false }),
+        (P::Rgb48Le,  P::Gbrp14Le,  PackedDeepToGbr { bits: 14, alpha: false }),
+        (P::Rgba64Le, P::Gbrap10Le, PackedDeepToGbr { bits: 10, alpha: true }),
+        (P::Rgba64Le, P::Gbrap12Le, PackedDeepToGbr { bits: 12, alpha: true }),
+        (P::Rgba64Le, P::Gbrap14Le, PackedDeepToGbr { bits: 14, alpha: true }),
     ]
 };
 
@@ -452,6 +474,23 @@ enum ConvertOp {
     RgbToYuva420p {
         alpha_in: bool,
     },
+    /// Planar GBR(A) → packed deep RGB (`Rgb48Le` / `Rgba64Le`). Reorders
+    /// the G, B, R(, A) planes into packed R, G, B(, A) 16-bit words and
+    /// left-shifts each `bits`-significant sample by `16 - bits` so the
+    /// packed word uses the full 16-bit range. `alpha` selects the
+    /// 4-plane / `Rgba64Le` shape.
+    GbrToPackedDeep {
+        bits: u8,
+        alpha: bool,
+    },
+    /// Packed deep RGB (`Rgb48Le` / `Rgba64Le`) → planar GBR(A). The
+    /// inverse of [`Self::GbrToPackedDeep`]: splits the packed R, G, B(, A)
+    /// words into G, B, R(, A) planes and right-shifts each by `16 - bits`
+    /// back into the `bits`-significant low range.
+    PackedDeepToGbr {
+        bits: u8,
+        alpha: bool,
+    },
 }
 
 impl ConvertOp {
@@ -527,6 +566,12 @@ impl ConvertOp {
             Self::Yuva420pToYuv420p => do_yuva420p_to_yuv420p(src, src_info),
             Self::Yuva420pToRgb { alpha } => do_yuva420p_to_rgb(src, src_info, matrix, alpha),
             Self::RgbToYuva420p { alpha_in } => do_rgb_to_yuva420p(src, src_info, matrix, alpha_in),
+            Self::GbrToPackedDeep { bits, alpha } => {
+                do_gbr_to_packed_deep(src, src_info, bits, alpha)
+            }
+            Self::PackedDeepToGbr { bits, alpha } => {
+                do_packed_deep_to_gbr(src, src_info, bits, alpha)
+            }
         }
     }
 }
@@ -2061,4 +2106,145 @@ fn do_rgb_to_yuva420p(
             },
         ],
     ))
+}
+
+// -------------------------------------------------------------------------
+// Planar GBR(A) ↔ packed deep RGB.
+//
+// GBR(A) carries RGB as separate planes in G, B, R(, A) order (the plane
+// ordering documented on the oxideav-core `Gbrp*Le` / `Gbrap*Le`
+// variants). Each sample is a 16-bit little-endian word with only the
+// low `bits` (10 / 12 / 14) significant; the high bits are zero. The
+// packed `Rgb48Le` / `Rgba64Le` targets store R, G, B(, A) as
+// consecutive 16-bit little-endian words using the full 16-bit range.
+//
+// The conversion is therefore a pure plane reorder + a bit-significance
+// rescale: shift each `bits`-significant sample left by `16 - bits` on
+// the way to the 16-bit packed word, and right by `16 - bits` on the way
+// back. This is bit-layout normalisation only — there is no colour
+// matrix and no `ColorSpace` knob applies.
+
+/// Read a little-endian 16-bit word at byte offset `off`.
+#[inline]
+fn rd16le(buf: &[u8], off: usize) -> u16 {
+    (buf[off] as u16) | ((buf[off + 1] as u16) << 8)
+}
+
+/// Write `v` as a little-endian 16-bit word at byte offset `off`.
+#[inline]
+fn wr16le(buf: &mut [u8], off: usize, v: u16) {
+    buf[off] = (v & 0xFF) as u8;
+    buf[off + 1] = (v >> 8) as u8;
+}
+
+/// Planar GBR(A) → packed `Rgb48Le` / `Rgba64Le`.
+fn do_gbr_to_packed_deep(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    bits: u8,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    let need = if alpha { 4 } else { 3 };
+    if src.planes.len() < need {
+        return Err(Error::invalid(
+            "pixfmt: GBR(A) source needs G, B, R(, A) planes",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let shift = 16 - bits as u32;
+    // GBR plane order: G=0, B=1, R=2, A=3. Each plane is `w` 16-bit words
+    // per row (2 bytes each).
+    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
+    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 2, h);
+    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 2, h);
+    let a = if alpha {
+        Some(gather_tight(
+            &src.planes[3].data,
+            src.planes[3].stride,
+            w * 2,
+            h,
+        ))
+    } else {
+        None
+    };
+    let comps = if alpha { 4 } else { 3 };
+    let mut out = vec![0u8; w * h * comps * 2];
+    for i in 0..w * h {
+        let rv = rd16le(&r, i * 2) << shift;
+        let gv = rd16le(&g, i * 2) << shift;
+        let bv = rd16le(&b, i * 2) << shift;
+        let base = i * comps * 2;
+        wr16le(&mut out, base, rv);
+        wr16le(&mut out, base + 2, gv);
+        wr16le(&mut out, base + 4, bv);
+        if let Some(a) = &a {
+            let av = rd16le(a, i * 2) << shift;
+            wr16le(&mut out, base + 6, av);
+        }
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * comps * 2,
+            data: out,
+        }],
+    ))
+}
+
+/// Packed `Rgb48Le` / `Rgba64Le` → planar GBR(A).
+fn do_packed_deep_to_gbr(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    bits: u8,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let shift = 16 - bits as u32;
+    let comps = if alpha { 4 } else { 3 };
+    let in_plane = &src.planes[0];
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h);
+    let mut g = vec![0u8; w * h * 2];
+    let mut b = vec![0u8; w * h * 2];
+    let mut r = vec![0u8; w * h * 2];
+    let mut a = if alpha {
+        vec![0u8; w * h * 2]
+    } else {
+        Vec::new()
+    };
+    for i in 0..w * h {
+        let base = i * comps * 2;
+        let rv = rd16le(&packed, base) >> shift;
+        let gv = rd16le(&packed, base + 2) >> shift;
+        let bv = rd16le(&packed, base + 4) >> shift;
+        wr16le(&mut r, i * 2, rv);
+        wr16le(&mut g, i * 2, gv);
+        wr16le(&mut b, i * 2, bv);
+        if alpha {
+            let av = rd16le(&packed, base + 6) >> shift;
+            wr16le(&mut a, i * 2, av);
+        }
+    }
+    let mut planes = vec![
+        VideoPlane {
+            stride: w * 2,
+            data: g,
+        },
+        VideoPlane {
+            stride: w * 2,
+            data: b,
+        },
+        VideoPlane {
+            stride: w * 2,
+            data: r,
+        },
+    ];
+    if alpha {
+        planes.push(VideoPlane {
+            stride: w * 2,
+            data: a,
+        });
+    }
+    Ok(make_frame(src, planes))
 }

@@ -1120,3 +1120,156 @@ fn yuv411p_chroma_resample_rejects_width_not_divisible_by_4() {
     assert!(convert(&bad, bad_info, PixelFormat::Yuv444P, &opts).is_err());
     assert!(convert(&bad, bad_info, PixelFormat::Rgb24, &opts).is_err());
 }
+
+// --- Planar GBR(A) ↔ packed deep RGB -------------------------------------
+
+/// Pack a u16 as a little-endian byte pair onto `out`.
+fn push16le(out: &mut Vec<u8>, v: u16) {
+    out.push((v & 0xFF) as u8);
+    out.push((v >> 8) as u8);
+}
+
+/// Read a little-endian 16-bit word at byte offset `off`.
+fn read16le(buf: &[u8], off: usize) -> u16 {
+    (buf[off] as u16) | ((buf[off + 1] as u16) << 8)
+}
+
+/// Build a GBR(A) frame whose G/B/R(/A) plane samples are distinct
+/// `bits`-significant ramps so a reorder bug is observable. Plane order
+/// is G, B, R(, A) per the oxideav-core variant docs.
+fn synth_gbr(w: u32, h: u32, bits: u32, alpha: bool) -> VideoFrame {
+    let mask = (1u32 << bits) - 1;
+    let n = (w * h) as usize;
+    let mut g = Vec::with_capacity(n * 2);
+    let mut b = Vec::with_capacity(n * 2);
+    let mut r = Vec::with_capacity(n * 2);
+    let mut a = Vec::with_capacity(n * 2);
+    for i in 0..n as u32 {
+        push16le(&mut g, ((i * 7) & mask) as u16);
+        push16le(&mut b, ((i * 11 + 3) & mask) as u16);
+        push16le(&mut r, ((i * 5 + 1) & mask) as u16);
+        push16le(&mut a, ((i * 13 + 2) & mask) as u16);
+    }
+    let mut planes = vec![
+        VideoPlane {
+            stride: (w * 2) as usize,
+            data: g,
+        },
+        VideoPlane {
+            stride: (w * 2) as usize,
+            data: b,
+        },
+        VideoPlane {
+            stride: (w * 2) as usize,
+            data: r,
+        },
+    ];
+    if alpha {
+        planes.push(VideoPlane {
+            stride: (w * 2) as usize,
+            data: a,
+        });
+    }
+    VideoFrame { pts: None, planes }
+}
+
+#[test]
+fn gbr_to_packed_deep_known_values() {
+    let opts = ConvertOptions::default();
+    // 10-bit Gbrp → Rgb48Le: a sample of value V<<6 must land in the
+    // packed word, with R G B byte order.
+    let (w, h, bits) = (4u32, 2u32, 10u32);
+    let src = synth_gbr(w, h, bits, false);
+    let info = FrameInfo::new(PixelFormat::Gbrp10Le, w, h);
+    let dst = convert(&src, info, PixelFormat::Rgb48Le, &opts).expect("gbrp10 → rgb48");
+    let shift = 16 - bits;
+    let g = &src.planes[0].data;
+    let b = &src.planes[1].data;
+    let r = &src.planes[2].data;
+    let packed = &dst.planes[0].data;
+    for i in 0..(w * h) as usize {
+        let base = i * 6;
+        assert_eq!(read16le(packed, base), read16le(r, i * 2) << shift, "R {i}");
+        assert_eq!(
+            read16le(packed, base + 2),
+            read16le(g, i * 2) << shift,
+            "G {i}"
+        );
+        assert_eq!(
+            read16le(packed, base + 4),
+            read16le(b, i * 2) << shift,
+            "B {i}"
+        );
+    }
+}
+
+#[test]
+fn gbr_packed_deep_roundtrip_all_depths() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (6u32, 4u32);
+    // No-alpha (Gbrp* ↔ Rgb48Le).
+    for (gbr, bits) in [
+        (PixelFormat::Gbrp10Le, 10u32),
+        (PixelFormat::Gbrp12Le, 12),
+        (PixelFormat::Gbrp14Le, 14),
+    ] {
+        let src = synth_gbr(w, h, bits, false);
+        let info = FrameInfo::new(gbr, w, h);
+        let packed = convert(&src, info, PixelFormat::Rgb48Le, &opts).expect("→ rgb48");
+        let packed_info = FrameInfo::new(PixelFormat::Rgb48Le, w, h);
+        let back = convert(&packed, packed_info, gbr, &opts).expect("→ gbr");
+        for p in 0..3 {
+            assert_eq!(
+                back.planes[p].data, src.planes[p].data,
+                "{gbr:?} plane {p} round-trip"
+            );
+        }
+    }
+    // Alpha (Gbrap* ↔ Rgba64Le).
+    for (gbr, bits) in [
+        (PixelFormat::Gbrap10Le, 10u32),
+        (PixelFormat::Gbrap12Le, 12),
+        (PixelFormat::Gbrap14Le, 14),
+    ] {
+        let src = synth_gbr(w, h, bits, true);
+        let info = FrameInfo::new(gbr, w, h);
+        let packed = convert(&src, info, PixelFormat::Rgba64Le, &opts).expect("→ rgba64");
+        let packed_info = FrameInfo::new(PixelFormat::Rgba64Le, w, h);
+        let back = convert(&packed, packed_info, gbr, &opts).expect("→ gbra");
+        for p in 0..4 {
+            assert_eq!(
+                back.planes[p].data, src.planes[p].data,
+                "{gbr:?} plane {p} round-trip"
+            );
+        }
+    }
+}
+
+#[test]
+fn gbrap_alpha_plane_reaches_packed_word() {
+    let opts = ConvertOptions::default();
+    let (w, h, bits) = (4u32, 2u32, 12u32);
+    let src = synth_gbr(w, h, bits, true);
+    let info = FrameInfo::new(PixelFormat::Gbrap12Le, w, h);
+    let dst = convert(&src, info, PixelFormat::Rgba64Le, &opts).expect("gbrap12 → rgba64");
+    let shift = 16 - bits;
+    let a = &src.planes[3].data;
+    let packed = &dst.planes[0].data;
+    for i in 0..(w * h) as usize {
+        // A is the 4th packed component (R G B A).
+        assert_eq!(
+            read16le(packed, i * 8 + 6),
+            read16le(a, i * 2) << shift,
+            "A {i}"
+        );
+    }
+}
+
+#[test]
+fn gbr_short_plane_count_rejected() {
+    let opts = ConvertOptions::default();
+    // A Gbrap source carrying only 3 planes must error (alpha missing).
+    let src = synth_gbr(4, 2, 10, false);
+    let info = FrameInfo::new(PixelFormat::Gbrap10Le, 4, 2);
+    assert!(convert(&src, info, PixelFormat::Rgba64Le, &opts).is_err());
+}

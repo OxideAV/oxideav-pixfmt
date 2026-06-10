@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Planar GBR(A) ↔ packed deep-RGB conversions wired into the `convert()`
+  dispatch table. Twelve new pairs land: `Gbrp10Le` / `Gbrp12Le` /
+  `Gbrp14Le` ↔ `Rgb48Le` (six pairs) and `Gbrap10Le` / `Gbrap12Le` /
+  `Gbrap14Le` ↔ `Rgba64Le` (six pairs). Until now every src/dst touching
+  a GBR(A) variant returned `Error::Unsupported`, even though all six
+  variants had `FormatInfo::of` arms and OxideAV-core enum discriminants
+  (35–40) since 0.1.18. GBR is RGB carried as separate planes in G, B,
+  R(, A) order, each sample a 16-bit little-endian word with only the low
+  `bits` (10 / 12 / 14) significant — the layout used by MagicYUV,
+  JPEG 2000, ProRes 4444 and lossless H.264 GBR mode. The conversion is a
+  pure plane reorder (G, B, R(, A) planes ↔ packed R, G, B(, A) words)
+  plus a `16 - bits` left-shift toward the 16-bit packed container (and
+  the reverse right-shift on the way back). No colour matrix enters — it
+  is bit-layout normalisation only, so no `ColorSpace` knob applies and
+  no new colour-science coefficients are introduced. A `Gbrap*` source
+  carrying fewer than four planes rejects with `Error::Invalid` (alpha
+  plane missing). Two new helpers `convert::{rd16le, wr16le}` keep the
+  16-bit LE word access in one place. Four new tests in
+  `tests/conversions.rs` pin: the G/B/R plane→packed reorder + shift
+  against hand-computed expected packed words (`Gbrp10Le → Rgb48Le`), the
+  alpha plane reaching the fourth packed component (`Gbrap12Le →
+  Rgba64Le`), the full bit-exact round-trip across all three bit depths
+  for both the no-alpha and alpha families (the widen-then-narrow shift
+  is exactly invertible because the source samples already fit in `bits`
+  significant bits), and short-plane-count rejection on a `Gbrap*` source.
 - `Yuv411P` (4:1:1 planar — luma at full resolution, chroma horizontally
   subsampled by 4) wired into the `convert()` dispatch table. Until now
   every src/dst with `Yuv411P` returned `Error::Unsupported`, even

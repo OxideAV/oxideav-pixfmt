@@ -39,6 +39,7 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | ----------------------- | --------------------------------------------------------------------------- |
 | RGB / BGR family        | `Rgb24`, `Bgr24`, `Rgba`, `Bgra`, `Argb`, `Abgr` — all-to-all swizzles      |
 | Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`                                    |
+| Planar GBR              | `Gbrp10/12/14Le` ↔ `Rgb48Le`, `Gbrap10/12/14Le` ↔ `Rgba64Le` (bit reorder) |
 | YUV planar ↔ RGB        | `Yuv420P` / `Yuv422P` / `Yuv444P` ↔ `Rgb24` / `Rgba`                        |
 | Chroma subsampling      | `4:4:4` ↔ `4:2:2` ↔ `4:2:0` (SIMD-accelerated up- and down-sample)          |
 | Direct planar ↔ planar  | `Yuv420P` / `Yuv422P` / `Yuv444P` all-to-all + same on `YuvJ*` (no RGB hop) |
@@ -70,7 +71,7 @@ variants and `convert()` paths will land over time.
 | ------------------------ | -------------------------------------------------------------------------- |
 | 16-bit packed RGB        | `Rgb565Le/Be`, `Rgb555Le/Be`, `Rgb444Le/Be` (+ BGR mirrors)                |
 | Padded 4-byte packed RGB | `0Rgb`, `Rgb0`, `0Bgr`, `Bgr0` (no-alpha 32-bit, alignment-friendly)       |
-| GBR planar               | `Gbrp`, `Gbrp10/12/16Le` — JPEG-2000, ProRes 4444, lossless H.264 GBR mode |
+| GBR planar               | `Gbrp10/12/14Le` ↔ deep-RGB shipped (see table above); 8-bit `Gbrp` + a direct GBR ↔ 8-bit `Rgb24`/`Rgba` hop remain |
 | Legacy planar YUV        | `Yuv410P`, `Yuv440P` (+ `YuvJ*` mirrors) — DV, MJPEG, SD                   |
 | 4:2:2 / 4:4:4 NV         | `Nv16`, `Nv24` — common on Android / embedded                              |
 | Alpha-bearing YUV        | `YuvA422P`, `YuvA444P` (8-bit `Yuva420P` shipped — see table above)        |
