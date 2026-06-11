@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- BT.2020 NCL anchor-vector tests: black and the three primaries are now
+  pinned against 8-bit codes hand-derived from BT.2020-2 Table 4 (NCL
+  column) + Table 5 quantization, in both limited and full range (e.g.
+  limited red → (74, 97, 240) with C'R = 0.7373/1.4746 = 0.5 exactly;
+  limited blue C'B likewise lands exactly on code 240). A third test
+  asserts encode → decode invertibility within ±2 LSB at the gamut
+  extremes (black / white / primaries), covering the full-range Cr/Cb
+  255-cap clip on saturated red/blue. Complements the existing gradient
+  PSNR roundtrips, neutral-grey and white anchors from the original
+  BT.2020 matrix landing.
+
 - Planar GBR(A) ↔ packed deep-RGB conversions wired into the `convert()`
   dispatch table. Twelve new pairs land: `Gbrp10Le` / `Gbrp12Le` /
   `Gbrp14Le` ↔ `Rgb48Le` (six pairs) and `Gbrap10Le` / `Gbrap12Le` /

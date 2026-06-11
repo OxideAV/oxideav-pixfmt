@@ -281,3 +281,99 @@ fn bt2020_pure_white_lands_in_luma() {
     assert!(cb.abs_diff(128) <= 1, "expected cb ≈ 128, got {cb}");
     assert!(cr.abs_diff(128) <= 1, "expected cr ≈ 128, got {cr}");
 }
+
+// Anchor vectors derived by hand from BT.2020-2 Table 4 (NCL column) +
+// Table 5 quantization at n = 8 (so the 2^(n-8) factor is 1):
+//
+//   Y'  = 0.2627 R' + 0.6780 G' + 0.0593 B'
+//   C'B = (B' - Y') / 1.8814         (1.8814 = 2·(1 - 0.0593))
+//   C'R = (R' - Y') / 1.4746         (1.4746 = 2·(1 - 0.2627))
+//   DY' = INT[219·Y' + 16]    DC' = INT[224·C' + 128]   (limited range)
+//
+// Full-range rows replace the 219/+16 and 224 scalings with 255 (the
+// crate-wide full-range convention; chroma keeps its +128 offset).
+// The exact pre-rounding values are noted per row; the assertions allow
+// ±1 LSB for the fixed-point rounding of the implementation.
+
+#[test]
+fn bt2020_limited_black_and_primary_anchors() {
+    use oxideav_pixfmt::yuv::{rgb_to_yuv, YuvMatrix};
+    let m = YuvMatrix::BT2020.with_range(true);
+    // (rgb, expected (y, cb, cr)) — exact values in comments.
+    let vectors = [
+        // Black: Y' = 0 → 16; chroma at the 128 origin.
+        ((0u8, 0u8, 0u8), (16u8, 128u8, 128u8)),
+        // Red: Y' = 0.2627 → 219·0.2627+16 = 73.53;
+        //      C'B = -0.2627/1.8814 → 224·(-0.139630)+128 = 96.72;
+        //      C'R = 0.7373/1.4746 = 0.5 exactly → 240.
+        ((255, 0, 0), (74, 97, 240)),
+        // Green: Y' = 0.6780 → 164.48; C'B = -0.6780/1.8814 → 47.28;
+        //        C'R = -0.6780/1.4746 → 25.01.
+        ((0, 255, 0), (164, 47, 25)),
+        // Blue: Y' = 0.0593 → 28.99; C'B = 0.9407/1.8814 = 0.5 exactly
+        //       → 240; C'R = -0.0593/1.4746 → 118.99.
+        ((0, 0, 255), (29, 240, 119)),
+    ];
+    for ((r, g, b), (ey, ecb, ecr)) in vectors {
+        let (y, cb, cr) = rgb_to_yuv(r, g, b, m);
+        assert!(
+            y.abs_diff(ey) <= 1 && cb.abs_diff(ecb) <= 1 && cr.abs_diff(ecr) <= 1,
+            "rgb({r},{g},{b}): expected ({ey},{ecb},{ecr})±1, got ({y},{cb},{cr})"
+        );
+    }
+}
+
+#[test]
+fn bt2020_full_black_and_primary_anchors() {
+    use oxideav_pixfmt::yuv::{rgb_to_yuv, YuvMatrix};
+    let m = YuvMatrix::BT2020.with_range(false);
+    let vectors = [
+        // Black: full-range zero code, chroma origin.
+        ((0u8, 0u8, 0u8), (0u8, 128u8, 128u8)),
+        // Red: Y = 255·0.2627 = 66.99; Cb = 255·(-0.139630)+128 = 92.39;
+        //      Cr = 255·0.5+128 = 255.5 → saturates at the 255 code cap.
+        ((255, 0, 0), (67, 92, 255)),
+        // Green: Y = 172.89; Cb = 255·(-0.360370)+128 = 36.11;
+        //        Cr = 255·(-0.459786)+128 = 10.76.
+        ((0, 255, 0), (173, 36, 11)),
+        // Blue: Y = 15.12; Cb = 255.5 → 255 cap;
+        //       Cr = 255·(-0.040214)+128 = 117.75.
+        ((0, 0, 255), (15, 255, 118)),
+    ];
+    for ((r, g, b), (ey, ecb, ecr)) in vectors {
+        let (y, cb, cr) = rgb_to_yuv(r, g, b, m);
+        assert!(
+            y.abs_diff(ey) <= 1 && cb.abs_diff(ecb) <= 1 && cr.abs_diff(ecr) <= 1,
+            "rgb({r},{g},{b}): expected ({ey},{ecb},{ecr})±1, got ({y},{cb},{cr})"
+        );
+    }
+}
+
+#[test]
+fn bt2020_anchor_encode_decode_invertibility() {
+    // The decode matrix must invert the encode matrix at the gamut
+    // extremes, not just on smooth gradients: black, white and the
+    // three primaries must survive an encode → decode trip within the
+    // ±2 LSB budget that 8-bit chroma quantisation permits (full-range
+    // red/blue clip half an LSB of Cr/Cb at the 255 code cap, which is
+    // unrecoverable by design and stays inside the same budget).
+    use oxideav_pixfmt::yuv::{rgb_to_yuv, yuv_to_rgb, YuvMatrix};
+    for limited in [true, false] {
+        let m = YuvMatrix::BT2020.with_range(limited);
+        for (r, g, b) in [
+            (0u8, 0u8, 0u8),
+            (255, 255, 255),
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+        ] {
+            let (y, cb, cr) = rgb_to_yuv(r, g, b, m);
+            let (r2, g2, b2) = yuv_to_rgb(y, cb, cr, m);
+            assert!(
+                r2.abs_diff(r) <= 2 && g2.abs_diff(g) <= 2 && b2.abs_diff(b) <= 2,
+                "limited={limited} rgb({r},{g},{b}) → yuv({y},{cb},{cr}) → \
+                 rgb({r2},{g2},{b2}) drifted more than ±2"
+            );
+        }
+    }
+}
