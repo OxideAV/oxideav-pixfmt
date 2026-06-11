@@ -275,6 +275,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loop that trips the allocator on any leaked over-write. `swizzle4` and
   `rgb3_to_rgba4` (store == advance, can't over-run) are covered too to
   lock in their read-side tail reserves. +5 unit tests; no API change.
+- **CI miri job no longer hangs at its 6 h timeout.** The job (added
+  2026-05-03) never went green: it hung first in `tests/palette.rs`
+  (median-cut over a 256×256 random RGBA frame ≈ 65 k candidate colours,
+  plus octree / Floyd–Steinberg roundtrips on 64–128 px frames) and would
+  next have hung in `tests/property.rs` (loops of 100–500 random cases ×
+  conversions, 50 000-pixel per-matrix sweeps, a 200 000-iteration
+  premultiply sweep — the first property test alone needed ~7 min under
+  the interpreter locally). Both files now shrink their corpus under
+  `cfg(miri)` following the existing `tests/yuv_simd_parity.rs`
+  convention — every test still runs and asserts under miri, only frame
+  dimensions (palette: 256→24, 128→16, 64→8/16) and random case counts
+  (property: 400/300/200/150→6-8, 50 k→400/matrix, 200 k→2 k, 500→10)
+  shrink; statistical coverage stays the native run's job while miri
+  exercises each code path's memory model. Native dimensions and counts
+  are unchanged.
 
 ### Changed
 

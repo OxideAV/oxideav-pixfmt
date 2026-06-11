@@ -69,9 +69,23 @@ fn psnr_rgb(a: &[u8], b: &[u8]) -> f64 {
     10.0 * (255.0 * 255.0 / mse).log10()
 }
 
+// Median-cut / octree palette generation over random frames is pure
+// pointer-free arithmetic but costs O(pixels · iterations); under the
+// miri interpreter the full-size frames below run for hours (the CI
+// miri job has hung in this file at its 6 h timeout since it was
+// introduced). Shrinking the corpus under cfg(miri) follows the same
+// convention as tests/yuv_simd_parity.rs — a build-time toggle, NOT
+// `#[ignore]`; every test still runs and asserts under miri.
+
 #[test]
 fn generate_palette_stays_under_256() {
-    let (frame, info) = deterministic_rgba(256, 256, 0xDEADBEEF);
+    // 24×24 random pixels still produce > 256 candidate colours, so the
+    // ≤ 256 cap assertion keeps its teeth under miri.
+    #[cfg(miri)]
+    let dim = 24;
+    #[cfg(not(miri))]
+    let dim = 256;
+    let (frame, info) = deterministic_rgba(dim, dim, 0xDEADBEEF);
     let opts = PaletteGenOptions::default();
     let palette = generate_palette(&[(&frame, info)], &opts).unwrap();
     assert!(
@@ -84,7 +98,11 @@ fn generate_palette_stays_under_256() {
 
 #[test]
 fn octree_palette_respects_max_and_roundtrips() {
-    let (src, src_info) = gradient_rgb24(64, 64);
+    #[cfg(miri)]
+    let dim = 16;
+    #[cfg(not(miri))]
+    let dim = 64;
+    let (src, src_info) = gradient_rgb24(dim, dim);
     let palette = generate_palette(
         &[(&src, src_info)],
         &PaletteGenOptions {
@@ -128,7 +146,11 @@ fn octree_palette_respects_max_and_roundtrips() {
 
 #[test]
 fn octree_palette_small_max_caps_output() {
-    let (frame, info) = deterministic_rgba(128, 128, 0xCAFEF00D);
+    #[cfg(miri)]
+    let dim = 16;
+    #[cfg(not(miri))]
+    let dim = 128;
+    let (frame, info) = deterministic_rgba(dim, dim, 0xCAFEF00D);
     let palette = generate_palette(
         &[(&frame, info)],
         &PaletteGenOptions {
@@ -144,7 +166,13 @@ fn octree_palette_small_max_caps_output() {
 
 #[test]
 fn uniform_palette_has_256_entries() {
-    let (frame, info) = deterministic_rgba(64, 64, 0xB16B00B5);
+    // The uniform strategy's entry count is input-independent; the frame
+    // only feeds the API signature, so it can be tiny under miri.
+    #[cfg(miri)]
+    let dim = 8;
+    #[cfg(not(miri))]
+    let dim = 64;
+    let (frame, info) = deterministic_rgba(dim, dim, 0xB16B00B5);
     let opts = PaletteGenOptions {
         strategy: PaletteStrategy::Uniform,
         max_colors: 255, // u8 max
@@ -156,7 +184,11 @@ fn uniform_palette_has_256_entries() {
 
 #[test]
 fn pal8_roundtrip_exceeds_24_db() {
-    let (src, src_info) = gradient_rgb24(64, 64);
+    #[cfg(miri)]
+    let dim = 16;
+    #[cfg(not(miri))]
+    let dim = 64;
+    let (src, src_info) = gradient_rgb24(dim, dim);
     let palette = generate_palette(
         &[(&src, src_info)],
         &PaletteGenOptions {

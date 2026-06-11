@@ -107,6 +107,22 @@ const COLOR_SPACES: [ColorSpace; 6] = [
 
 const MATRICES: [YuvMatrix; 3] = [YuvMatrix::BT601, YuvMatrix::BT709, YuvMatrix::BT2020];
 
+/// Corpus-size switch: the full sweep natively, a UB-detection-sized
+/// corpus under the miri interpreter (which runs each conversion ~3-4
+/// orders of magnitude slower; the full counts blow the CI miri job's
+/// 6 h budget). Same convention as tests/yuv_simd_parity.rs and
+/// tests/palette.rs — every test still runs and asserts under miri,
+/// only the number of random cases shrinks. Statistical coverage is the
+/// native run's job; miri's job is exercising each code path's memory
+/// model once.
+fn cases(native: u32, miri: u32) -> u32 {
+    if cfg!(miri) {
+        miri
+    } else {
+        native
+    }
+}
+
 // ---------------------------------------------------------------------
 // Exactly-lossless round-trips.
 
@@ -121,7 +137,7 @@ fn prop_rgb_family_swizzle_roundtrips_exactly() {
     let formats3 = [PixelFormat::Rgb24, PixelFormat::Bgr24];
     let opts = ConvertOptions::default();
     let mut rng = Rng::new(0x5152_5354);
-    for case in 0..400u32 {
+    for case in 0..cases(400, 8) {
         let w = rng.range(1, 17);
         let h = rng.range(1, 13);
         let pad = (rng.next_u64() % 4) as usize;
@@ -185,7 +201,7 @@ fn prop_rgb_3to4_promote_demote_roundtrips_exactly() {
         PixelFormat::Abgr,
     ];
     let mut rng = Rng::new(0xA1B2_C3D4);
-    for case in 0..300u32 {
+    for case in 0..cases(300, 8) {
         let w = rng.range(1, 19);
         let h = rng.range(1, 11);
         let pad = (rng.next_u64() % 5) as usize;
@@ -204,7 +220,7 @@ fn prop_rgb_3to4_promote_demote_roundtrips_exactly() {
 fn prop_bit_depth_promote_demote_roundtrips_exactly() {
     let opts = ConvertOptions::default();
     let mut rng = Rng::new(0x0BAD_F00D);
-    for case in 0..300u32 {
+    for case in 0..cases(300, 8) {
         let w = rng.range(1, 21);
         let h = rng.range(1, 9);
         let pad = (rng.next_u64() % 4) as usize;
@@ -241,7 +257,7 @@ fn prop_nv_yuv420p_interleave_roundtrips_exactly() {
     // and must be byte-exact on all three planes.
     let opts = ConvertOptions::default();
     let mut rng = Rng::new(0x1234_ABCD);
-    for case in 0..200u32 {
+    for case in 0..cases(200, 8) {
         let w = rng.range(1, 16) * 2; // even dims required for 4:2:0
         let h = rng.range(1, 12) * 2;
         let yuv = rand_planar_yuv(&mut rng, w, h, 2, 2);
@@ -268,7 +284,7 @@ fn prop_yuvj_yuv_range_rescale_neutral_is_stable() {
     // valid u8 and a second round-trip is idempotent within +/-2 LSB.
     let opts = ConvertOptions::default();
     let mut rng = Rng::new(0x7777_3333);
-    for case in 0..150u32 {
+    for case in 0..cases(150, 6) {
         let w = rng.range(1, 16) * 2;
         let h = rng.range(1, 10) * 2;
         let yuv = rand_planar_yuv(&mut rng, w, h, 2, 2);
@@ -315,7 +331,7 @@ fn prop_rgb_yuv444_roundtrip_per_pixel_bounded() {
     for m in MATRICES {
         for limited in [true, false] {
             let mat = m.with_range(limited);
-            for _ in 0..50_000u32 {
+            for _ in 0..cases(50_000, 400) {
                 let r = rng.byte();
                 let g = rng.byte();
                 let b = rng.byte();
@@ -349,9 +365,17 @@ fn prop_full_frame_yuv_roundtrip_psnr_floor() {
             color_space: cs,
             ..Default::default()
         };
-        for _ in 0..8u32 {
-            let w = rng.range(8, 40) * 2;
-            let h = rng.range(8, 30) * 2;
+        for _ in 0..cases(8, 1) {
+            // Keep the lower dimension bound at native size under miri
+            // (smaller frames steepen the gradient and would erode the
+            // 4:2:0 PSNR floor); only the upper bound shrinks.
+            let (wlo, whi, hlo, hhi) = if cfg!(miri) {
+                (12, 18, 10, 14)
+            } else {
+                (8, 40, 8, 30)
+            };
+            let w = rng.range(wlo, whi) * 2;
+            let h = rng.range(hlo, hhi) * 2;
             let src = gradient_rgb24(w, h);
             let si = FrameInfo::new(PixelFormat::Rgb24, w, h);
             for (fmt, floor) in [
@@ -379,7 +403,7 @@ fn prop_premultiply_unpremultiply_bounded_by_alpha() {
     // at a = 0 and a = 255.
     let mut rng = Rng::new(0xBEEF_CAFE);
     let mut worst_high = 0u8; // worst diff for a >= 128
-    for _ in 0..200_000u32 {
+    for _ in 0..cases(200_000, 2_000) {
         let r = rng.byte();
         let g = rng.byte();
         let b = rng.byte();
@@ -444,7 +468,7 @@ fn prop_no_panic_over_supported_pairs() {
         (PixelFormat::Cmyk, 4, PixelFormat::Rgba),
         (PixelFormat::Rgb24, 3, PixelFormat::Cmyk),
     ];
-    for case in 0..500u32 {
+    for case in 0..cases(500, 10) {
         let w = rng.range(1, 23);
         let h = rng.range(1, 17);
         let pad = (rng.next_u64() % 6) as usize;
@@ -458,7 +482,7 @@ fn prop_no_panic_over_supported_pairs() {
     }
 
     // YUV planar sources (need 3 planes) and RGB->YUV (need even dims).
-    for _ in 0..300u32 {
+    for _ in 0..cases(300, 6) {
         let w = rng.range(1, 12) * 2;
         let h = rng.range(1, 10) * 2;
         for (fmt, wsub, hsub) in [
@@ -490,7 +514,7 @@ fn prop_rgb_to_yuv_odd_dims_error_not_panic() {
     // guard), never panic or silently produce a malformed frame.
     let opts = ConvertOptions::default();
     let mut rng = Rng::new(0x0DD0_0DD0);
-    for _ in 0..100u32 {
+    for _ in 0..cases(100, 6) {
         let w = rng.range(1, 20) * 2 - 1; // odd
         let h = rng.range(1, 20) * 2 - 1; // odd
         let rgb = rand_packed(&mut rng, w, h, 3, 0);
