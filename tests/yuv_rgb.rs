@@ -214,6 +214,68 @@ fn nv12_to_rgb24_rejects_odd_dimensions() {
     assert!(convert(&bad, info, PixelFormat::Rgb24, &opts).is_err());
 }
 
+#[test]
+fn subsampled_yuv_to_rgb_rejects_odd_dimensions() {
+    // Regression: subsampled-chroma planar YUV → packed RGB must reject
+    // luma dimensions that do not divide evenly by the chroma
+    // subsampling, rather than truncating `cw = w / wsub` (which sizes
+    // the U/V planes one sample short of what the decoder reads back for
+    // the trailing odd column/row, indexing past the chroma plane). Each
+    // case below builds a deliberately-undersized-but-self-consistent
+    // frame: the chroma planes are sized to the truncated `w/wsub`,
+    // exactly the geometry that previously triggered the out-of-bounds
+    // read. Every one must return `Err`, not panic.
+    let opts = ConvertOptions::default();
+
+    // (format, w, h, wsub, hsub) — odd in the subsampled axis.
+    let cases: &[(PixelFormat, u32, u32, usize, usize)] = &[
+        // 4:2:0 — odd width.
+        (PixelFormat::Yuv420P, 3, 4, 2, 2),
+        // 4:2:0 — odd height.
+        (PixelFormat::Yuv420P, 4, 3, 2, 2),
+        // 4:2:0 — both odd (the 1×1 corner case).
+        (PixelFormat::Yuv420P, 1, 1, 2, 2),
+        // 4:2:2 — odd width (height is full-res, so only width matters).
+        (PixelFormat::Yuv422P, 3, 2, 2, 1),
+        // 4:1:1 — width not divisible by 4.
+        (PixelFormat::Yuv411P, 6, 2, 4, 1),
+        (PixelFormat::Yuv411P, 2, 2, 4, 1),
+    ];
+
+    for &(fmt, w, h, wsub, hsub) in cases {
+        let wu = w as usize;
+        let hu = h as usize;
+        let cw = wu / wsub; // truncated chroma width
+        let ch = hu / hsub; // truncated chroma height
+        let bad = VideoFrame {
+            pts: None,
+            planes: vec![
+                VideoPlane {
+                    stride: wu,
+                    data: vec![16u8; wu * hu],
+                },
+                VideoPlane {
+                    stride: cw.max(1),
+                    data: vec![128u8; (cw * ch).max(1)],
+                },
+                VideoPlane {
+                    stride: cw.max(1),
+                    data: vec![128u8; (cw * ch).max(1)],
+                },
+            ],
+        };
+        let info = FrameInfo::new(fmt, w, h);
+        assert!(
+            convert(&bad, info, PixelFormat::Rgb24, &opts).is_err(),
+            "{fmt:?} {w}x{h} → Rgb24 must reject odd-subsample geometry",
+        );
+        assert!(
+            convert(&bad, info, PixelFormat::Rgba, &opts).is_err(),
+            "{fmt:?} {w}x{h} → Rgba must reject odd-subsample geometry",
+        );
+    }
+}
+
 // BT.2020 NCL matrix — kr = 0.2627, kb = 0.0593 from BT.2020-2 Table 4
 // (same coefficients re-used by BT.2100-3 Table 6).
 

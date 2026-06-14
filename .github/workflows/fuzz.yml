@@ -1,0 +1,24 @@
+name: Fuzz
+
+# Daily fuzz run for the cargo-fuzz harness under fuzz/. This crate's
+# fuzz surface is the colour-conversion machinery rather than a
+# byte-stream parser, so the harness *constructs* well-formed source
+# frames from the fuzzer's bytes — picking a source pixel format,
+# small / odd dimensions, and extra stride padding — and then drives
+# every registered (src, dst) conversion through convert(). The contract
+# under test is purely no-panic / no-overflow / no-OOB / no-abort on a
+# structurally-valid input frame at an awkward size. The reusable
+# workflow auto-discovers targets from fuzz/fuzz_targets/*.rs and splits
+# the time budget evenly across them.
+
+on:
+  schedule:
+    - cron: "53 6 * * *"   # daily 06:53 UTC, jittered off the hour
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    uses: OxideAV/.github/.github/workflows/crate-fuzz.yml@master
+    with:
+      time_budget_seconds: 1800
+    secrets: inherit

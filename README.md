@@ -393,6 +393,24 @@ cargo +nightly bench --features bench,nightly
 OXIDEAV_PIXFMT_FORCE_PORTABLE_SIMD=1 cargo +nightly bench --features bench,nightly
 ```
 
+## Fuzzing
+
+A [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) harness lives
+under [`fuzz/`](fuzz/) and runs daily in CI. The `convert_geometry`
+target does not feed arbitrary bytes at a parser — there is none. It
+instead *constructs* a structurally-valid source frame from the fuzzer's
+input (a source pixel format, small / odd dimensions, extra stride
+padding) and drives every registered `(src, dst)` conversion, asserting
+that none panics, integer-overflows, reads out of bounds, or aborts. A
+converter may legitimately return `Err` for geometry it cannot represent
+(e.g. an odd width on a 4:2:0 layout); only a crash is a finding. This
+target's first run caught an out-of-bounds chroma read on subsampled
+YUV → RGB at odd dimensions.
+
+```sh
+cargo +nightly fuzz run convert_geometry
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

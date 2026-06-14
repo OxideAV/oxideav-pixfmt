@@ -1053,6 +1053,17 @@ fn do_yuv_to_rgb(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
+    // Subsampled-chroma layouts have no representation for a partial
+    // chroma sample, so the luma dimensions must divide evenly by the
+    // subsampling factors. Truncating (`w / wsub`) here would size the
+    // U/V planes one sample short of what the decoder reads back for the
+    // trailing odd luma column/row, indexing past the chroma plane.
+    // Reject up front (mirrors the RGB → YUV guard) instead.
+    if w % wsub != 0 || h % hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: YUV → RGB requires dimensions divisible by chroma subsampling",
+        ));
+    }
     let cw = w / wsub;
     let ch = h / hsub;
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);

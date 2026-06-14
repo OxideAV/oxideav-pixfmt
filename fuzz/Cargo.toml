@@ -1,0 +1,46 @@
+[package]
+name = "oxideav-pixfmt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# This crate's fuzz surface is the colour-conversion machinery, not a
+# byte-stream parser. Feeding arbitrary bytes at `convert()` would mostly
+# bounce off the plane-length sanity checks before reaching any of the
+# interesting per-pixel maths. So the harness instead *constructs*
+# well-formed source frames from the fuzzer's bytes — picking a source
+# pixel format, small/odd dimensions, and extra stride padding — and then
+# drives every registered `(src, dst)` conversion. The contract under
+# test is purely "no panic / no integer overflow / no out-of-bounds /
+# no abort": a converter may legitimately return `Err` for geometry it
+# cannot represent, but it must never crash on a structurally-valid input
+# frame at an awkward size.
+[dependencies]
+libfuzzer-sys = "0.4"
+# Needed for the frame container types (`VideoFrame` / `VideoPlane`) and
+# the `PixelFormat` enum the harness builds its source frames from.
+oxideav-core = "0.1"
+
+[dependencies.oxideav-pixfmt]
+path = ".."
+
+# Prevent this from interfering with the umbrella workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+# Geometry harness — builds well-formed source frames at fuzzer-chosen
+# small / odd / extra-stride-padded dimensions and runs every supported
+# `(src, dst)` conversion, asserting none panics, overflows, or reads out
+# of bounds. Targets the chroma-plane indexing maths on subsampled-YUV →
+# RGB at odd dimensions in particular.
+[[bin]]
+name = "convert_geometry"
+path = "fuzz_targets/convert_geometry.rs"
+test = false
+doc = false

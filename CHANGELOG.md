@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Out-of-bounds chroma read on subsampled planar YUV → packed RGB at
+  odd dimensions. `Yuv420P` / `Yuv422P` / `Yuv411P` (and the `YuvJ*`
+  full-range equivalents) → `Rgb24` / `Rgba` truncated the chroma plane
+  size as `cw = w / wsub` / `ch = h / hsub`, so the decoder read one
+  sample past the U/V planes for a trailing odd luma column or row (e.g.
+  a 3×4 4:2:0 frame, or any 1×1 input) — a panic in debug builds, a
+  silent OOB in release. `convert()` now rejects such geometry up front
+  with `Error::Invalid`, mirroring the existing RGB → YUV divisibility
+  guard. The other subsampled paths (NV12/NV21, packed 4:2:2, planar
+  chroma resample, `Yuva420P`) already had this guard.
+
 ### Added
+
+- New `convert_geometry` cargo-fuzz target under `fuzz/`. Rather than
+  feeding arbitrary bytes at a parser, it *constructs* well-formed source
+  frames at fuzzer-chosen small / odd / extra-stride-padded dimensions
+  and drives every registered `(src, dst)` conversion, asserting none
+  panics, overflows, or reads out of bounds. Wired into the daily fuzz CI
+  workflow. (This target's first run surfaced the odd-dimension OOB fixed
+  above.)
 
 - BT.2020 NCL anchor-vector tests: black and the three primaries are now
   pinned against 8-bit codes hand-derived from BT.2020-2 Table 4 (NCL
