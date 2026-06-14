@@ -1020,9 +1020,90 @@ pub fn full_to_limited_chroma(plane: &mut [u8]) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Bit-depth conversion between high-precision planar YUV (10/12-bit,
+// each sample a 16-bit little-endian word carrying the value in its low
+// `bits` bits) and the 8-bit planar siblings. A single plane is treated
+// as a flat array of samples; the caller (convert.rs) sizes each plane
+// from the format's subsampling geometry, so the same primitive serves
+// Y, U and V on every 4:2:0 / 4:2:2 / 4:4:4 layout.
+
+/// Down-convert one plane of `count` samples from a `bits`-significant
+/// 16-bit LE source to 8-bit. Each sample is read as a little-endian
+/// `u16`, masked to its low `bits` bits, then reduced to 8 bits by
+/// keeping the top 8 of the `bits` significant bits (a right-shift of
+/// `bits - 8`, dropping the low bits). `dst` holds `count` bytes; `src`
+/// holds `count * 2` bytes.
+///
+/// Truncation (rather than round-to-nearest) is the deliberate inverse
+/// of [`depth_up_8_to_le16_plane`]: because the up-conversion fills the
+/// low `bits - 8` slack with the value's own high bits (MSB replication),
+/// dropping those low bits recovers the original 8-bit value exactly, so
+/// the 8 → high → 8 round-trip is lossless. A rounding bias here would
+/// break that exactness for some inputs.
+pub fn depth_down_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: u32) {
+    debug_assert!((9..=16).contains(&bits), "depth_down: bits out of range");
+    let shift = bits - 8;
+    let mask: u32 = (1u32 << bits) - 1;
+    for i in 0..count {
+        let lo = src[i * 2] as u32;
+        let hi = src[i * 2 + 1] as u32;
+        let v = ((hi << 8) | lo) & mask;
+        dst[i] = (v >> shift) as u8;
+    }
+}
+
+/// Up-convert one plane of `count` samples from 8-bit to a
+/// `bits`-significant 16-bit LE destination. Each 8-bit value is placed
+/// in the top 8 of the `bits` significant bits (left-shift by `bits - 8`)
+/// and the freed low `bits - 8` bits are filled with the value's high
+/// bits (MSB replication), so the result spans the full `bits`-bit range
+/// and `depth_down_le16_plane` recovers the original 8-bit value exactly.
+/// `src` holds `count` bytes; `dst` holds `count * 2` bytes.
+pub fn depth_up_8_to_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: u32) {
+    debug_assert!((9..=16).contains(&bits), "depth_up: bits out of range");
+    let shift = bits - 8;
+    for i in 0..count {
+        let b = src[i] as u32;
+        // value in high bits + replicated MSBs in the low `shift` bits.
+        let v = (b << shift) | (b >> (8 - shift));
+        dst[i * 2] = (v & 0xFF) as u8;
+        dst[i * 2 + 1] = (v >> 8) as u8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_plane_roundtrip_all_8bit_values_10_and_12() {
+        // Every 8-bit value must survive 8 -> high -> 8 untouched for
+        // both 10- and 12-bit widening.
+        for bits in [10u32, 12] {
+            let src: Vec<u8> = (0u16..=255).map(|v| v as u8).collect();
+            let mut hi = vec![0u8; src.len() * 2];
+            let mut back = vec![0u8; src.len()];
+            depth_up_8_to_le16_plane(&src, &mut hi, src.len(), bits);
+            depth_down_le16_plane(&hi, &mut back, src.len(), bits);
+            assert_eq!(src, back, "round-trip failed at bits={bits}");
+        }
+    }
+
+    #[test]
+    fn depth_up_reaches_full_scale() {
+        // 0x00 -> 0, 0xFF -> all `bits` set (peak white reached, not the
+        // 0x3FC / 0xFF0 a plain zero-fill shift would leave).
+        for bits in [10u32, 12] {
+            let src = [0x00u8, 0xFF];
+            let mut hi = vec![0u8; 4];
+            depth_up_8_to_le16_plane(&src, &mut hi, 2, bits);
+            let zero = u16::from_le_bytes([hi[0], hi[1]]);
+            let peak = u16::from_le_bytes([hi[2], hi[3]]);
+            assert_eq!(zero, 0, "0x00 must map to 0");
+            assert_eq!(peak, (1u16 << bits) - 1, "0xFF must reach full scale");
+        }
+    }
 
     // BT.709 limited-range test vectors. These are the reference values
     // produced by the canonical f32 math, and the fixed-point path must

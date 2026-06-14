@@ -41,6 +41,7 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`                                    |
 | Planar GBR              | `Gbrp10/12/14Le` ↔ `Rgb48Le`, `Gbrap10/12/14Le` ↔ `Rgba64Le` (bit reorder) |
 | YUV planar ↔ RGB        | `Yuv420P` / `Yuv422P` / `Yuv444P` ↔ `Rgb24` / `Rgba`                        |
+| High-bit YUV depth      | `Yuv420P10/12Le` / `Yuv422P10/12Le` / `Yuv444P10/12Le` ↔ 8-bit sibling (round-trip-exact) |
 | Chroma subsampling      | `4:4:4` ↔ `4:2:2` ↔ `4:2:0` (SIMD-accelerated up- and down-sample)          |
 | Direct planar ↔ planar  | `Yuv420P` / `Yuv422P` / `Yuv444P` all-to-all + same on `YuvJ*` (no RGB hop) |
 | Semi-planar             | `NV12` / `NV21` ↔ `Yuv420P` / `Rgb24` / `Rgba`                              |
@@ -81,7 +82,7 @@ variants and `convert()` paths will land over time.
 | family                | additions                                                                     |
 | --------------------- | ----------------------------------------------------------------------------- |
 | Big-endian mirrors    | `Rgb48Be`, `Rgba64Be`, `Gray16Be`, `Yuv420P10Be`, … of every `*Le` we ship    |
-| Higher-precision YUV  | `Yuv420P9/14/16Le`, same for `422` / `444`                                    |
+| Higher-precision YUV  | `Yuv420P9/14/16Le`, same for `422` / `444` (10/12-bit ↔ 8-bit depth conversion shipped — see table above; high-bit ↔ RGB direct remains) |
 | 10/12/16-bit semi-pl. | `P010Le`, `P012Le`, `P016Le` — HEVC Main10, Dolby Vision                      |
 | DCI / cinema          | `Xyz12Le`                                                                     |
 | 8-bit low-bpp packed  | `Rgb8` (3-3-2), `Rgb4`, `Bgr4Byte`                                            |

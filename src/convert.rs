@@ -329,6 +329,26 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgba64Le, P::Gbrap10Le, PackedDeepToGbr { bits: 10, alpha: true }),
         (P::Rgba64Le, P::Gbrap12Le, PackedDeepToGbr { bits: 12, alpha: true }),
         (P::Rgba64Le, P::Gbrap14Le, PackedDeepToGbr { bits: 14, alpha: true }),
+
+        // High-precision planar YUV (10/12-bit, 16-bit LE storage with the
+        // value in the low `bits` bits) ↔ the 8-bit planar siblings. Pure
+        // per-plane bit-depth scaling — luma and both chroma planes are
+        // resized between 16-bit and 8-bit storage with no colour matrix
+        // and no chroma resampling (the subsampling layout is preserved).
+        // `wsub` / `hsub` describe the shared chroma division of both the
+        // source and destination so the helper can size each plane.
+        (P::Yuv420P10Le, P::Yuv420P, DepthDownYuv { wsub: 2, hsub: 2, bits: 10 }),
+        (P::Yuv422P10Le, P::Yuv422P, DepthDownYuv { wsub: 2, hsub: 1, bits: 10 }),
+        (P::Yuv444P10Le, P::Yuv444P, DepthDownYuv { wsub: 1, hsub: 1, bits: 10 }),
+        (P::Yuv420P12Le, P::Yuv420P, DepthDownYuv { wsub: 2, hsub: 2, bits: 12 }),
+        (P::Yuv422P12Le, P::Yuv422P, DepthDownYuv { wsub: 2, hsub: 1, bits: 12 }),
+        (P::Yuv444P12Le, P::Yuv444P, DepthDownYuv { wsub: 1, hsub: 1, bits: 12 }),
+        (P::Yuv420P, P::Yuv420P10Le, DepthUpYuv { wsub: 2, hsub: 2, bits: 10 }),
+        (P::Yuv422P, P::Yuv422P10Le, DepthUpYuv { wsub: 2, hsub: 1, bits: 10 }),
+        (P::Yuv444P, P::Yuv444P10Le, DepthUpYuv { wsub: 1, hsub: 1, bits: 10 }),
+        (P::Yuv420P, P::Yuv420P12Le, DepthUpYuv { wsub: 2, hsub: 2, bits: 12 }),
+        (P::Yuv422P, P::Yuv422P12Le, DepthUpYuv { wsub: 2, hsub: 1, bits: 12 }),
+        (P::Yuv444P, P::Yuv444P12Le, DepthUpYuv { wsub: 1, hsub: 1, bits: 12 }),
     ]
 };
 
@@ -491,6 +511,26 @@ enum ConvertOp {
         bits: u8,
         alpha: bool,
     },
+    /// High-precision planar YUV (`Yuv*P10Le` / `Yuv*P12Le`, 16-bit LE
+    /// storage) → the 8-bit planar sibling (`Yuv*P`). Each of the three
+    /// planes is reduced from a `bits`-significant 16-bit word to 8 bits
+    /// by a round-to-nearest right-shift. `wsub` / `hsub` are the shared
+    /// chroma division; subsampling is preserved (no chroma resample).
+    DepthDownYuv {
+        wsub: usize,
+        hsub: usize,
+        bits: u32,
+    },
+    /// 8-bit planar YUV (`Yuv*P`) → the high-precision planar sibling
+    /// (`Yuv*P10Le` / `Yuv*P12Le`). The inverse of [`Self::DepthDownYuv`]:
+    /// each plane is widened to a `bits`-significant 16-bit LE word with
+    /// the 8-bit value in the high bits and its MSBs replicated into the
+    /// low slack so the down-conversion round-trips exactly.
+    DepthUpYuv {
+        wsub: usize,
+        hsub: usize,
+        bits: u32,
+    },
 }
 
 impl ConvertOp {
@@ -571,6 +611,12 @@ impl ConvertOp {
             }
             Self::PackedDeepToGbr { bits, alpha } => {
                 do_packed_deep_to_gbr(src, src_info, bits, alpha)
+            }
+            Self::DepthDownYuv { wsub, hsub, bits } => {
+                do_yuv_depth_down(src, src_info, wsub, hsub, bits)
+            }
+            Self::DepthUpYuv { wsub, hsub, bits } => {
+                do_yuv_depth_up(src, src_info, wsub, hsub, bits)
             }
         }
     }
@@ -1384,6 +1430,114 @@ fn chroma_resample(
             VideoPlane {
                 stride: dst_cw,
                 data: v_dst,
+            },
+        ],
+    ))
+}
+
+/// High-precision planar YUV (16-bit LE, `bits` significant) → 8-bit
+/// planar YUV. Luma and both chroma planes are reduced by
+/// [`yuv::depth_down_le16_plane`]; the chroma subsampling layout
+/// (`wsub` / `hsub`) is preserved unchanged. Width / height must divide
+/// cleanly into the chroma grid, else `Error::invalid`.
+fn do_yuv_depth_down(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    wsub: usize,
+    hsub: usize,
+    bits: u32,
+) -> Result<VideoFrame> {
+    if src.planes.len() < 3 {
+        return Err(Error::invalid(
+            "pixfmt: high-bit YUV source needs 3 planes (Y, U, V)",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % wsub != 0 || h % hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: YUV bit-depth conversion needs dimensions divisible by the subsampling",
+        ));
+    }
+    let cw = w / wsub;
+    let ch = h / hsub;
+    // Source planes are 16-bit LE: each sample is two bytes wide.
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch);
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch);
+    let mut yp = vec![0u8; w * h];
+    let mut up = vec![0u8; cw * ch];
+    let mut vp = vec![0u8; cw * ch];
+    yuv::depth_down_le16_plane(&y_src, &mut yp, w * h, bits);
+    yuv::depth_down_le16_plane(&u_src, &mut up, cw * ch, bits);
+    yuv::depth_down_le16_plane(&v_src, &mut vp, cw * ch, bits);
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw,
+                data: up,
+            },
+            VideoPlane {
+                stride: cw,
+                data: vp,
+            },
+        ],
+    ))
+}
+
+/// 8-bit planar YUV → high-precision planar YUV (16-bit LE, `bits`
+/// significant). The inverse of [`do_yuv_depth_down`]: each plane is
+/// widened by [`yuv::depth_up_8_to_le16_plane`] (8-bit value in the high
+/// bits with MSB replication into the low slack). Subsampling preserved.
+fn do_yuv_depth_up(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    wsub: usize,
+    hsub: usize,
+    bits: u32,
+) -> Result<VideoFrame> {
+    if src.planes.len() < 3 {
+        return Err(Error::invalid(
+            "pixfmt: planar YUV source needs 3 planes (Y, U, V)",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % wsub != 0 || h % hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: YUV bit-depth conversion needs dimensions divisible by the subsampling",
+        ));
+    }
+    let cw = w / wsub;
+    let ch = h / hsub;
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
+    let mut yp = vec![0u8; w * h * 2];
+    let mut up = vec![0u8; cw * ch * 2];
+    let mut vp = vec![0u8; cw * ch * 2];
+    yuv::depth_up_8_to_le16_plane(&y_src, &mut yp, w * h, bits);
+    yuv::depth_up_8_to_le16_plane(&u_src, &mut up, cw * ch, bits);
+    yuv::depth_up_8_to_le16_plane(&v_src, &mut vp, cw * ch, bits);
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w * 2,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: up,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: vp,
             },
         ],
     ))

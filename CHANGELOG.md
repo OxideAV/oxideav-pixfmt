@@ -22,6 +22,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bit-depth conversion between the high-precision planar YUV variants
+  (`Yuv420P10Le` / `Yuv422P10Le` / `Yuv444P10Le` and the 12-bit
+  siblings) and their 8-bit counterparts (`Yuv420P` / `Yuv422P` /
+  `Yuv444P`), in both directions and for all three subsampling layouts
+  (12 new `convert()` pairs). Up-conversion places the 8-bit value in the
+  high bits of the `bits`-significant 16-bit little-endian word and
+  replicates its MSBs into the low slack, so peak white reaches full
+  scale; down-conversion drops those low bits, making the
+  8 → high → 8 round-trip exact. Subsampling and colour are untouched —
+  this is pure per-plane storage-width scaling. New low-level primitives
+  `yuv::depth_up_8_to_le16_plane` / `yuv::depth_down_le16_plane` expose
+  the per-plane operation over `&[u8]`. No `ColorSpace` knob applies.
+
 - New `convert_geometry` cargo-fuzz target under `fuzz/`. Rather than
   feeding arbitrary bytes at a parser, it *constructs* well-formed source
   frames at fuzzer-chosen small / odd / extra-stride-padded dimensions
