@@ -393,6 +393,26 @@ cargo +nightly bench --features bench,nightly
 OXIDEAV_PIXFMT_FORCE_PORTABLE_SIMD=1 cargo +nightly bench --features bench,nightly
 ```
 
+## Fuzzing
+
+A [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) harness lives
+under `fuzz/`. The interesting surface is the conversion math itself, not
+a byte parser: `convert()` trusts the caller-supplied `FrameInfo` (format
+/ width / height) and the matching plane layout, so the harness builds
+*well-formed* source frames for a fuzzer-chosen format at fuzzer-chosen
+small dimensions — odd widths/heights, 1×1, and extra per-row stride
+padding — and runs every registered `(src, dst)` conversion against them.
+The contract under test is that a correctly-described frame never panics,
+integer-overflows, indexes out of bounds, or OOMs in any converter or its
+SIMD edge handling.
+
+```sh
+cargo +nightly fuzz run convert_roundtrip
+```
+
+The shared daily CI workflow runs it automatically and persists the
+corpus across runs.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

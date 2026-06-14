@@ -1053,6 +1053,20 @@ fn do_yuv_to_rgb(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
+    // The subsampled chroma plane carries one sample per `wsub × hsub`
+    // luma block, so the decode loop indexes chroma at `col / wsub` /
+    // `row / hsub` up to `(w - 1) / wsub`. When a dimension is not a
+    // multiple of its subsampling factor that index reaches `w / wsub`,
+    // one past the tightly-packed chroma plane the caller supplies —
+    // an out-of-bounds read. Reject odd-for-the-layout dimensions up
+    // front, mirroring the symmetric guard in the RGB → YUV encode path.
+    // (4:4:4 has wsub = hsub = 1, so this never rejects a full-chroma
+    // frame; 4:1:1 additionally requires width divisible by 4.)
+    if w % wsub != 0 || h % hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: YUV → RGB requires dimensions divisible by the chroma subsampling",
+        ));
+    }
     let cw = w / wsub;
     let ch = h / hsub;
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);

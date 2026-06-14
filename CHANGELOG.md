@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Out-of-bounds read decoding a subsampled planar YUV frame (`Yuv420P` /
+  `Yuv422P` / `YuvJ420P` / `YuvJ422P` / `Yuv411P`) to RGB when a dimension
+  was not a multiple of the chroma subsampling factor. The decode loop
+  indexes chroma at `col / wsub` (and `row / hsub` for 4:2:0), which
+  reaches `w / wsub` — one past the tightly-packed chroma plane the caller
+  supplies — for an odd width/height, panicking with an index-out-of-bounds
+  on every path (scalar, NEON and AVX2 tail). `convert()` now rejects such
+  geometry with `Error::Invalid` up front, matching the symmetric guard the
+  RGB → YUV encode direction already had. 4:4:4 (no subsampling, including
+  1×1) is unaffected. Found by the new geometry fuzz harness.
+
 ### Added
+
+- Fuzz harness under `fuzz/` (`convert_roundtrip` target, cargo-fuzz +
+  `arbitrary`) that builds well-formed source frames for a fuzzer-chosen
+  format at fuzzer-chosen small dimensions — odd widths/heights, 1×1, and
+  extra per-row stride padding — and runs every registered `(src, dst)`
+  conversion, asserting no panic / overflow / OOB / OOM. Wired into the
+  shared daily `crate-fuzz` CI workflow. This is the harness that surfaced
+  the subsampled-YUV OOB above.
 
 - BT.2020 NCL anchor-vector tests: black and the three primaries are now
   pinned against 8-bit codes hand-derived from BT.2020-2 Table 4 (NCL

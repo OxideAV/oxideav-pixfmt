@@ -1273,3 +1273,56 @@ fn gbr_short_plane_count_rejected() {
     let info = FrameInfo::new(PixelFormat::Gbrap10Le, 4, 2);
     assert!(convert(&src, info, PixelFormat::Rgba64Le, &opts).is_err());
 }
+
+// Regression: a subsampled planar YUV source whose dimensions are not a
+// multiple of the chroma subsampling factor must be rejected, not read
+// past the end of the tightly-packed chroma plane. The decode loop
+// indexes chroma at `col / wsub`, which reaches `w / wsub` (one past the
+// plane) for an odd width — found by the geometry fuzz harness as a 1×1
+// Yuv420P → Rgb24 out-of-bounds read.
+#[test]
+fn yuv_to_rgb_odd_dimensions_rejected() {
+    let opts = ConvertOptions::default();
+    // Build a minimal source frame for `fmt` at `w × h` with chroma
+    // planes sized to the *floor* division the caller would supply.
+    let make = |fmt: PixelFormat, w: usize, h: usize, wsub: usize, hsub: usize| {
+        let cw = w / wsub;
+        let ch = h / hsub;
+        let frame = VideoFrame {
+            pts: None,
+            planes: vec![
+                VideoPlane {
+                    stride: w,
+                    data: vec![16; w * h],
+                },
+                VideoPlane {
+                    stride: cw,
+                    data: vec![128; cw * ch],
+                },
+                VideoPlane {
+                    stride: cw,
+                    data: vec![128; cw * ch],
+                },
+            ],
+        };
+        (frame, FrameInfo::new(fmt, w as u32, h as u32))
+    };
+
+    // 4:2:0 — both axes subsampled: odd width, odd height, 1×1.
+    for (w, h) in [(3, 4), (4, 3), (1, 1), (5, 6)] {
+        let (src, info) = make(PixelFormat::Yuv420P, w, h, 2, 2);
+        assert!(
+            convert(&src, info, PixelFormat::Rgb24, &opts).is_err(),
+            "Yuv420P {w}x{h} → Rgb24 must reject odd-for-layout dims"
+        );
+        assert!(convert(&src, info, PixelFormat::Rgba, &opts).is_err());
+    }
+    // 4:2:2 — horizontal subsample only: odd width rejected, odd height OK.
+    let (src, info) = make(PixelFormat::Yuv422P, 3, 4, 2, 1);
+    assert!(convert(&src, info, PixelFormat::Rgb24, &opts).is_err());
+    let (src, info) = make(PixelFormat::Yuv422P, 4, 3, 2, 1);
+    assert!(convert(&src, info, PixelFormat::Rgb24, &opts).is_ok());
+    // 4:4:4 — no subsampling: every dimension is valid (1×1 included).
+    let (src, info) = make(PixelFormat::Yuv444P, 1, 1, 1, 1);
+    assert!(convert(&src, info, PixelFormat::Rgb24, &opts).is_ok());
+}
