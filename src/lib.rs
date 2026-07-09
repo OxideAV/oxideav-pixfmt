@@ -34,8 +34,13 @@
 //! is supported; the first-tier matrix is:
 //!
 //! - RGB family (Rgb24/Bgr24/Rgba/Bgra/Argb/Abgr) all-to-all.
-//! - Yuv420P/422P/444P ↔ Rgb24 / Rgba under BT.601 and BT.709, limited
-//!   and full range.
+//! - Yuv420P/422P/444P ↔ Rgb24 / Rgba under BT.601 / BT.709 / BT.2020
+//!   (limited range), plus the full-range YuvJ420P/422P/444P families
+//!   directly ↔ Rgb24 / Rgba (the format pins the matrix range; the
+//!   `ColorSpace` option picks the primaries).
+//! - Gray8 ↔ every YUV family (luma extraction with range rescale /
+//!   neutral-chroma synthesis; no colour matrix), and Rgb24 / Rgba →
+//!   Gray8 full-range luminance projection.
 //! - Yuv420P/422P/444P all-to-all direct (chroma resample only — luma
 //!   copied byte-for-byte, no RGB hop), plus the same six pairs on the
 //!   full-range `YuvJ*` family.
@@ -56,6 +61,11 @@
 //!   Rgba, dropped on the way to Rgb24, and synthesised as opaque 255 on
 //!   the return paths from Gray8/Rgb24).
 //! - Rgb48Le ↔ Rgb24, Rgba64Le ↔ Rgba (bit-shift).
+//! - Planar GBR(A) at 10/12/14 bits ↔ both the deep packed formats
+//!   (Rgb48Le / Rgba64Le) and the 8-bit packed ones (Rgb24 / Rgba).
+//! - The full bit-depth ladder: planar YUV 8 ↔ 10 ↔ 12 bit (same
+//!   subsampling; MSB-replicated widen / truncating narrow, exact
+//!   round-trips), and Gray8 ↔ Gray10Le ↔ Gray12Le ↔ Gray16Le.
 //! - Gray16Le ↔ Gray8.
 //! - MonoBlack/MonoWhite ↔ Gray8.
 //! - Pal8 → Rgb24/Rgba requires `opts.palette`.
@@ -64,8 +74,13 @@
 //!   [`cmyk`] for the formula and the caveats around ICC profiles and
 //!   Adobe-inverted JPEGs).
 //!
-//! Anything else returns `Error::Unsupported` — callers handle it or
-//! stage through a supported intermediate (most paths go via Rgba).
+//! Pairs without a direct entry are resolved automatically through a
+//! **single-pivot staged conversion** (one intermediate format, chosen
+//! in a fidelity-aware order: YUV pivots for YUV → YUV moves so no
+//! colour matrix enters the path, alpha-capable and deep RGB pivots
+//! preferred where the endpoints call for them). [`supports`] /
+//! [`supports_direct`] report per-pair availability; anything neither
+//! direct nor stageable returns `Error::Unsupported`.
 
 pub mod alpha;
 pub mod cmyk;
