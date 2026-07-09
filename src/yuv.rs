@@ -1072,9 +1072,72 @@ pub fn depth_up_8_to_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: 
     }
 }
 
+/// Rescale one plane of `count` samples between two `bits`-significant
+/// 16-bit LE storage widths (both in 9..=16). Widening places the value
+/// in the top `src_bits` of the destination and replicates its MSBs into
+/// the freed low bits, so peak white maps to peak white; narrowing drops
+/// the low `src_bits - dst_bits` bits (truncation — the exact inverse of
+/// the replication fill, so a narrow → widen → narrow round-trip and a
+/// widen → narrow round-trip are both lossless). `src` and `dst` each
+/// hold `count * 2` bytes. Equal widths degrade to a masked copy.
+pub fn depth_rescale_le16_plane(
+    src: &[u8],
+    dst: &mut [u8],
+    count: usize,
+    src_bits: u32,
+    dst_bits: u32,
+) {
+    debug_assert!(
+        (9..=16).contains(&src_bits) && (9..=16).contains(&dst_bits),
+        "depth_rescale: bits out of range"
+    );
+    let mask: u32 = ((1u64 << src_bits) - 1) as u32;
+    for i in 0..count {
+        let lo = src[i * 2] as u32;
+        let hi = src[i * 2 + 1] as u32;
+        let v = ((hi << 8) | lo) & mask;
+        let out = if dst_bits >= src_bits {
+            let d = dst_bits - src_bits;
+            // MSB replication needs d <= src_bits, which always holds for
+            // widths in 9..=16 (max widening is 9 → 16, d = 7 < 9).
+            if d == 0 {
+                v
+            } else {
+                (v << d) | (v >> (src_bits - d))
+            }
+        } else {
+            v >> (src_bits - dst_bits)
+        };
+        dst[i * 2] = (out & 0xFF) as u8;
+        dst[i * 2 + 1] = (out >> 8) as u8;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depth_rescale_widen_narrow_roundtrip_exact() {
+        // Every 10-bit code survives 10 → 12/16 → 10; every 12-bit code
+        // survives 12 → 16 → 12. Peak maps to peak in the wide space.
+        for (b, wide) in [(10u32, 12u32), (10, 16), (12, 16)] {
+            let n = 1usize << b;
+            let mut src = vec![0u8; n * 2];
+            for (i, v) in (0..n as u32).enumerate() {
+                src[i * 2] = (v & 0xFF) as u8;
+                src[i * 2 + 1] = (v >> 8) as u8;
+            }
+            let mut up = vec![0u8; n * 2];
+            let mut back = vec![0u8; n * 2];
+            depth_rescale_le16_plane(&src, &mut up, n, b, wide);
+            // Peak: last sample must be all-ones at `wide` bits.
+            let last = (up[(n - 1) * 2] as u32) | ((up[(n - 1) * 2 + 1] as u32) << 8);
+            assert_eq!(last, (1u32 << wide) - 1, "{b} → {wide} peak");
+            depth_rescale_le16_plane(&up, &mut back, n, wide, b);
+            assert_eq!(src, back, "{b} → {wide} → {b} round-trip");
+        }
+    }
 
     #[test]
     fn depth_plane_roundtrip_all_8bit_values_10_and_12() {

@@ -22,6 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Complete bit-depth ladder (16 new `convert()` pairs). Cross-depth
+  planar YUV 10 ↔ 12 bit (`Yuv420P10Le` ↔ `Yuv420P12Le` and the
+  4:2:2 / 4:4:4 siblings, both directions) — previously a 10 ↔ 12 move
+  had to stage through the 8-bit sibling and lose the low bits of both
+  depths; the direct rescale widens with MSB replication (peak → peak,
+  10 → 12 → 10 bit-exact) and narrows by truncation. And deep-grayscale
+  wiring: `Gray10Le` / `Gray12Le` — until now the only `PixelFormat`
+  variants with zero conversion coverage — join the ladder with
+  `Gray8` ↔ `Gray10Le` / `Gray12Le` (8-bit values round-trip exactly),
+  `Gray10Le` ↔ `Gray12Le`, and `Gray10Le` / `Gray12Le` ↔ `Gray16Le`.
+  New low-level primitive `yuv::depth_rescale_le16_plane` exposes the
+  per-plane width rescale over `&[u8]`.
+
+- Gray8 ↔ YUV-family conversions (19 new `convert()` pairs). YUV →
+  `Gray8` extracts the full-resolution luma plane from any planar
+  (`Yuv420P` / `Yuv422P` / `Yuv444P` / `Yuv411P`), full-range (`YuvJ*`),
+  semi-planar (`Nv12` / `Nv21`) or alpha-carrying (`Yuva420P`) source —
+  rescaling limited 16..=235 luma onto the full Gray8 range and copying
+  `YuvJ*` luma verbatim; chroma (and alpha) is never read, so odd
+  dimensions are accepted even on subsampled layouts. `Gray8` → YUV
+  synthesises neutral (128) chroma around the (range-compressed) gray
+  plane for all seven planar targets plus NV12/NV21. No colour matrix is
+  involved in either direction; the `YuvJ*` round-trip is bit-exact and
+  the limited-range round-trip is within ±1.
+
 - Direct full-range `YuvJ420P` / `YuvJ422P` / `YuvJ444P` ↔ `Rgb24` /
   `Rgba` conversions (12 new `convert()` pairs). The `YuvJ*` families
   carry full-range samples by definition, so these paths pin the matrix

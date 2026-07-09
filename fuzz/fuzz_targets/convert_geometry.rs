@@ -51,6 +51,8 @@ const FORMATS: &[PixelFormat] = &[
     PixelFormat::Rgba64Le,
     PixelFormat::Gray8,
     PixelFormat::Gray16Le,
+    PixelFormat::Gray10Le,
+    PixelFormat::Gray12Le,
     PixelFormat::Ya8,
     PixelFormat::MonoBlack,
     PixelFormat::MonoWhite,
@@ -150,7 +152,9 @@ fn build_frame(fmt: PixelFormat, w: u32, h: u32, pad: usize, fill: &[u8]) -> Opt
         PixelFormat::Rgb48Le => vec![build_plane(hu, wu * 6, pad, fill, &mut seed)],
         PixelFormat::Rgba64Le => vec![build_plane(hu, wu * 8, pad, fill, &mut seed)],
         PixelFormat::Gray8 => vec![build_plane(hu, wu, pad, fill, &mut seed)],
-        PixelFormat::Gray16Le => vec![build_plane(hu, wu * 2, pad, fill, &mut seed)],
+        PixelFormat::Gray16Le | PixelFormat::Gray10Le | PixelFormat::Gray12Le => {
+            vec![build_plane(hu, wu * 2, pad, fill, &mut seed)]
+        }
         PixelFormat::Ya8 => vec![build_plane(hu, wu * 2, pad, fill, &mut seed)],
         // Mono — one bit per pixel, packed MSB-first into ceil(w/8) bytes
         // per row.

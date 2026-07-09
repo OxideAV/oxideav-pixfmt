@@ -178,6 +178,36 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgb24, P::Ya8,   Rgb24ToYa8),
         (P::Rgba,  P::Ya8,   RgbaToYa8),
 
+        // YUV family → Gray8 (luma extraction) and Gray8 → YUV family
+        // (neutral chroma synthesis). Both directions are pure luma-plane
+        // operations: chroma is dropped on the way out and written as the
+        // neutral code 128 on the way in, so no colour matrix applies —
+        // only the range rescale between the limited-range `Yuv*` /
+        // `Nv*` / `Yuva*` families (16..=235 luma) and the full-range
+        // `Gray8` / `YuvJ*` sample space. Yuva420P → Gray8 also drops the
+        // alpha plane.
+        (P::Yuv420P,  P::Gray8, YuvLumaToGray { full_range: false }),
+        (P::Yuv422P,  P::Gray8, YuvLumaToGray { full_range: false }),
+        (P::Yuv444P,  P::Gray8, YuvLumaToGray { full_range: false }),
+        (P::Yuv411P,  P::Gray8, YuvLumaToGray { full_range: false }),
+        (P::Nv12,     P::Gray8, YuvLumaToGray { full_range: false }),
+        (P::Nv21,     P::Gray8, YuvLumaToGray { full_range: false }),
+        (P::Yuva420P, P::Gray8, YuvLumaToGray { full_range: false }),
+        (P::YuvJ420P, P::Gray8, YuvLumaToGray { full_range: true }),
+        (P::YuvJ422P, P::Gray8, YuvLumaToGray { full_range: true }),
+        (P::YuvJ444P, P::Gray8, YuvLumaToGray { full_range: true }),
+        (P::Gray8, P::Yuv420P,  GrayToYuvPlanar { wsub: 2, hsub: 2, full_range: false }),
+        (P::Gray8, P::Yuv422P,  GrayToYuvPlanar { wsub: 2, hsub: 1, full_range: false }),
+        (P::Gray8, P::Yuv444P,  GrayToYuvPlanar { wsub: 1, hsub: 1, full_range: false }),
+        (P::Gray8, P::Yuv411P,  GrayToYuvPlanar { wsub: 4, hsub: 1, full_range: false }),
+        (P::Gray8, P::YuvJ420P, GrayToYuvPlanar { wsub: 2, hsub: 2, full_range: true }),
+        (P::Gray8, P::YuvJ422P, GrayToYuvPlanar { wsub: 2, hsub: 1, full_range: true }),
+        (P::Gray8, P::YuvJ444P, GrayToYuvPlanar { wsub: 1, hsub: 1, full_range: true }),
+        // The NV interleaved chroma plane is all-neutral (128, 128), so
+        // NV12 and NV21 receive byte-identical output.
+        (P::Gray8, P::Nv12, GrayToNv),
+        (P::Gray8, P::Nv21, GrayToNv),
+
         // YUV planar → packed RGB.
         (P::Yuv420P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 2, alpha: false, full_range: false }),
         (P::Yuv422P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 1, alpha: false, full_range: false }),
@@ -367,6 +397,35 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Yuv420P, P::Yuv420P12Le, DepthUpYuv { wsub: 2, hsub: 2, bits: 12 }),
         (P::Yuv422P, P::Yuv422P12Le, DepthUpYuv { wsub: 2, hsub: 1, bits: 12 }),
         (P::Yuv444P, P::Yuv444P12Le, DepthUpYuv { wsub: 1, hsub: 1, bits: 12 }),
+
+        // Cross-depth planar YUV (10-bit ↔ 12-bit, same subsampling).
+        // Pure per-plane storage-width rescale — widening replicates MSBs
+        // into the new low bits (peak maps to peak, 10 → 12 → 10 is
+        // exact); narrowing truncates. No colour math, no resampling.
+        // Without these rows a 10 ↔ 12 move had to stage through the
+        // 8-bit sibling and lose the low bits of both depths.
+        (P::Yuv420P10Le, P::Yuv420P12Le, DepthRescaleYuv { wsub: 2, hsub: 2, src_bits: 10, dst_bits: 12 }),
+        (P::Yuv422P10Le, P::Yuv422P12Le, DepthRescaleYuv { wsub: 2, hsub: 1, src_bits: 10, dst_bits: 12 }),
+        (P::Yuv444P10Le, P::Yuv444P12Le, DepthRescaleYuv { wsub: 1, hsub: 1, src_bits: 10, dst_bits: 12 }),
+        (P::Yuv420P12Le, P::Yuv420P10Le, DepthRescaleYuv { wsub: 2, hsub: 2, src_bits: 12, dst_bits: 10 }),
+        (P::Yuv422P12Le, P::Yuv422P10Le, DepthRescaleYuv { wsub: 2, hsub: 1, src_bits: 12, dst_bits: 10 }),
+        (P::Yuv444P12Le, P::Yuv444P10Le, DepthRescaleYuv { wsub: 1, hsub: 1, src_bits: 12, dst_bits: 10 }),
+
+        // Deep grayscale wiring — Gray10Le / Gray12Le previously had NO
+        // conversion entries at all (the only PixelFormat variants with
+        // zero coverage). Same per-plane primitives as the YUV depth
+        // ladder: 8-bit endpoints round-trip exactly through any deeper
+        // width, and 16-bit storage acts as the common widest rung.
+        (P::Gray10Le, P::Gray8, GrayDepthDown8 { bits: 10 }),
+        (P::Gray12Le, P::Gray8, GrayDepthDown8 { bits: 12 }),
+        (P::Gray8, P::Gray10Le, GrayDepthUp8 { bits: 10 }),
+        (P::Gray8, P::Gray12Le, GrayDepthUp8 { bits: 12 }),
+        (P::Gray10Le, P::Gray12Le, GrayDepthRescale { src_bits: 10, dst_bits: 12 }),
+        (P::Gray12Le, P::Gray10Le, GrayDepthRescale { src_bits: 12, dst_bits: 10 }),
+        (P::Gray10Le, P::Gray16Le, GrayDepthRescale { src_bits: 10, dst_bits: 16 }),
+        (P::Gray16Le, P::Gray10Le, GrayDepthRescale { src_bits: 16, dst_bits: 10 }),
+        (P::Gray12Le, P::Gray16Le, GrayDepthRescale { src_bits: 12, dst_bits: 16 }),
+        (P::Gray16Le, P::Gray12Le, GrayDepthRescale { src_bits: 16, dst_bits: 12 }),
     ]
 };
 
@@ -419,6 +478,27 @@ enum ConvertOp {
     Ya8ToRgba,
     Rgb24ToYa8,
     RgbaToYa8,
+    /// Any YUV-family source (planar, semi-planar NV, or planar +
+    /// alpha) → `Gray8` by extracting the full-resolution luma plane.
+    /// Chroma (and alpha, for `Yuva420P`) is dropped. `full_range`
+    /// mirrors the source family: limited-range sources are rescaled
+    /// 16..=235 → 0..=255; `YuvJ*` luma is copied verbatim. Only the
+    /// luma plane is touched, so odd dimensions are fine even on
+    /// subsampled sources.
+    YuvLumaToGray {
+        full_range: bool,
+    },
+    /// `Gray8` → planar YUV: the gray plane becomes luma (rescaled to
+    /// limited range unless the destination is a full-range `YuvJ*`),
+    /// and the chroma planes are synthesised at the neutral code 128.
+    GrayToYuvPlanar {
+        wsub: usize,
+        hsub: usize,
+        full_range: bool,
+    },
+    /// `Gray8` → NV12 / NV21: limited-range luma plus an all-neutral
+    /// interleaved chroma plane (identical bytes for both NV orders).
+    GrayToNv,
     YuvToRgb {
         wsub: usize,
         hsub: usize,
@@ -556,6 +636,34 @@ enum ConvertOp {
         hsub: usize,
         bits: u32,
     },
+    /// Cross-depth planar YUV: rescale every plane between two
+    /// `bits`-significant 16-bit LE storage widths (e.g. 10 ↔ 12) with
+    /// the subsampling layout preserved. Widening replicates MSBs into
+    /// the new low bits; narrowing truncates them (exact inverses).
+    DepthRescaleYuv {
+        wsub: usize,
+        hsub: usize,
+        src_bits: u32,
+        dst_bits: u32,
+    },
+    /// Deep grayscale (`Gray10Le` / `Gray12Le`) → `Gray8`: keep the top
+    /// 8 of the `bits` significant bits (same primitive as the YUV depth
+    /// ladder).
+    GrayDepthDown8 {
+        bits: u32,
+    },
+    /// `Gray8` → deep grayscale: value in the high bits with MSB
+    /// replication into the low slack, so `GrayDepthDown8` recovers the
+    /// original exactly.
+    GrayDepthUp8 {
+        bits: u32,
+    },
+    /// Deep grayscale ↔ deep grayscale storage-width rescale
+    /// (10 ↔ 12 ↔ 16), single plane.
+    GrayDepthRescale {
+        src_bits: u32,
+        dst_bits: u32,
+    },
 }
 
 impl ConvertOp {
@@ -593,6 +701,13 @@ impl ConvertOp {
             Self::Ya8ToRgba => do_ya8_to_rgba(src, src_info),
             Self::Rgb24ToYa8 => do_rgb24_to_ya8(src, src_info),
             Self::RgbaToYa8 => do_rgba_to_ya8(src, src_info),
+            Self::YuvLumaToGray { full_range } => do_yuv_luma_to_gray(src, src_info, full_range),
+            Self::GrayToYuvPlanar {
+                wsub,
+                hsub,
+                full_range,
+            } => do_gray_to_yuv_planar(src, src_info, wsub, hsub, full_range),
+            Self::GrayToNv => do_gray_to_nv(src, src_info),
             Self::YuvToRgb {
                 wsub,
                 hsub,
@@ -656,6 +771,17 @@ impl ConvertOp {
             }
             Self::DepthUpYuv { wsub, hsub, bits } => {
                 do_yuv_depth_up(src, src_info, wsub, hsub, bits)
+            }
+            Self::DepthRescaleYuv {
+                wsub,
+                hsub,
+                src_bits,
+                dst_bits,
+            } => do_yuv_depth_rescale(src, src_info, wsub, hsub, src_bits, dst_bits),
+            Self::GrayDepthDown8 { bits } => do_gray_depth_down8(src, src_info, bits),
+            Self::GrayDepthUp8 { bits } => do_gray_depth_up8(src, src_info, bits),
+            Self::GrayDepthRescale { src_bits, dst_bits } => {
+                do_gray_depth_rescale(src, src_info, src_bits, dst_bits)
             }
         }
     }
@@ -1123,6 +1249,110 @@ fn do_rgba_to_ya8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
 }
 
 // -------------------------------------------------------------------------
+// YUV ↔ Gray8 (luma extraction / neutral-chroma synthesis).
+
+/// Any YUV-family source → `Gray8`: gather the full-resolution luma
+/// plane, rescale limited → full range unless the source is a `YuvJ*`
+/// family, and drop everything else. Chroma is never read, so this path
+/// accepts odd dimensions even on subsampled layouts.
+fn do_yuv_luma_to_gray(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    full_range: bool,
+) -> Result<VideoFrame> {
+    if src.planes.is_empty() {
+        return Err(Error::invalid("pixfmt: YUV source needs a luma plane"));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    if !full_range {
+        yuv::limited_to_full_luma(&mut yp);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w,
+            data: yp,
+        }],
+    ))
+}
+
+/// `Gray8` → planar YUV: gray becomes luma (compressed to the limited
+/// 16..=235 range unless the destination is full-range `YuvJ*`), chroma
+/// planes are synthesised at the neutral code 128. Dimensions must
+/// divide by the destination's chroma grid so the U/V planes are
+/// representable.
+fn do_gray_to_yuv_planar(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    wsub: usize,
+    hsub: usize,
+    full_range: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % wsub != 0 || h % hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: Gray8 → subsampled YUV requires dimensions divisible by the subsampling",
+        ));
+    }
+    let cw = w / wsub;
+    let ch = h / hsub;
+    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    if !full_range {
+        yuv::full_to_limited_luma(&mut yp);
+    }
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw,
+                data: vec![128u8; cw * ch],
+            },
+            VideoPlane {
+                stride: cw,
+                data: vec![128u8; cw * ch],
+            },
+        ],
+    ))
+}
+
+/// `Gray8` → NV12 / NV21: limited-range luma + one interleaved chroma
+/// plane holding the neutral code 128 in every byte — U and V are equal,
+/// so NV12 and NV21 receive identical bytes.
+fn do_gray_to_nv(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 || h % 2 != 0 {
+        return Err(Error::invalid(
+            "pixfmt: Gray8 → NV12/NV21 requires even width and height",
+        ));
+    }
+    let cw = w / 2;
+    let ch = h / 2;
+    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    yuv::full_to_limited_luma(&mut yp);
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: vec![128u8; cw * ch * 2],
+            },
+        ],
+    ))
+}
+
+// -------------------------------------------------------------------------
 // YUV ↔ RGB.
 
 fn do_yuv_to_rgb(
@@ -1579,6 +1809,119 @@ fn do_yuv_depth_up(
                 data: vp,
             },
         ],
+    ))
+}
+
+/// Cross-depth planar YUV (10 ↔ 12 bit, 16-bit LE storage on both
+/// sides): every plane goes through [`yuv::depth_rescale_le16_plane`];
+/// subsampling is preserved.
+fn do_yuv_depth_rescale(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    wsub: usize,
+    hsub: usize,
+    src_bits: u32,
+    dst_bits: u32,
+) -> Result<VideoFrame> {
+    if src.planes.len() < 3 {
+        return Err(Error::invalid(
+            "pixfmt: high-bit YUV source needs 3 planes (Y, U, V)",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % wsub != 0 || h % hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: YUV bit-depth conversion needs dimensions divisible by the subsampling",
+        ));
+    }
+    let cw = w / wsub;
+    let ch = h / hsub;
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch);
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch);
+    let mut yp = vec![0u8; w * h * 2];
+    let mut up = vec![0u8; cw * ch * 2];
+    let mut vp = vec![0u8; cw * ch * 2];
+    yuv::depth_rescale_le16_plane(&y_src, &mut yp, w * h, src_bits, dst_bits);
+    yuv::depth_rescale_le16_plane(&u_src, &mut up, cw * ch, src_bits, dst_bits);
+    yuv::depth_rescale_le16_plane(&v_src, &mut vp, cw * ch, src_bits, dst_bits);
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w * 2,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: up,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: vp,
+            },
+        ],
+    ))
+}
+
+// -------------------------------------------------------------------------
+// Deep grayscale (Gray10Le / Gray12Le / Gray16Le) storage-width ladder.
+
+/// `Gray10Le` / `Gray12Le` → `Gray8` (keep the top 8 significant bits).
+fn do_gray_depth_down8(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let tight = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let mut out = vec![0u8; w * h];
+    yuv::depth_down_le16_plane(&tight, &mut out, w * h, bits);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w,
+            data: out,
+        }],
+    ))
+}
+
+/// `Gray8` → `Gray10Le` / `Gray12Le` (MSB-replicated widen; exact
+/// inverse of [`do_gray_depth_down8`]).
+fn do_gray_depth_up8(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let tight = gather_tight(&in_plane.data, in_plane.stride, w, h);
+    let mut out = vec![0u8; w * h * 2];
+    yuv::depth_up_8_to_le16_plane(&tight, &mut out, w * h, bits);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: out,
+        }],
+    ))
+}
+
+/// Deep grayscale ↔ deep grayscale (10 ↔ 12 ↔ 16) storage rescale.
+fn do_gray_depth_rescale(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    src_bits: u32,
+    dst_bits: u32,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let tight = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let mut out = vec![0u8; w * h * 2];
+    yuv::depth_rescale_le16_plane(&tight, &mut out, w * h, src_bits, dst_bits);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: out,
+        }],
     ))
 }
 
