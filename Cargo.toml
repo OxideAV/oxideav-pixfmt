@@ -41,3 +41,8 @@ required-features = ["bench"]
 name = "alpha"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "depth_gray"
+harness = false
+required-features = ["bench"]

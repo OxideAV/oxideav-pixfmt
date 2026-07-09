@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `depth_gray` Criterion bench suite (`cargo bench --features bench
+  --bench depth_gray`) covering the per-plane bit-depth primitives and
+  the Gray8 luminance projection at 1080p, and a loop restructuring in
+  `yuv::depth_rescale_le16_plane` that hoists the widen/narrow branch
+  out of the per-sample body: the narrowing direction (12-bit → 10-bit)
+  improves ~2.7× (12.9 → 34.4 GiB/s single-core), widening ~8%
+  (10.9 → 11.7 GiB/s).
+
 - Black-box cross-validation suite against the `ffmpeg` binary used as
   an opaque CLI validator (skips silently when no binary is on `PATH`,
   so CI stays self-contained). Five agreements pinned: limited-range

@@ -1080,12 +1080,15 @@ pub fn depth_up_8_to_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: 
 /// (the fixed-point luma weights sum to one).
 pub fn rgb24_to_gray8(src: &[u8], dst: &mut [u8], pixels: usize, matrix: YuvMatrix) {
     let p = matrix.encode_params();
-    for i in 0..pixels {
-        let r = src[i * 3] as i32;
-        let g = src[i * 3 + 1] as i32;
-        let b = src[i * 3 + 2] as i32;
+    for (px, d) in src[..pixels * 3]
+        .chunks_exact(3)
+        .zip(dst[..pixels].iter_mut())
+    {
+        let r = px[0] as i32;
+        let g = px[1] as i32;
+        let b = px[2] as i32;
         let y = (p.cy_r * r + p.cy_g * g + p.cy_b * b + p.y_bias) >> FP_SHIFT;
-        dst[i] = clamp_u8_i32(y);
+        *d = clamp_u8_i32(y);
     }
 }
 
@@ -1109,24 +1112,30 @@ pub fn depth_rescale_le16_plane(
         "depth_rescale: bits out of range"
     );
     let mask: u32 = ((1u64 << src_bits) - 1) as u32;
-    for i in 0..count {
-        let lo = src[i * 2] as u32;
-        let hi = src[i * 2 + 1] as u32;
-        let v = ((hi << 8) | lo) & mask;
-        let out = if dst_bits >= src_bits {
-            let d = dst_bits - src_bits;
-            // MSB replication needs d <= src_bits, which always holds for
-            // widths in 9..=16 (max widening is 9 → 16, d = 7 < 9).
-            if d == 0 {
-                v
-            } else {
-                (v << d) | (v >> (src_bits - d))
-            }
-        } else {
-            v >> (src_bits - dst_bits)
-        };
-        dst[i * 2] = (out & 0xFF) as u8;
-        dst[i * 2 + 1] = (out >> 8) as u8;
+    let src_pairs = src[..count * 2].chunks_exact(2);
+    let dst_pairs = dst[..count * 2].chunks_exact_mut(2);
+    // Hoist the direction branch out of the per-sample loop so each
+    // specialised body is a straight-line shift chain the compiler can
+    // vectorise.
+    if dst_bits > src_bits {
+        // MSB replication needs d <= src_bits, which always holds for
+        // widths in 9..=16 (max widening is 9 → 16, d = 7 < 9).
+        let d = dst_bits - src_bits;
+        let r = src_bits - d;
+        for (s, o) in src_pairs.zip(dst_pairs) {
+            let v = (((s[1] as u32) << 8) | s[0] as u32) & mask;
+            let out = (v << d) | (v >> r);
+            o[0] = (out & 0xFF) as u8;
+            o[1] = (out >> 8) as u8;
+        }
+    } else {
+        let d = src_bits - dst_bits; // 0 for equal widths (masked copy)
+        for (s, o) in src_pairs.zip(dst_pairs) {
+            let v = (((s[1] as u32) << 8) | s[0] as u32) & mask;
+            let out = v >> d;
+            o[0] = (out & 0xFF) as u8;
+            o[1] = (out >> 8) as u8;
+        }
     }
 }
 
