@@ -86,7 +86,8 @@ pub use alpha::{
     unpremultiply,
 };
 pub use convert::{
-    convert, convert_in_place_if_same, ColorSpace, ConvertOptions, Dither, FrameInfo,
+    convert, convert_in_place_if_same, supports, supports_direct, ColorSpace, ConvertOptions,
+    Dither, FrameInfo,
 };
 pub use format_info::{ChromaSubsampling, FormatInfo};
 pub use palette::{generate_palette, Palette, PaletteGenOptions, PaletteStrategy};

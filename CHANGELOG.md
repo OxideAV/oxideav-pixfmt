@@ -22,6 +22,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Single-pivot staged conversion fallback in `convert()`. When no
+  direct `(src, dst)` table entry exists, the dispatcher now routes
+  through one intermediate format, trying pivots in a fidelity-aware
+  order: YUV pivots first when both endpoints are YUV carriage (so the
+  route stays free of any colour matrix — e.g. `Yuyv422 → Yuv420P`
+  keeps luma byte-exact), RGB pivots first otherwise with alpha-capable
+  before alpha-less (`Yuva420P → Bgra` carries the alpha plane
+  bit-exact) and deep before 8-bit where it matters (`Gbrp10Le ↔
+  Gbrp12Le` round-trips exactly through `Rgb48Le`). Reachable
+  `convert()` coverage jumps from 205 to 883 of the 1640 ordered format
+  pairs; a matrix test pins both floors. New `supports(src, dst)` /
+  `supports_direct(src, dst)` predicates let callers distinguish staged
+  routes (which can round twice) from single-table-entry ones.
+
+- Direct `Rgb24` / `Rgba` → `Gray8` luminance projection using the Y'
+  row of the selected primaries at full range (r = g = b inputs map to
+  themselves exactly), plus `Gray8` → `Bgr24` / `Bgra` / `Argb` /
+  `Abgr` broadcasts (a gray broadcast is byte-identical for RGB and BGR
+  orders; the alpha-first orders place the opaque byte up front). New
+  low-level primitive `yuv::rgb24_to_gray8`.
+
 - Complete bit-depth ladder (16 new `convert()` pairs). Cross-depth
   planar YUV 10 ↔ 12 bit (`Yuv420P10Le` ↔ `Yuv420P12Le` and the
   4:2:2 / 4:4:4 siblings, both directions) — previously a 10 ↔ 12 move

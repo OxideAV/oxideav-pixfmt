@@ -89,6 +89,17 @@ pub fn convert_in_place_if_same(
 }
 
 /// Convert `src` to `dst_format`, producing a newly allocated frame.
+///
+/// Dispatch first looks for a direct `(src, dst)` entry in the coverage
+/// table. When none exists, a **single-pivot staged conversion** is
+/// attempted: the frame is converted to one intermediate format and
+/// then to the destination, with pivot candidates tried in a fixed
+/// fidelity-aware order (YUV pivots first when both endpoints are YUV
+/// carriage so no colour matrix enters the path; RGB pivots first
+/// otherwise, alpha-capable before alpha-less, deep before 8-bit where
+/// it matters). Staged paths are exactly as correct as their two legs —
+/// but they can round twice and, when the pivot is 8-bit, quantise a
+/// deeper source; callers that care can check [`supports_direct`].
 pub fn convert(
     src: &VideoFrame,
     src_info: FrameInfo,
@@ -98,13 +109,99 @@ pub fn convert(
     if src_info.format == dst_format {
         return Ok(src.clone());
     }
-    let op = lookup(src_info.format, dst_format).ok_or_else(|| {
-        Error::unsupported(format!(
-            "pixfmt: conversion {:?} → {:?} not implemented",
-            src_info.format, dst_format
-        ))
-    })?;
-    op.apply(src, src_info, opts)
+    if let Some(op) = lookup(src_info.format, dst_format) {
+        return op.apply(src, src_info, opts);
+    }
+    if let Some((first, pivot, second)) = lookup_staged(src_info.format, dst_format) {
+        let mid = first.apply(src, src_info, opts)?;
+        let mid_info = FrameInfo::new(pivot, src_info.width, src_info.height);
+        return second.apply(&mid, mid_info, opts);
+    }
+    Err(Error::unsupported(format!(
+        "pixfmt: conversion {:?} → {:?} not implemented",
+        src_info.format, dst_format
+    )))
+}
+
+/// True when `convert()` can carry out `src → dst` — directly or via a
+/// single staged pivot. `src == dst` is always supported (passthrough).
+pub fn supports(src: PixelFormat, dst: PixelFormat) -> bool {
+    src == dst || lookup(src, dst).is_some() || lookup_staged(src, dst).is_some()
+}
+
+/// True when a *direct* (single-table-entry) conversion exists for
+/// `src → dst`, i.e. `convert()` will not stage through an intermediate
+/// format. `src == dst` counts as direct.
+pub fn supports_direct(src: PixelFormat, dst: PixelFormat) -> bool {
+    src == dst || lookup(src, dst).is_some()
+}
+
+/// Pivot preference for staged conversions. YUV carriage pivots keep
+/// YUV → YUV moves free of any colour matrix; the RGB list is ordered
+/// alpha-capable first (so alpha survives whenever both endpoints carry
+/// it) and deep before nothing-deeper-available. `Gray8` rescues the
+/// mono / gray ladders.
+const YUV_PIVOTS: &[PixelFormat] = &[
+    PixelFormat::Yuv444P,
+    PixelFormat::Yuv422P,
+    PixelFormat::Yuv420P,
+];
+const RGB_PIVOTS: &[PixelFormat] = &[
+    PixelFormat::Rgba,
+    PixelFormat::Rgb24,
+    PixelFormat::Rgb48Le,
+    PixelFormat::Rgba64Le,
+    PixelFormat::Gray8,
+];
+
+/// True for formats whose samples are YUV carriage (planar, semi-planar
+/// or packed, any range or depth) — used to prefer matrix-free pivots.
+fn is_yuv_carriage(f: PixelFormat) -> bool {
+    use PixelFormat as P;
+    matches!(
+        f,
+        P::Yuv420P
+            | P::Yuv422P
+            | P::Yuv444P
+            | P::Yuv411P
+            | P::Yuv420P10Le
+            | P::Yuv422P10Le
+            | P::Yuv444P10Le
+            | P::Yuv420P12Le
+            | P::Yuv422P12Le
+            | P::Yuv444P12Le
+            | P::YuvJ420P
+            | P::YuvJ422P
+            | P::YuvJ444P
+            | P::Nv12
+            | P::Nv21
+            | P::Yuva420P
+            | P::Yuyv422
+            | P::Uyvy422
+    )
+}
+
+/// Find a single-pivot staged route `src → pivot → dst` where both legs
+/// are direct table entries. Returns the two ops and the pivot format.
+fn lookup_staged(
+    src: PixelFormat,
+    dst: PixelFormat,
+) -> Option<(&'static ConvertOp, PixelFormat, &'static ConvertOp)> {
+    let yuv_first = is_yuv_carriage(src) && is_yuv_carriage(dst);
+    let (a, b) = if yuv_first {
+        (YUV_PIVOTS, RGB_PIVOTS)
+    } else {
+        (RGB_PIVOTS, YUV_PIVOTS)
+    };
+    for &pivot in a.iter().chain(b.iter()) {
+        if pivot == src || pivot == dst {
+            continue;
+        }
+        if let (Some(first), Some(second)) = (lookup(src, pivot), lookup(pivot, dst)) {
+            return Some((first, pivot, second));
+        }
+    }
+    None
 }
 
 /// Coverage table — one entry per supported `(src, dst)` pair. The
@@ -157,15 +254,30 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgba64Le, P::Rgba, Rgba64ToRgba),
         (P::Rgba, P::Rgba64Le, RgbaToRgba64),
 
-        // Gray ↔ RGB / Gray16 / Mono.
+        // Gray ↔ RGB / Gray16 / Mono. A gray broadcast writes the same
+        // value to every colour channel, so the Rgb24 emitter serves
+        // Bgr24 verbatim and the Rgba emitter serves Bgra; the
+        // alpha-first orders (Argb / Abgr) shift the opaque byte to the
+        // front via `alpha_first`.
         (P::Gray8, P::Rgb24, Gray8ToPacked3),
-        (P::Gray8, P::Rgba, Gray8ToPacked4),
+        (P::Gray8, P::Bgr24, Gray8ToPacked3),
+        (P::Gray8, P::Rgba, Gray8ToPacked4 { alpha_first: false }),
+        (P::Gray8, P::Bgra, Gray8ToPacked4 { alpha_first: false }),
+        (P::Gray8, P::Argb, Gray8ToPacked4 { alpha_first: true }),
+        (P::Gray8, P::Abgr, Gray8ToPacked4 { alpha_first: true }),
         (P::Gray16Le, P::Gray8, Gray16ToGray8),
         (P::Gray8, P::Gray16Le, Gray8ToGray16),
         (P::MonoBlack, P::Gray8, MonoToGray { black_is_zero: true }),
         (P::MonoWhite, P::Gray8, MonoToGray { black_is_zero: false }),
         (P::Gray8, P::MonoBlack, GrayToMono { black_is_zero: true }),
         (P::Gray8, P::MonoWhite, GrayToMono { black_is_zero: false }),
+
+        // Packed RGB → Gray8 luminance projection. Uses the Y' row of
+        // the selected primaries at full range (Gray8 is a full-range
+        // space); r = g = b inputs map to themselves exactly, so the
+        // Gray8 → RGB broadcast round-trips gray content.
+        (P::Rgb24, P::Gray8, RgbToGray { alpha_in: false }),
+        (P::Rgba,  P::Gray8, RgbToGray { alpha_in: true }),
 
         // Ya8 (grey + alpha, 2 bytes/pixel) ↔ Gray8 / Rgb24 / Rgba.
         // Promote/demote helpers for icon / glyph / single-channel-mask
@@ -463,7 +575,12 @@ enum ConvertOp {
     Rgba64ToRgba,
     RgbaToRgba64,
     Gray8ToPacked3,
-    Gray8ToPacked4,
+    /// Gray broadcast into a 4-byte packed pixel. `alpha_first: false`
+    /// emits (g, g, g, 255) — Rgba and Bgra alike; `true` emits
+    /// (255, g, g, g) for the alpha-first orders Argb / Abgr.
+    Gray8ToPacked4 {
+        alpha_first: bool,
+    },
     Gray16ToGray8,
     Gray8ToGray16,
     MonoToGray {
@@ -471,6 +588,12 @@ enum ConvertOp {
     },
     GrayToMono {
         black_is_zero: bool,
+    },
+    /// Packed RGB(A) → `Gray8`: full-range luminance projection under
+    /// the Y' row of the selected primaries. Alpha (if present) is
+    /// dropped.
+    RgbToGray {
+        alpha_in: bool,
     },
     Ya8ToGray8,
     Gray8ToYa8,
@@ -690,11 +813,14 @@ impl ConvertOp {
             Self::Rgba64ToRgba => do_rgba64_to_rgba(src, src_info),
             Self::RgbaToRgba64 => do_rgba_to_rgba64(src, src_info),
             Self::Gray8ToPacked3 => gray_to_packed3(src, src_info),
-            Self::Gray8ToPacked4 => gray_to_packed4(src, src_info),
+            Self::Gray8ToPacked4 { alpha_first } => gray_to_packed4(src, src_info, alpha_first),
             Self::Gray16ToGray8 => do_gray16_to_gray8(src, src_info),
             Self::Gray8ToGray16 => do_gray8_to_gray16(src, src_info),
             Self::MonoToGray { black_is_zero } => do_mono_to_gray(src, src_info, black_is_zero),
             Self::GrayToMono { black_is_zero } => do_gray_to_mono(src, src_info, black_is_zero),
+            Self::RgbToGray { alpha_in } => {
+                do_rgb_to_gray(src, src_info, matrix.with_range(false), alpha_in)
+            }
             Self::Ya8ToGray8 => do_ya8_to_gray8(src, src_info),
             Self::Gray8ToYa8 => do_gray8_to_ya8(src, src_info),
             Self::Ya8ToRgb24 => do_ya8_to_rgb24(src, src_info),
@@ -1028,14 +1154,24 @@ fn gray_to_packed3(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> 
     ))
 }
 
-fn gray_to_packed4(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+fn gray_to_packed4(src: &VideoFrame, src_info: FrameInfo, alpha_first: bool) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h * 4];
     for row in 0..h {
         let sr = tight_row(&in_plane.data, in_plane.stride, row, w);
-        gray::gray8_to_rgba(sr, &mut out[row * w * 4..row * w * 4 + w * 4], w);
+        let dr = &mut out[row * w * 4..row * w * 4 + w * 4];
+        if alpha_first {
+            for (i, &g) in sr.iter().enumerate().take(w) {
+                dr[i * 4] = 255;
+                dr[i * 4 + 1] = g;
+                dr[i * 4 + 2] = g;
+                dr[i * 4 + 3] = g;
+            }
+        } else {
+            gray::gray8_to_rgba(sr, dr, w);
+        }
     }
     Ok(make_frame(
         src,
@@ -1135,6 +1271,42 @@ fn gather_mono_rows(src: &[u8], stride: usize, packed: usize, h: usize) -> Vec<u
         out.extend_from_slice(&src[row * stride..row * stride + packed]);
     }
     out
+}
+
+/// Packed RGB(A) → Gray8 luminance projection (full-range Y' row of the
+/// selected primaries; alpha dropped).
+fn do_rgb_to_gray(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    alpha_in: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let rgb24: Vec<u8> = if alpha_in {
+        let mut out = Vec::with_capacity(w * h * 3);
+        for row in 0..h {
+            let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
+            for i in 0..w {
+                out.push(sr[i * 4]);
+                out.push(sr[i * 4 + 1]);
+                out.push(sr[i * 4 + 2]);
+            }
+        }
+        out
+    } else {
+        gather_tight(&in_plane.data, in_plane.stride, w * 3, h)
+    };
+    let mut gray = vec![0u8; w * h];
+    yuv::rgb24_to_gray8(&rgb24, &mut gray, w * h, matrix);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w,
+            data: gray,
+        }],
+    ))
 }
 
 // -------------------------------------------------------------------------

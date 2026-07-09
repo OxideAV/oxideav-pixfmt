@@ -1072,6 +1072,23 @@ pub fn depth_up_8_to_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: 
     }
 }
 
+/// Project a tightly-packed `Rgb24` buffer onto a `Gray8` luma plane
+/// using the Y' row of `matrix` (the chroma rows are never computed).
+/// Gray8 is a full-range space, so callers converting *to* Gray8 should
+/// pass a full-range matrix regardless of the video range the RGB came
+/// from. For r = g = b inputs the output equals the input value exactly
+/// (the fixed-point luma weights sum to one).
+pub fn rgb24_to_gray8(src: &[u8], dst: &mut [u8], pixels: usize, matrix: YuvMatrix) {
+    let p = matrix.encode_params();
+    for i in 0..pixels {
+        let r = src[i * 3] as i32;
+        let g = src[i * 3 + 1] as i32;
+        let b = src[i * 3 + 2] as i32;
+        let y = (p.cy_r * r + p.cy_g * g + p.cy_b * b + p.y_bias) >> FP_SHIFT;
+        dst[i] = clamp_u8_i32(y);
+    }
+}
+
 /// Rescale one plane of `count` samples between two `bits`-significant
 /// 16-bit LE storage widths (both in 9..=16). Widening places the value
 /// in the top `src_bits` of the destination and replicates its MSBs into
