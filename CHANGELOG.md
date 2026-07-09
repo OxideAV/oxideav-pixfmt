@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Black-box cross-validation suite against the `ffmpeg` binary used as
+  an opaque CLI validator (skips silently when no binary is on `PATH`,
+  so CI stays self-contained). Five agreements pinned: limited-range
+  4:4:4 → RGB under BT.601 and BT.709 (±2), RGB → limited 4:4:4 (±2
+  per plane), the new direct full-range 4:4:4 → RGB path (±2),
+  4:2:0 → RGB on upsampler-neutral flat-chroma fixtures (±2), and a
+  bit-exact YUYV → planar 4:2:2 deinterleave.
+
 - Independent f64 reference-model verification of the Q15 fixed-point
   colour matrices. A test-only f64 implementation built straight from
   the k-coefficient construction (BT.601-7 / BT.709-6 / BT.2020-2
