@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.5...v0.1.6) - 2026-07-09
+
+### Added
+
+- *(gbr)* planar GBR(A) <-> 8-bit packed RGB(A) direct rows (coverage 883 -> 1135)
+- *(convert)* single-pivot staged fallback (883/1640 pairs reachable) + RGB->Gray8 projection
+- *(convert)* Gray8 <-> YUV family (19 pairs) + complete bit-depth ladder (16 pairs)
+- *(yuvj)* direct full-range YuvJ420P/422P/444P <-> Rgb24/Rgba conversions
+- *(gbr)* wire planar GBR(A) ↔ packed deep-RGB into convert() dispatch
+- *(yuv411)* wire Yuv411P into convert() dispatch + RGB encode/decode
+- *(convert)* direct planar YUV ↔ planar YUV chroma resample
+- *(yuva)* wire Yuva420P ↔ Yuv420P / Rgb24 / Rgba into convert() dispatch
+- *(nv)* direct NV12 / NV21 ↔ Rgb24 / Rgba in the convert() dispatch
+- *(ya8)* wire Ya8 ↔ Gray8 / Rgb24 / Rgba into the convert() dispatch
+- *(yuv)* packed 4:2:2 (YUYV / UYVY) ↔ Yuv422P / RGB conversions
+
+### Fixed
+
+- *(yuv)* reject odd-dimension subsampled YUV→RGB + add convert_geometry fuzz target
+- *(rgb48_to_rgb24)* AVX2 path wrote 4 bytes past dst — glibc abort
+
+### Other
+
+- *(miri)* keep the CI miri job fast and process-spawn-free
+- README + crate-doc refresh for the round-399 conversion subsystem work
+- *(depth)* bench suite for depth/gray plane primitives + 2.7x narrowing rescale
+- *(xcheck)* black-box cross-validation against the ffmpeg CLI validator
+- *(matrix)* f64 reference-model verification + BT.601/709 primary anchor pins
+- add CI / crates.io / docs.rs / MIT-license badges
+- add high-bit YUV variants to convert_geometry fuzz FORMATS
+- high-bit YUV planar ↔ 8-bit bit-depth conversion (10/12-bit)
+- *(miri)* shrink palette + property corpora under cfg(miri) — unhang the CI miri job
+- *(yuv)* pin BT.2020 NCL black/primary anchor vectors + extreme-point invertibility
+- drop release-plz.toml — use release-plz defaults across the workspace
+- typed ChromaSubsampling view + is_chroma_subsampled
+- *(alpha)* property sweep + Criterion suite for Porter-Duff primitives
+- *(swizzle)* pin AVX2 over-store contract on swizzle3 / rgba4_to_rgb3
+- Revert "tests: merge prop_* suite into tests/conversions.rs to avoid Linux SIMD abort"
+- merge prop_* suite into tests/conversions.rs to avoid Linux SIMD abort
+- gate criterion behind a `bench` feature to fix glibc abort in test binaries
+- randomised property / round-trip suite for the conversion surface
+- skip the heavy SIMD parity sweeps under miri
+- trim 1001-pt sweeps to 201-pt under miri
+- add BT.2020/2100 matrix + PQ/HLG/BT.1886 transfer functions
+- cover GBR(A) 10/12/14-bit + Yuv422/444P12Le
+
 ### Fixed
 
 - Out-of-bounds chroma read on subsampled planar YUV → packed RGB at
