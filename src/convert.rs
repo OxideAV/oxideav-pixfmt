@@ -179,20 +179,38 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgba,  P::Ya8,   RgbaToYa8),
 
         // YUV planar → packed RGB.
-        (P::Yuv420P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 2, alpha: false }),
-        (P::Yuv422P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 1, alpha: false }),
-        (P::Yuv444P, P::Rgb24, YuvToRgb { wsub: 1, hsub: 1, alpha: false }),
-        (P::Yuv420P, P::Rgba,  YuvToRgb { wsub: 2, hsub: 2, alpha: true }),
-        (P::Yuv422P, P::Rgba,  YuvToRgb { wsub: 2, hsub: 1, alpha: true }),
-        (P::Yuv444P, P::Rgba,  YuvToRgb { wsub: 1, hsub: 1, alpha: true }),
+        (P::Yuv420P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 2, alpha: false, full_range: false }),
+        (P::Yuv422P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 1, alpha: false, full_range: false }),
+        (P::Yuv444P, P::Rgb24, YuvToRgb { wsub: 1, hsub: 1, alpha: false, full_range: false }),
+        (P::Yuv420P, P::Rgba,  YuvToRgb { wsub: 2, hsub: 2, alpha: true, full_range: false }),
+        (P::Yuv422P, P::Rgba,  YuvToRgb { wsub: 2, hsub: 1, alpha: true, full_range: false }),
+        (P::Yuv444P, P::Rgba,  YuvToRgb { wsub: 1, hsub: 1, alpha: true, full_range: false }),
 
         // Packed RGB → YUV planar.
-        (P::Rgb24, P::Yuv420P, RgbToYuv { wsub: 2, hsub: 2, alpha_in: false }),
-        (P::Rgb24, P::Yuv422P, RgbToYuv { wsub: 2, hsub: 1, alpha_in: false }),
-        (P::Rgb24, P::Yuv444P, RgbToYuv { wsub: 1, hsub: 1, alpha_in: false }),
-        (P::Rgba,  P::Yuv420P, RgbToYuv { wsub: 2, hsub: 2, alpha_in: true }),
-        (P::Rgba,  P::Yuv422P, RgbToYuv { wsub: 2, hsub: 1, alpha_in: true }),
-        (P::Rgba,  P::Yuv444P, RgbToYuv { wsub: 1, hsub: 1, alpha_in: true }),
+        (P::Rgb24, P::Yuv420P, RgbToYuv { wsub: 2, hsub: 2, alpha_in: false, full_range: false }),
+        (P::Rgb24, P::Yuv422P, RgbToYuv { wsub: 2, hsub: 1, alpha_in: false, full_range: false }),
+        (P::Rgb24, P::Yuv444P, RgbToYuv { wsub: 1, hsub: 1, alpha_in: false, full_range: false }),
+        (P::Rgba,  P::Yuv420P, RgbToYuv { wsub: 2, hsub: 2, alpha_in: true, full_range: false }),
+        (P::Rgba,  P::Yuv422P, RgbToYuv { wsub: 2, hsub: 1, alpha_in: true, full_range: false }),
+        (P::Rgba,  P::Yuv444P, RgbToYuv { wsub: 1, hsub: 1, alpha_in: true, full_range: false }),
+
+        // Full-range "J" YUV planar ↔ packed RGB, direct (no staging
+        // through the limited-range sibling). The YuvJ* families carry
+        // full-range samples by definition, so these rows pin the matrix
+        // to full range regardless of the `ColorSpace` range half —
+        // `opts.color_space` still selects the primaries (601/709/2020).
+        (P::YuvJ420P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 2, alpha: false, full_range: true }),
+        (P::YuvJ422P, P::Rgb24, YuvToRgb { wsub: 2, hsub: 1, alpha: false, full_range: true }),
+        (P::YuvJ444P, P::Rgb24, YuvToRgb { wsub: 1, hsub: 1, alpha: false, full_range: true }),
+        (P::YuvJ420P, P::Rgba,  YuvToRgb { wsub: 2, hsub: 2, alpha: true, full_range: true }),
+        (P::YuvJ422P, P::Rgba,  YuvToRgb { wsub: 2, hsub: 1, alpha: true, full_range: true }),
+        (P::YuvJ444P, P::Rgba,  YuvToRgb { wsub: 1, hsub: 1, alpha: true, full_range: true }),
+        (P::Rgb24, P::YuvJ420P, RgbToYuv { wsub: 2, hsub: 2, alpha_in: false, full_range: true }),
+        (P::Rgb24, P::YuvJ422P, RgbToYuv { wsub: 2, hsub: 1, alpha_in: false, full_range: true }),
+        (P::Rgb24, P::YuvJ444P, RgbToYuv { wsub: 1, hsub: 1, alpha_in: false, full_range: true }),
+        (P::Rgba,  P::YuvJ420P, RgbToYuv { wsub: 2, hsub: 2, alpha_in: true, full_range: true }),
+        (P::Rgba,  P::YuvJ422P, RgbToYuv { wsub: 2, hsub: 1, alpha_in: true, full_range: true }),
+        (P::Rgba,  P::YuvJ444P, RgbToYuv { wsub: 1, hsub: 1, alpha_in: true, full_range: true }),
 
         // YuvJ* ↔ Yuv* (range rescale only — same planar layout).
         (P::YuvJ420P, P::Yuv420P, RescaleRange { wsub: 2, hsub: 2, to_full: false }),
@@ -291,10 +309,10 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         // Yuv411P ↔ RGB. The 4:1:1 ↔ 4:4:4 chroma step stages through
         // a transient full-resolution chroma pair before calling the
         // proven scalar 4:4:4 ↔ RGB matrix; no new colour math.
-        (P::Yuv411P, P::Rgb24, YuvToRgb { wsub: 4, hsub: 1, alpha: false }),
-        (P::Yuv411P, P::Rgba,  YuvToRgb { wsub: 4, hsub: 1, alpha: true }),
-        (P::Rgb24,   P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: false }),
-        (P::Rgba,    P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: true }),
+        (P::Yuv411P, P::Rgb24, YuvToRgb { wsub: 4, hsub: 1, alpha: false, full_range: false }),
+        (P::Yuv411P, P::Rgba,  YuvToRgb { wsub: 4, hsub: 1, alpha: true, full_range: false }),
+        (P::Rgb24,   P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: false, full_range: false }),
+        (P::Rgba,    P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: true, full_range: false }),
 
         // Yuva420P (planar 4:2:0 YUV + a full-resolution alpha plane).
         // The YUV planes match Yuv420P byte-for-byte; the trailing alpha
@@ -405,11 +423,18 @@ enum ConvertOp {
         wsub: usize,
         hsub: usize,
         alpha: bool,
+        /// `true` for the full-range `YuvJ*` source families: the matrix
+        /// range is a property of the *format*, so it overrides the range
+        /// half of `ConvertOptions::color_space` (which still picks the
+        /// primaries).
+        full_range: bool,
     },
     RgbToYuv {
         wsub: usize,
         hsub: usize,
         alpha_in: bool,
+        /// `true` when the destination is a full-range `YuvJ*` family.
+        full_range: bool,
     },
     RescaleRange {
         wsub: usize,
@@ -540,8 +565,12 @@ impl ConvertOp {
         src_info: FrameInfo,
         opts: &ConvertOptions,
     ) -> Result<VideoFrame> {
-        // The YUV paths always want the limited-range matrix; YuvJ
-        // input/output goes through RescaleRange, not this matrix.
+        // The plain `Yuv*` paths always use the limited-range matrix and
+        // the full-range `YuvJ*` paths always use the full-range matrix —
+        // range is a property of the pixel format, so only the primaries
+        // half of `ConvertOptions::color_space` is honoured here. The
+        // format-specific override happens in the YuvToRgb / RgbToYuv
+        // arms below via their `full_range` field.
         let matrix = YuvMatrix::from_color_space(opts.color_space).with_range(true);
         match *self {
             Self::Swizzle3 { src: sp, dst: dp } => swizzle3(src, src_info, sp, dp),
@@ -564,14 +593,24 @@ impl ConvertOp {
             Self::Ya8ToRgba => do_ya8_to_rgba(src, src_info),
             Self::Rgb24ToYa8 => do_rgb24_to_ya8(src, src_info),
             Self::RgbaToYa8 => do_rgba_to_ya8(src, src_info),
-            Self::YuvToRgb { wsub, hsub, alpha } => {
-                do_yuv_to_rgb(src, src_info, matrix, wsub, hsub, alpha)
+            Self::YuvToRgb {
+                wsub,
+                hsub,
+                alpha,
+                full_range,
+            } => {
+                let m = matrix.with_range(!full_range);
+                do_yuv_to_rgb(src, src_info, m, wsub, hsub, alpha)
             }
             Self::RgbToYuv {
                 wsub,
                 hsub,
                 alpha_in,
-            } => do_rgb_to_yuv(src, src_info, matrix, wsub, hsub, alpha_in),
+                full_range,
+            } => {
+                let m = matrix.with_range(!full_range);
+                do_rgb_to_yuv(src, src_info, m, wsub, hsub, alpha_in)
+            }
             Self::RescaleRange {
                 wsub,
                 hsub,

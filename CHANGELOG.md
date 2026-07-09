@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Direct full-range `YuvJ420P` / `YuvJ422P` / `YuvJ444P` ↔ `Rgb24` /
+  `Rgba` conversions (12 new `convert()` pairs). The `YuvJ*` families
+  carry full-range samples by definition, so these paths pin the matrix
+  to full range — `ConvertOptions::color_space` still selects the
+  primaries (BT.601 / BT.709 / BT.2020) but its range half is
+  overridden by the format. Previously a caller had to stage through
+  the limited-range sibling (`YuvJ* → Yuv* → RGB`), paying an extra
+  255→219/224 range squeeze and its quantisation error both ways; the
+  direct path costs a single fixed-point matrix and keeps the
+  full-range 4:4:4 round-trip tight to ±2.
+
 - Bit-depth conversion between the high-precision planar YUV variants
   (`Yuv420P10Le` / `Yuv422P10Le` / `Yuv444P10Le` and the 12-bit
   siblings) and their 8-bit counterparts (`Yuv420P` / `Yuv422P` /
