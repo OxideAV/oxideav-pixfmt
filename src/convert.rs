@@ -153,6 +153,18 @@ const RGB_PIVOTS: &[PixelFormat] = &[
     PixelFormat::Rgba64Le,
     PixelFormat::Gray8,
 ];
+/// RGB pivot order used when either endpoint carries more than 8
+/// significant bits: the deep packed pivots come first so a
+/// deep → deep staged route (e.g. `Gbrp10Le → Gbrp12Le`) never
+/// quantises through an 8-bit intermediate when a lossless deep hop
+/// exists.
+const RGB_PIVOTS_DEEP: &[PixelFormat] = &[
+    PixelFormat::Rgba64Le,
+    PixelFormat::Rgb48Le,
+    PixelFormat::Rgba,
+    PixelFormat::Rgb24,
+    PixelFormat::Gray8,
+];
 
 /// True for formats whose samples are YUV carriage (planar, semi-planar
 /// or packed, any range or depth) — used to prefer matrix-free pivots.
@@ -188,10 +200,13 @@ fn lookup_staged(
     dst: PixelFormat,
 ) -> Option<(&'static ConvertOp, PixelFormat, &'static ConvertOp)> {
     let yuv_first = is_yuv_carriage(src) && is_yuv_carriage(dst);
+    let deep = crate::format_info::FormatInfo::of(src).bit_depth > 8
+        || crate::format_info::FormatInfo::of(dst).bit_depth > 8;
+    let rgb_pivots = if deep { RGB_PIVOTS_DEEP } else { RGB_PIVOTS };
     let (a, b) = if yuv_first {
-        (YUV_PIVOTS, RGB_PIVOTS)
+        (YUV_PIVOTS, rgb_pivots)
     } else {
-        (RGB_PIVOTS, YUV_PIVOTS)
+        (rgb_pivots, YUV_PIVOTS)
     };
     for &pivot in a.iter().chain(b.iter()) {
         if pivot == src || pivot == dst {
@@ -483,6 +498,26 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Gbrap10Le, P::Rgba64Le, GbrToPackedDeep { bits: 10, alpha: true }),
         (P::Gbrap12Le, P::Rgba64Le, GbrToPackedDeep { bits: 12, alpha: true }),
         (P::Gbrap14Le, P::Rgba64Le, GbrToPackedDeep { bits: 14, alpha: true }),
+        // Planar GBR(A) ↔ 8-bit packed RGB(A). Same plane reorder as the
+        // deep rows with a bit-depth step folded in: narrowing keeps the
+        // top 8 of the `bits` significant bits (truncation, matching the
+        // depth ladder), widening replicates MSBs so 8-bit round-trips
+        // are exact and peak maps to peak. These rows also make the GBR
+        // families reachable from the whole 8-bit ecosystem (YUV, gray,
+        // palette, …) through the staged fallback's Rgb24/Rgba pivots.
+        (P::Gbrp10Le,  P::Rgb24, GbrToPacked8 { bits: 10, alpha: false }),
+        (P::Gbrp12Le,  P::Rgb24, GbrToPacked8 { bits: 12, alpha: false }),
+        (P::Gbrp14Le,  P::Rgb24, GbrToPacked8 { bits: 14, alpha: false }),
+        (P::Gbrap10Le, P::Rgba,  GbrToPacked8 { bits: 10, alpha: true }),
+        (P::Gbrap12Le, P::Rgba,  GbrToPacked8 { bits: 12, alpha: true }),
+        (P::Gbrap14Le, P::Rgba,  GbrToPacked8 { bits: 14, alpha: true }),
+        (P::Rgb24, P::Gbrp10Le,  Packed8ToGbr { bits: 10, alpha: false }),
+        (P::Rgb24, P::Gbrp12Le,  Packed8ToGbr { bits: 12, alpha: false }),
+        (P::Rgb24, P::Gbrp14Le,  Packed8ToGbr { bits: 14, alpha: false }),
+        (P::Rgba,  P::Gbrap10Le, Packed8ToGbr { bits: 10, alpha: true }),
+        (P::Rgba,  P::Gbrap12Le, Packed8ToGbr { bits: 12, alpha: true }),
+        (P::Rgba,  P::Gbrap14Le, Packed8ToGbr { bits: 14, alpha: true }),
+
         (P::Rgb48Le,  P::Gbrp10Le,  PackedDeepToGbr { bits: 10, alpha: false }),
         (P::Rgb48Le,  P::Gbrp12Le,  PackedDeepToGbr { bits: 12, alpha: false }),
         (P::Rgb48Le,  P::Gbrp14Le,  PackedDeepToGbr { bits: 14, alpha: false }),
@@ -759,6 +794,19 @@ enum ConvertOp {
         hsub: usize,
         bits: u32,
     },
+    /// Planar GBR(A) → 8-bit packed `Rgb24` / `Rgba`: plane reorder plus
+    /// a `bits` → 8 narrowing (keep the top 8 significant bits).
+    GbrToPacked8 {
+        bits: u32,
+        alpha: bool,
+    },
+    /// 8-bit packed `Rgb24` / `Rgba` → planar GBR(A): plane split plus an
+    /// 8 → `bits` MSB-replicated widen (exact inverse of
+    /// [`Self::GbrToPacked8`], so 8-bit content round-trips losslessly).
+    Packed8ToGbr {
+        bits: u32,
+        alpha: bool,
+    },
     /// Cross-depth planar YUV: rescale every plane between two
     /// `bits`-significant 16-bit LE storage widths (e.g. 10 ↔ 12) with
     /// the subsampling layout preserved. Widening replicates MSBs into
@@ -898,6 +946,8 @@ impl ConvertOp {
             Self::DepthUpYuv { wsub, hsub, bits } => {
                 do_yuv_depth_up(src, src_info, wsub, hsub, bits)
             }
+            Self::GbrToPacked8 { bits, alpha } => do_gbr_to_packed8(src, src_info, bits, alpha),
+            Self::Packed8ToGbr { bits, alpha } => do_packed8_to_gbr(src, src_info, bits, alpha),
             Self::DepthRescaleYuv {
                 wsub,
                 hsub,
@@ -2909,6 +2959,117 @@ fn do_gbr_to_packed_deep(
             data: out,
         }],
     ))
+}
+
+/// Planar GBR(A) → 8-bit packed `Rgb24` / `Rgba`: reorder the G, B, R(, A)
+/// planes into packed byte order while keeping the top 8 of each sample's
+/// `bits` significant bits (truncation, consistent with the depth ladder).
+fn do_gbr_to_packed8(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    bits: u32,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    let need = if alpha { 4 } else { 3 };
+    if src.planes.len() < need {
+        return Err(Error::invalid(
+            "pixfmt: GBR(A) source needs G, B, R(, A) planes",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let shift = bits - 8;
+    let mask: u16 = ((1u32 << bits) - 1) as u16;
+    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
+    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 2, h);
+    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 2, h);
+    let a = if alpha {
+        Some(gather_tight(
+            &src.planes[3].data,
+            src.planes[3].stride,
+            w * 2,
+            h,
+        ))
+    } else {
+        None
+    };
+    let comps = if alpha { 4 } else { 3 };
+    let mut out = vec![0u8; w * h * comps];
+    for i in 0..w * h {
+        let base = i * comps;
+        out[base] = ((rd16le(&r, i * 2) & mask) >> shift) as u8;
+        out[base + 1] = ((rd16le(&g, i * 2) & mask) >> shift) as u8;
+        out[base + 2] = ((rd16le(&b, i * 2) & mask) >> shift) as u8;
+        if let Some(a) = &a {
+            out[base + 3] = ((rd16le(a, i * 2) & mask) >> shift) as u8;
+        }
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * comps,
+            data: out,
+        }],
+    ))
+}
+
+/// 8-bit packed `Rgb24` / `Rgba` → planar GBR(A): split into planes and
+/// widen each byte to `bits` significant bits with MSB replication (the
+/// exact inverse of [`do_gbr_to_packed8`]).
+fn do_packed8_to_gbr(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    bits: u32,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let shift = bits - 8;
+    let comps = if alpha { 4 } else { 3 };
+    let in_plane = &src.planes[0];
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps, h);
+    let widen = |v: u8| -> u16 {
+        let v = v as u32;
+        (((v << shift) | (v >> (8 - shift))) & ((1u32 << bits) - 1)) as u16
+    };
+    let mut g = vec![0u8; w * h * 2];
+    let mut b = vec![0u8; w * h * 2];
+    let mut r = vec![0u8; w * h * 2];
+    let mut a = if alpha {
+        vec![0u8; w * h * 2]
+    } else {
+        Vec::new()
+    };
+    for i in 0..w * h {
+        let base = i * comps;
+        wr16le(&mut r, i * 2, widen(packed[base]));
+        wr16le(&mut g, i * 2, widen(packed[base + 1]));
+        wr16le(&mut b, i * 2, widen(packed[base + 2]));
+        if alpha {
+            wr16le(&mut a, i * 2, widen(packed[base + 3]));
+        }
+    }
+    let mut planes = vec![
+        VideoPlane {
+            stride: w * 2,
+            data: g,
+        },
+        VideoPlane {
+            stride: w * 2,
+            data: b,
+        },
+        VideoPlane {
+            stride: w * 2,
+            data: r,
+        },
+    ];
+    if alpha {
+        planes.push(VideoPlane {
+            stride: w * 2,
+            data: a,
+        });
+    }
+    Ok(make_frame(src, planes))
 }
 
 /// Packed `Rgb48Le` / `Rgba64Le` → planar GBR(A).

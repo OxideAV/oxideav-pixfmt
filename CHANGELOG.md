@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Planar GBR(A) ↔ 8-bit packed RGB(A) direct conversions (12 new
+  pairs): `Gbrp10/12/14Le` ↔ `Rgb24` and `Gbrap10/12/14Le` ↔ `Rgba`,
+  folding the plane reorder and the bit-depth step into one pass
+  (narrow = keep top 8 bits, widen = MSB replication, so 8-bit content
+  round-trips exactly). Combined with the staged fallback this bridges
+  the GBR families to the whole 8-bit ecosystem — YUV, gray, palette,
+  packed 4:2:2 — lifting total reachable coverage from 883 to 1135 of
+  the 1640 ordered pairs. The staged pivot order now also prefers the
+  deep packed pivots whenever either endpoint carries more than 8
+  significant bits, so deep → deep routes (e.g. `Gbrp10Le → Gbrp12Le`)
+  never quantise through an 8-bit intermediate.
+
 - `depth_gray` Criterion bench suite (`cargo bench --features bench
   --bench depth_gray`) covering the per-plane bit-depth primitives and
   the Gray8 luminance projection at 1080p, and a loop restructuring in

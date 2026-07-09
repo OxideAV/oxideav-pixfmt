@@ -193,16 +193,16 @@ fn coverage_matrix_matches_supports() {
             }
         }
     }
-    // Coverage floor at the time the staged fallback landed: 205 direct
-    // pairs and 883 total reachable pairs out of 41 × 40 = 1640 ordered
-    // pairs (the remainder needs more than one pivot — e.g. planar YUV →
-    // planar GBR — or has no meaningful route). These may only go UP.
+    // Coverage floor after the GBR ↔ 8-bit packed rows landed: 217
+    // direct pairs and 1135 total reachable pairs out of 41 × 40 = 1640
+    // ordered pairs (the remainder needs more than one pivot or has no
+    // meaningful route). These may only go UP.
     assert!(
-        direct_pairs >= 205,
+        direct_pairs >= 217,
         "direct coverage regressed: {direct_pairs}"
     );
     assert!(
-        ok_pairs >= 883,
+        ok_pairs >= 1135,
         "total coverage regressed: {ok_pairs} (unsupported sample: {:?})",
         &unsupported[..unsupported.len().min(8)]
     );
@@ -302,6 +302,53 @@ fn gbr_cross_depth_via_deep_pivot_roundtrips() {
     for p in 0..3 {
         assert_eq!(src.planes[p].data, back.planes[p].data, "plane {p}");
     }
+}
+
+/// 8-bit packed RGB round-trips exactly through every planar GBR depth
+/// (widen = MSB replication, narrow = truncation), and the staged
+/// fallback now reaches GBR from the YUV world via the Rgb24 pivot.
+#[test]
+fn gbr_8bit_roundtrips_and_yuv_reachability() {
+    let opts = test_opts();
+    let rgb = build_frame(PixelFormat::Rgb24, 8, 8);
+    let info = FrameInfo::new(PixelFormat::Rgb24, 8, 8);
+    for gbr in [
+        PixelFormat::Gbrp10Le,
+        PixelFormat::Gbrp12Le,
+        PixelFormat::Gbrp14Le,
+    ] {
+        let planar = convert(&rgb, info, gbr, &opts).expect("rgb → gbr");
+        assert_eq!(planar.planes.len(), 3);
+        let back = convert(
+            &planar,
+            FrameInfo::new(gbr, 8, 8),
+            PixelFormat::Rgb24,
+            &opts,
+        )
+        .expect("gbr → rgb");
+        assert_eq!(back.planes[0].data, rgb.planes[0].data, "{gbr:?}");
+    }
+    // Alpha variant keeps the alpha channel bit-exact.
+    let rgba = build_frame(PixelFormat::Rgba, 8, 8);
+    let planar = convert(
+        &rgba,
+        FrameInfo::new(PixelFormat::Rgba, 8, 8),
+        PixelFormat::Gbrap12Le,
+        &opts,
+    )
+    .expect("rgba → gbrap");
+    let back = convert(
+        &planar,
+        FrameInfo::new(PixelFormat::Gbrap12Le, 8, 8),
+        PixelFormat::Rgba,
+        &opts,
+    )
+    .expect("gbrap → rgba");
+    assert_eq!(back.planes[0].data, rgba.planes[0].data);
+    // YUV ↔ GBR routes exist now (staged through Rgb24 / Rgba).
+    assert!(supports(PixelFormat::Yuv420P, PixelFormat::Gbrp10Le));
+    assert!(supports(PixelFormat::Gbrp14Le, PixelFormat::Yuv444P));
+    assert!(supports(PixelFormat::Yuva420P, PixelFormat::Gbrap10Le));
 }
 
 /// Mono → colour formats now resolve through the Gray8 pivot.
