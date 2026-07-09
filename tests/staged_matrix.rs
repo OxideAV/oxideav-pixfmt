@@ -164,13 +164,22 @@ fn test_opts() -> ConvertOptions {
 /// is pinned so a regression that silently drops routes fails loudly.
 #[test]
 fn coverage_matrix_matches_supports() {
+    // The full 41 × 40 sweep converts every reachable pair; under the
+    // miri interpreter that is many minutes of work, so shrink twice:
+    // 4 × 4 frames (the smallest size every subsampling grid accepts —
+    // 4:1:1 needs width divisible by 4) and a deterministic subset of
+    // source formats. The UB-detection value is per-converter, which the
+    // subset still reaches through the dst sweep; the exhaustive
+    // pairing + coverage floors run natively.
+    let dim: u32 = if cfg!(miri) { 4 } else { 8 };
+    let src_stride = if cfg!(miri) { 5 } else { 1 };
     let opts = test_opts();
     let mut ok_pairs = 0usize;
     let mut direct_pairs = 0usize;
     let mut unsupported = Vec::new();
-    for &src_fmt in ALL_FORMATS {
-        let frame = build_frame(src_fmt, 8, 8);
-        let info = FrameInfo::new(src_fmt, 8, 8);
+    for &src_fmt in ALL_FORMATS.iter().step_by(src_stride) {
+        let frame = build_frame(src_fmt, dim as usize, dim as usize);
+        let info = FrameInfo::new(src_fmt, dim, dim);
         for &dst_fmt in ALL_FORMATS {
             if src_fmt == dst_fmt {
                 continue;
@@ -196,16 +205,19 @@ fn coverage_matrix_matches_supports() {
     // Coverage floor after the GBR ↔ 8-bit packed rows landed: 217
     // direct pairs and 1135 total reachable pairs out of 41 × 40 = 1640
     // ordered pairs (the remainder needs more than one pivot or has no
-    // meaningful route). These may only go UP.
-    assert!(
-        direct_pairs >= 217,
-        "direct coverage regressed: {direct_pairs}"
-    );
-    assert!(
-        ok_pairs >= 1135,
-        "total coverage regressed: {ok_pairs} (unsupported sample: {:?})",
-        &unsupported[..unsupported.len().min(8)]
-    );
+    // meaningful route). These may only go UP. The floors only hold for
+    // the full native sweep — the miri run covers a source subset.
+    if src_stride == 1 {
+        assert!(
+            direct_pairs >= 217,
+            "direct coverage regressed: {direct_pairs}"
+        );
+        assert!(
+            ok_pairs >= 1135,
+            "total coverage regressed: {ok_pairs} (unsupported sample: {:?})",
+            &unsupported[..unsupported.len().min(8)]
+        );
+    }
 }
 
 /// A staged conversion must produce byte-identical output to manually

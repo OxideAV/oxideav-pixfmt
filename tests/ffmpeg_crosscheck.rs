@@ -20,6 +20,10 @@
 //!   where stated) so clamp behaviour at illegal codes — which the two
 //!   implementations are free to differ on — never enters the picture.
 
+// Spawning an external process is a foreign operation the miri
+// interpreter cannot perform; the whole file is host-only.
+#![cfg(not(miri))]
+
 use std::process::Command;
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
