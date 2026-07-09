@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Independent f64 reference-model verification of the Q15 fixed-point
+  colour matrices. A test-only f64 implementation built straight from
+  the k-coefficient construction (BT.601-7 / BT.709-6 / BT.2020-2
+  Table 4 NCL) and the 8-bit quantisation rules (Y' = 16 + 219·E'_Y,
+  C' = 128 + 224·E'_C limited; identity full) now cross-checks encode
+  AND decode for all six `ColorSpace` variants over a dense sweep —
+  every channel within ±1 code. Classic limited-range primary anchors
+  are pinned as literals (BT.601 red (81, 90, 240) / green (145, 54,
+  34) / blue (41, 240, 110); BT.709 red (63, 102, 240) / green (173,
+  42, 26) / blue (32, 240, 118)), plus full-range rails, gray-identity
+  and ±2 round-trip properties.
+
 - Single-pivot staged conversion fallback in `convert()`. When no
   direct `(src, dst)` table entry exists, the dispatcher now routes
   through one intermediate format, trying pivots in a fidelity-aware
