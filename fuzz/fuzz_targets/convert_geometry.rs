@@ -82,6 +82,11 @@ const FORMATS: &[PixelFormat] = &[
     PixelFormat::Gbrap10Le,
     PixelFormat::Gbrap12Le,
     PixelFormat::Gbrap14Le,
+    PixelFormat::Yuv420P16Le,
+    PixelFormat::Yuv422P16Le,
+    PixelFormat::Yuv444P16Le,
+    PixelFormat::Yuva422P,
+    PixelFormat::Yuva444P,
 ];
 
 /// Map a raw fuzzer byte to a small dimension, biased toward the values
@@ -231,11 +236,21 @@ fuzz_target!(|data: &[u8]| {
     let dst_start = data[4] as usize;
     let fill = &data[5..];
 
-    let src = match build_frame(fmt, w, h, pad, fill) {
+    let mut src = match build_frame(fmt, w, h, pad, fill) {
         Some(f) => f,
         None => return,
     };
     let info = FrameInfo::new(fmt, w, h);
+
+    // Pal8 sources sometimes carry their colour table in-band as the
+    // palette side-channel (a trailing stride-0 plane); attach one of
+    // fuzz-controlled length (including deliberately short tables, whose
+    // out-of-range indices must fall back to the missing-entry colour
+    // rather than crash).
+    if fmt == PixelFormat::Pal8 && !fill.is_empty() && fill[0] & 1 == 1 {
+        let len = (fill.len().min(768) / 3) * 3;
+        src.set_palette(fill[..len].to_vec());
+    }
 
     // A palette is needed for Pal8 → RGB and RGB → Pal8; supply a full
     // 256-entry grayscale ramp so those arms are reached rather than
