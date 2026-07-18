@@ -146,6 +146,19 @@ const YUV_PIVOTS: &[PixelFormat] = &[
     PixelFormat::Yuv422P,
     PixelFormat::Yuv420P,
 ];
+/// YUV pivot order used when either endpoint carries more than 8
+/// significant bits: the 16-bit planar tier comes first so a deep
+/// YUV → YUV staged route (e.g. `Yuv420P16Le → Yuv422P`) resamples
+/// chroma at full 16-bit precision and only quantises at the final leg,
+/// instead of truncating to 8 bits before the resample.
+const YUV_PIVOTS_DEEP: &[PixelFormat] = &[
+    PixelFormat::Yuv444P16Le,
+    PixelFormat::Yuv422P16Le,
+    PixelFormat::Yuv420P16Le,
+    PixelFormat::Yuv444P,
+    PixelFormat::Yuv422P,
+    PixelFormat::Yuv420P,
+];
 const RGB_PIVOTS: &[PixelFormat] = &[
     PixelFormat::Rgba,
     PixelFormat::Rgb24,
@@ -182,12 +195,17 @@ fn is_yuv_carriage(f: PixelFormat) -> bool {
             | P::Yuv420P12Le
             | P::Yuv422P12Le
             | P::Yuv444P12Le
+            | P::Yuv420P16Le
+            | P::Yuv422P16Le
+            | P::Yuv444P16Le
             | P::YuvJ420P
             | P::YuvJ422P
             | P::YuvJ444P
             | P::Nv12
             | P::Nv21
             | P::Yuva420P
+            | P::Yuva422P
+            | P::Yuva444P
             | P::Yuyv422
             | P::Uyvy422
     )
@@ -203,10 +221,11 @@ fn lookup_staged(
     let deep = crate::format_info::FormatInfo::of(src).bit_depth > 8
         || crate::format_info::FormatInfo::of(dst).bit_depth > 8;
     let rgb_pivots = if deep { RGB_PIVOTS_DEEP } else { RGB_PIVOTS };
+    let yuv_pivots = if deep { YUV_PIVOTS_DEEP } else { YUV_PIVOTS };
     let (a, b) = if yuv_first {
-        (YUV_PIVOTS, rgb_pivots)
+        (yuv_pivots, rgb_pivots)
     } else {
-        (rgb_pivots, YUV_PIVOTS)
+        (rgb_pivots, yuv_pivots)
     };
     for &pivot in a.iter().chain(b.iter()) {
         if pivot == src || pivot == dst {
@@ -311,8 +330,8 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         // neutral code 128 on the way in, so no colour matrix applies —
         // only the range rescale between the limited-range `Yuv*` /
         // `Nv*` / `Yuva*` families (16..=235 luma) and the full-range
-        // `Gray8` / `YuvJ*` sample space. Yuva420P → Gray8 also drops the
-        // alpha plane.
+        // `Gray8` / `YuvJ*` sample space. The `Yuva*` → Gray8 rows also
+        // drop the alpha plane.
         (P::Yuv420P,  P::Gray8, YuvLumaToGray { full_range: false }),
         (P::Yuv422P,  P::Gray8, YuvLumaToGray { full_range: false }),
         (P::Yuv444P,  P::Gray8, YuvLumaToGray { full_range: false }),
@@ -320,6 +339,8 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Nv12,     P::Gray8, YuvLumaToGray { full_range: false }),
         (P::Nv21,     P::Gray8, YuvLumaToGray { full_range: false }),
         (P::Yuva420P, P::Gray8, YuvLumaToGray { full_range: false }),
+        (P::Yuva422P, P::Gray8, YuvLumaToGray { full_range: false }),
+        (P::Yuva444P, P::Gray8, YuvLumaToGray { full_range: false }),
         (P::YuvJ420P, P::Gray8, YuvLumaToGray { full_range: true }),
         (P::YuvJ422P, P::Gray8, YuvLumaToGray { full_range: true }),
         (P::YuvJ444P, P::Gray8, YuvLumaToGray { full_range: true }),
@@ -471,17 +492,41 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgb24,   P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: false, full_range: false }),
         (P::Rgba,    P::Yuv411P, RgbToYuv { wsub: 4, hsub: 1, alpha_in: true, full_range: false }),
 
-        // Yuva420P (planar 4:2:0 YUV + a full-resolution alpha plane).
-        // The YUV planes match Yuv420P byte-for-byte; the trailing alpha
-        // plane is at luma resolution. Conversions reuse the proven 4:2:0
-        // YUV ↔ RGB paths and either drop, synthesise opaque, or carry
-        // the alpha plane through unchanged.
-        (P::Yuv420P,  P::Yuva420P, Yuv420pToYuva420p),
-        (P::Yuva420P, P::Yuv420P,  Yuva420pToYuv420p),
-        (P::Yuva420P, P::Rgb24,    Yuva420pToRgb { alpha: false }),
-        (P::Yuva420P, P::Rgba,     Yuva420pToRgb { alpha: true }),
-        (P::Rgb24,    P::Yuva420P, RgbToYuva420p { alpha_in: false }),
-        (P::Rgba,     P::Yuva420P, RgbToYuva420p { alpha_in: true }),
+        // Yuva420P / Yuva422P / Yuva444P (planar YUV + a full-resolution
+        // alpha plane appended as plane 3 — the alpha plane is `w × h`
+        // regardless of the chroma subsampling). The YUV planes match
+        // the alpha-less sibling byte-for-byte; conversions reuse the
+        // proven planar YUV ↔ RGB paths and either drop, synthesise
+        // opaque, or carry the alpha plane through unchanged.
+        (P::Yuv420P,  P::Yuva420P, YuvToYuva { wsub: 2, hsub: 2 }),
+        (P::Yuv422P,  P::Yuva422P, YuvToYuva { wsub: 2, hsub: 1 }),
+        (P::Yuv444P,  P::Yuva444P, YuvToYuva { wsub: 1, hsub: 1 }),
+        (P::Yuva420P, P::Yuv420P,  YuvaToYuv { wsub: 2, hsub: 2 }),
+        (P::Yuva422P, P::Yuv422P,  YuvaToYuv { wsub: 2, hsub: 1 }),
+        (P::Yuva444P, P::Yuv444P,  YuvaToYuv { wsub: 1, hsub: 1 }),
+        (P::Yuva420P, P::Rgb24,    YuvaToRgb { wsub: 2, hsub: 2, alpha: false }),
+        (P::Yuva422P, P::Rgb24,    YuvaToRgb { wsub: 2, hsub: 1, alpha: false }),
+        (P::Yuva444P, P::Rgb24,    YuvaToRgb { wsub: 1, hsub: 1, alpha: false }),
+        (P::Yuva420P, P::Rgba,     YuvaToRgb { wsub: 2, hsub: 2, alpha: true }),
+        (P::Yuva422P, P::Rgba,     YuvaToRgb { wsub: 2, hsub: 1, alpha: true }),
+        (P::Yuva444P, P::Rgba,     YuvaToRgb { wsub: 1, hsub: 1, alpha: true }),
+        (P::Rgb24,    P::Yuva420P, RgbToYuva { wsub: 2, hsub: 2, alpha_in: false }),
+        (P::Rgb24,    P::Yuva422P, RgbToYuva { wsub: 2, hsub: 1, alpha_in: false }),
+        (P::Rgb24,    P::Yuva444P, RgbToYuva { wsub: 1, hsub: 1, alpha_in: false }),
+        (P::Rgba,     P::Yuva420P, RgbToYuva { wsub: 2, hsub: 2, alpha_in: true }),
+        (P::Rgba,     P::Yuva422P, RgbToYuva { wsub: 2, hsub: 1, alpha_in: true }),
+        (P::Rgba,     P::Yuva444P, RgbToYuva { wsub: 1, hsub: 1, alpha_in: true }),
+        // Alpha-preserving moves inside the Yuva family: luma and the
+        // full-resolution alpha plane are copied byte-for-byte, only
+        // the chroma pair is resampled (same primitives and rounding
+        // as the alpha-less `ChromaResample` rows — no colour matrix,
+        // alpha bit-exact).
+        (P::Yuva420P, P::Yuva422P, YuvaChromaResample { src_wsub: 2, src_hsub: 2, dst_wsub: 2, dst_hsub: 1 }),
+        (P::Yuva420P, P::Yuva444P, YuvaChromaResample { src_wsub: 2, src_hsub: 2, dst_wsub: 1, dst_hsub: 1 }),
+        (P::Yuva422P, P::Yuva420P, YuvaChromaResample { src_wsub: 2, src_hsub: 1, dst_wsub: 2, dst_hsub: 2 }),
+        (P::Yuva422P, P::Yuva444P, YuvaChromaResample { src_wsub: 2, src_hsub: 1, dst_wsub: 1, dst_hsub: 1 }),
+        (P::Yuva444P, P::Yuva420P, YuvaChromaResample { src_wsub: 1, src_hsub: 1, dst_wsub: 2, dst_hsub: 2 }),
+        (P::Yuva444P, P::Yuva422P, YuvaChromaResample { src_wsub: 1, src_hsub: 1, dst_wsub: 2, dst_hsub: 1 }),
 
         // Planar GBR(A) ↔ packed deep RGB. GBR stores RGB as three (or
         // four with alpha) planes in G, B, R order, each sample a 16-bit
@@ -557,6 +602,51 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Yuv420P12Le, P::Yuv420P10Le, DepthRescaleYuv { wsub: 2, hsub: 2, src_bits: 12, dst_bits: 10 }),
         (P::Yuv422P12Le, P::Yuv422P10Le, DepthRescaleYuv { wsub: 2, hsub: 1, src_bits: 12, dst_bits: 10 }),
         (P::Yuv444P12Le, P::Yuv444P10Le, DepthRescaleYuv { wsub: 1, hsub: 1, src_bits: 12, dst_bits: 10 }),
+
+        // 16-bit planar YUV (`Yuv*P16Le`) — the full-width rung of the
+        // depth ladder. Unlike the 10/12-bit variants every bit of the
+        // LE word is significant (full-scale 65535), which the shared
+        // primitives express as `bits = 16`: the mask covers the whole
+        // word and the 8 → 16 widen becomes an exact ×257 (MSB
+        // replication with an 8-bit period), so 8-bit content
+        // round-trips losslessly and peak maps to peak. Narrowing
+        // truncates (keeps the top bits) per the crate-wide
+        // no-dither depth policy documented in [`crate::yuv`].
+        // 16 ↔ 8 (same subsampling):
+        (P::Yuv420P16Le, P::Yuv420P, DepthDownYuv { wsub: 2, hsub: 2, bits: 16 }),
+        (P::Yuv422P16Le, P::Yuv422P, DepthDownYuv { wsub: 2, hsub: 1, bits: 16 }),
+        (P::Yuv444P16Le, P::Yuv444P, DepthDownYuv { wsub: 1, hsub: 1, bits: 16 }),
+        (P::Yuv420P, P::Yuv420P16Le, DepthUpYuv { wsub: 2, hsub: 2, bits: 16 }),
+        (P::Yuv422P, P::Yuv422P16Le, DepthUpYuv { wsub: 2, hsub: 1, bits: 16 }),
+        (P::Yuv444P, P::Yuv444P16Le, DepthUpYuv { wsub: 1, hsub: 1, bits: 16 }),
+        // 16 ↔ 10 and 16 ↔ 12 (same subsampling): storage-width rescale,
+        // exact inverses (widen replicates MSBs, narrow truncates).
+        (P::Yuv420P10Le, P::Yuv420P16Le, DepthRescaleYuv { wsub: 2, hsub: 2, src_bits: 10, dst_bits: 16 }),
+        (P::Yuv422P10Le, P::Yuv422P16Le, DepthRescaleYuv { wsub: 2, hsub: 1, src_bits: 10, dst_bits: 16 }),
+        (P::Yuv444P10Le, P::Yuv444P16Le, DepthRescaleYuv { wsub: 1, hsub: 1, src_bits: 10, dst_bits: 16 }),
+        (P::Yuv420P16Le, P::Yuv420P10Le, DepthRescaleYuv { wsub: 2, hsub: 2, src_bits: 16, dst_bits: 10 }),
+        (P::Yuv422P16Le, P::Yuv422P10Le, DepthRescaleYuv { wsub: 2, hsub: 1, src_bits: 16, dst_bits: 10 }),
+        (P::Yuv444P16Le, P::Yuv444P10Le, DepthRescaleYuv { wsub: 1, hsub: 1, src_bits: 16, dst_bits: 10 }),
+        (P::Yuv420P12Le, P::Yuv420P16Le, DepthRescaleYuv { wsub: 2, hsub: 2, src_bits: 12, dst_bits: 16 }),
+        (P::Yuv422P12Le, P::Yuv422P16Le, DepthRescaleYuv { wsub: 2, hsub: 1, src_bits: 12, dst_bits: 16 }),
+        (P::Yuv444P12Le, P::Yuv444P16Le, DepthRescaleYuv { wsub: 1, hsub: 1, src_bits: 12, dst_bits: 16 }),
+        (P::Yuv420P16Le, P::Yuv420P12Le, DepthRescaleYuv { wsub: 2, hsub: 2, src_bits: 16, dst_bits: 12 }),
+        (P::Yuv422P16Le, P::Yuv422P12Le, DepthRescaleYuv { wsub: 2, hsub: 1, src_bits: 16, dst_bits: 12 }),
+        (P::Yuv444P16Le, P::Yuv444P12Le, DepthRescaleYuv { wsub: 1, hsub: 1, src_bits: 16, dst_bits: 12 }),
+
+        // Direct 16-bit chroma resample — the six ordered pairs over
+        // (4:2:0, 4:2:2, 4:4:4) on the 16-bit family, mirroring the
+        // 8-bit `ChromaResample` rows. Luma is copied word-for-word;
+        // chroma is resampled at full 16-bit precision with the same
+        // rounding conventions as the 8-bit helpers. These rows also
+        // give the deep staged fallback its lossless-resample pivot
+        // tier (see `YUV_PIVOTS_DEEP`).
+        (P::Yuv420P16Le, P::Yuv422P16Le, ChromaResample16 { src_wsub: 2, src_hsub: 2, dst_wsub: 2, dst_hsub: 1 }),
+        (P::Yuv420P16Le, P::Yuv444P16Le, ChromaResample16 { src_wsub: 2, src_hsub: 2, dst_wsub: 1, dst_hsub: 1 }),
+        (P::Yuv422P16Le, P::Yuv420P16Le, ChromaResample16 { src_wsub: 2, src_hsub: 1, dst_wsub: 2, dst_hsub: 2 }),
+        (P::Yuv422P16Le, P::Yuv444P16Le, ChromaResample16 { src_wsub: 2, src_hsub: 1, dst_wsub: 1, dst_hsub: 1 }),
+        (P::Yuv444P16Le, P::Yuv420P16Le, ChromaResample16 { src_wsub: 1, src_hsub: 1, dst_wsub: 2, dst_hsub: 2 }),
+        (P::Yuv444P16Le, P::Yuv422P16Le, ChromaResample16 { src_wsub: 1, src_hsub: 1, dst_wsub: 2, dst_hsub: 1 }),
 
         // Deep grayscale wiring — Gray10Le / Gray12Le previously had NO
         // conversion entries at all (the only PixelFormat variants with
@@ -738,24 +828,60 @@ enum ConvertOp {
         /// When true, source is RGBA (alpha ignored). When false, Rgb24.
         alpha_in: bool,
     },
-    /// `Yuv420P` (3 planes) → `Yuva420P` (4 planes) by appending an
-    /// opaque full-resolution alpha plane.
-    Yuv420pToYuva420p,
-    /// `Yuva420P` → `Yuv420P` by dropping the trailing alpha plane.
-    Yuva420pToYuv420p,
-    /// `Yuva420P` → packed RGB. The YUV math runs through the existing
-    /// 4:2:0 decoder; the full-resolution alpha plane is either dropped
+    /// Alpha-less planar YUV (3 planes) → the `Yuva*` sibling with the
+    /// same chroma grid (4 planes) by appending an opaque
+    /// full-resolution alpha plane. `wsub` / `hsub` are the shared
+    /// chroma division.
+    YuvToYuva {
+        wsub: usize,
+        hsub: usize,
+    },
+    /// `Yuva*` → the alpha-less planar sibling by dropping the trailing
+    /// full-resolution alpha plane.
+    YuvaToYuv {
+        wsub: usize,
+        hsub: usize,
+    },
+    /// `Yuva420P` / `Yuva422P` / `Yuva444P` → packed RGB. The YUV math
+    /// runs through the existing planar decoder for the format's chroma
+    /// grid; the full-resolution alpha plane is either dropped
     /// (`alpha = false`, emit `Rgb24`) or interleaved into the output
     /// (`alpha = true`, emit `Rgba`).
-    Yuva420pToRgb {
+    YuvaToRgb {
+        wsub: usize,
+        hsub: usize,
         alpha: bool,
     },
-    /// Packed RGB → `Yuva420P`. The YUV math runs through the existing
-    /// 4:2:0 encoder; the alpha plane is either synthesised opaque
-    /// (`alpha_in = false`, source is `Rgb24`) or split out of the input
-    /// (`alpha_in = true`, source is `Rgba`).
-    RgbToYuva420p {
+    /// Packed RGB → `Yuva420P` / `Yuva422P` / `Yuva444P`. The YUV math
+    /// runs through the existing planar encoder; the alpha plane is
+    /// either synthesised opaque (`alpha_in = false`, source is
+    /// `Rgb24`) or split out of the input (`alpha_in = true`, source is
+    /// `Rgba`).
+    RgbToYuva {
+        wsub: usize,
+        hsub: usize,
         alpha_in: bool,
+    },
+    /// `Yuva*` → `Yuva*`: luma and the full-resolution alpha plane are
+    /// copied byte-for-byte; the chroma pair is resampled between the
+    /// two subsampling layouts with the same primitives as
+    /// [`Self::ChromaResample`]. Alpha survives bit-exact.
+    YuvaChromaResample {
+        src_wsub: usize,
+        src_hsub: usize,
+        dst_wsub: usize,
+        dst_hsub: usize,
+    },
+    /// 16-bit planar YUV → 16-bit planar YUV (`Yuv*P16Le` family): luma
+    /// copied word-for-word, chroma resampled between the two
+    /// subsampling layouts at full 16-bit precision via the
+    /// `yuv::chroma16le_*` helpers (rounding mirrors the 8-bit
+    /// [`Self::ChromaResample`] exactly).
+    ChromaResample16 {
+        src_wsub: usize,
+        src_hsub: usize,
+        dst_wsub: usize,
+        dst_hsub: usize,
     },
     /// Planar GBR(A) → packed deep RGB (`Rgb48Le` / `Rgba64Le`). Reorders
     /// the G, B, R(, A) planes into packed R, G, B(, A) 16-bit words and
@@ -774,21 +900,24 @@ enum ConvertOp {
         bits: u8,
         alpha: bool,
     },
-    /// High-precision planar YUV (`Yuv*P10Le` / `Yuv*P12Le`, 16-bit LE
-    /// storage) → the 8-bit planar sibling (`Yuv*P`). Each of the three
-    /// planes is reduced from a `bits`-significant 16-bit word to 8 bits
-    /// by a round-to-nearest right-shift. `wsub` / `hsub` are the shared
-    /// chroma division; subsampling is preserved (no chroma resample).
+    /// High-precision planar YUV (`Yuv*P10Le` / `Yuv*P12Le` /
+    /// `Yuv*P16Le`, 16-bit LE storage) → the 8-bit planar sibling
+    /// (`Yuv*P`). Each of the three planes is reduced from a
+    /// `bits`-significant 16-bit word to 8 bits by truncation (keep the
+    /// top 8 significant bits). `wsub` / `hsub` are the shared chroma
+    /// division; subsampling is preserved (no chroma resample).
     DepthDownYuv {
         wsub: usize,
         hsub: usize,
         bits: u32,
     },
     /// 8-bit planar YUV (`Yuv*P`) → the high-precision planar sibling
-    /// (`Yuv*P10Le` / `Yuv*P12Le`). The inverse of [`Self::DepthDownYuv`]:
-    /// each plane is widened to a `bits`-significant 16-bit LE word with
-    /// the 8-bit value in the high bits and its MSBs replicated into the
-    /// low slack so the down-conversion round-trips exactly.
+    /// (`Yuv*P10Le` / `Yuv*P12Le` / `Yuv*P16Le`). The inverse of
+    /// [`Self::DepthDownYuv`]: each plane is widened to a
+    /// `bits`-significant 16-bit LE word with the 8-bit value in the
+    /// high bits and its MSBs replicated into the low slack so the
+    /// down-conversion round-trips exactly (for `bits = 16` the widen
+    /// is an exact ×257 and full-scale 255 maps to 65535).
     DepthUpYuv {
         wsub: usize,
         hsub: usize,
@@ -808,7 +937,7 @@ enum ConvertOp {
         alpha: bool,
     },
     /// Cross-depth planar YUV: rescale every plane between two
-    /// `bits`-significant 16-bit LE storage widths (e.g. 10 ↔ 12) with
+    /// `bits`-significant 16-bit LE storage widths (10 ↔ 12 ↔ 16) with
     /// the subsampling layout preserved. Widening replicates MSBs into
     /// the new low bits; narrowing truncates them (exact inverses).
     DepthRescaleYuv {
@@ -930,10 +1059,28 @@ impl ConvertOp {
             Self::RgbToPal8 { alpha_in } => rgb_to_pal8(src, src_info, opts, alpha_in),
             Self::CmykToRgb { alpha } => do_cmyk_to_rgb(src, src_info, alpha),
             Self::RgbToCmyk { alpha_in } => do_rgb_to_cmyk(src, src_info, alpha_in),
-            Self::Yuv420pToYuva420p => do_yuv420p_to_yuva420p(src, src_info),
-            Self::Yuva420pToYuv420p => do_yuva420p_to_yuv420p(src, src_info),
-            Self::Yuva420pToRgb { alpha } => do_yuva420p_to_rgb(src, src_info, matrix, alpha),
-            Self::RgbToYuva420p { alpha_in } => do_rgb_to_yuva420p(src, src_info, matrix, alpha_in),
+            Self::YuvToYuva { wsub, hsub } => do_yuv_to_yuva(src, src_info, wsub, hsub),
+            Self::YuvaToYuv { wsub, hsub } => do_yuva_to_yuv(src, src_info, wsub, hsub),
+            Self::YuvaToRgb { wsub, hsub, alpha } => {
+                do_yuva_to_rgb(src, src_info, matrix, wsub, hsub, alpha)
+            }
+            Self::RgbToYuva {
+                wsub,
+                hsub,
+                alpha_in,
+            } => do_rgb_to_yuva(src, src_info, matrix, wsub, hsub, alpha_in),
+            Self::YuvaChromaResample {
+                src_wsub,
+                src_hsub,
+                dst_wsub,
+                dst_hsub,
+            } => yuva_chroma_resample(src, src_info, src_wsub, src_hsub, dst_wsub, dst_hsub),
+            Self::ChromaResample16 {
+                src_wsub,
+                src_hsub,
+                dst_wsub,
+                dst_hsub,
+            } => chroma_resample16(src, src_info, src_wsub, src_hsub, dst_wsub, dst_hsub),
             Self::GbrToPackedDeep { bits, alpha } => {
                 do_gbr_to_packed_deep(src, src_info, bits, alpha)
             }
@@ -1821,7 +1968,6 @@ fn chroma_resample(
     let src_cw = w / src_wsub;
     let src_ch = h / src_hsub;
     let dst_cw = w / dst_wsub;
-    let dst_ch = h / dst_hsub;
 
     // Luma plane: byte-for-byte copy (gather_tight already drops stride
     // padding).
@@ -1831,81 +1977,8 @@ fn chroma_resample(
     // invoked twice with identical parameters.
     let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, src_cw, src_ch);
     let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, src_cw, src_ch);
-    let mut u_dst = vec![0u8; dst_cw * dst_ch];
-    let mut v_dst = vec![0u8; dst_cw * dst_ch];
-
-    // The dispatch table registers ordered pairs over `(4:2:0, 4:2:2,
-    // 4:4:4, 4:1:1)` — every combination not equal to the identity.
-    // Anything else is a registry bug so we route through
-    // `Error::unsupported`.
-    match (src_wsub, src_hsub, dst_wsub, dst_hsub) {
-        // 4:4:4 → 4:2:2  (horizontal pair-average)
-        (1, 1, 2, 1) => {
-            yuv::chroma_444_to_422(&u_src, &mut u_dst, w, h);
-            yuv::chroma_444_to_422(&v_src, &mut v_dst, w, h);
-        }
-        // 4:2:2 → 4:4:4  (horizontal duplicate)
-        (2, 1, 1, 1) => {
-            yuv::chroma_422_to_444(&u_src, &mut u_dst, w, h);
-            yuv::chroma_422_to_444(&v_src, &mut v_dst, w, h);
-        }
-        // 4:4:4 → 4:2:0  (2×2 box average)
-        (1, 1, 2, 2) => {
-            yuv::chroma_444_to_420(&u_src, &mut u_dst, w, h);
-            yuv::chroma_444_to_420(&v_src, &mut v_dst, w, h);
-        }
-        // 4:2:0 → 4:4:4  (2×2 nearest)
-        (2, 2, 1, 1) => {
-            yuv::chroma_420_to_444(&u_src, &mut u_dst, w, h);
-            yuv::chroma_420_to_444(&v_src, &mut v_dst, w, h);
-        }
-        // 4:2:2 → 4:2:0  (vertical pair-average; chroma width unchanged)
-        (2, 1, 2, 2) => {
-            yuv::chroma_422_to_420(&u_src, &mut u_dst, w, h);
-            yuv::chroma_422_to_420(&v_src, &mut v_dst, w, h);
-        }
-        // 4:2:0 → 4:2:2  (vertical duplicate; chroma width unchanged)
-        (2, 2, 2, 1) => {
-            yuv::chroma_420_to_422(&u_src, &mut u_dst, w, h);
-            yuv::chroma_420_to_422(&v_src, &mut v_dst, w, h);
-        }
-        // 4:4:4 → 4:1:1  (horizontal 4-sample box average)
-        (1, 1, 4, 1) => {
-            yuv::chroma_444_to_411(&u_src, &mut u_dst, w, h);
-            yuv::chroma_444_to_411(&v_src, &mut v_dst, w, h);
-        }
-        // 4:1:1 → 4:4:4  (horizontal 4× duplicate)
-        (4, 1, 1, 1) => {
-            yuv::chroma_411_to_444(&u_src, &mut u_dst, w, h);
-            yuv::chroma_411_to_444(&v_src, &mut v_dst, w, h);
-        }
-        // 4:2:2 → 4:1:1  (horizontal pair-average; vertical unchanged)
-        (2, 1, 4, 1) => {
-            yuv::chroma_422_to_411(&u_src, &mut u_dst, w, h);
-            yuv::chroma_422_to_411(&v_src, &mut v_dst, w, h);
-        }
-        // 4:1:1 → 4:2:2  (horizontal pair-duplicate; vertical unchanged)
-        (4, 1, 2, 1) => {
-            yuv::chroma_411_to_422(&u_src, &mut u_dst, w, h);
-            yuv::chroma_411_to_422(&v_src, &mut v_dst, w, h);
-        }
-        // 4:2:0 → 4:1:1  (horizontal pair-average + vertical duplicate)
-        (2, 2, 4, 1) => {
-            yuv::chroma_420_to_411(&u_src, &mut u_dst, w, h);
-            yuv::chroma_420_to_411(&v_src, &mut v_dst, w, h);
-        }
-        // 4:1:1 → 4:2:0  (horizontal duplicate to 4:2:2 wsub + vertical
-        // pair-average)
-        (4, 1, 2, 2) => {
-            yuv::chroma_411_to_420(&u_src, &mut u_dst, w, h);
-            yuv::chroma_411_to_420(&v_src, &mut v_dst, w, h);
-        }
-        _ => {
-            return Err(Error::unsupported(
-                "pixfmt: unregistered planar YUV chroma resample pair",
-            ))
-        }
-    }
+    let (u_dst, v_dst) =
+        resample_chroma_pair(&u_src, &v_src, w, h, src_wsub, src_hsub, dst_wsub, dst_hsub)?;
 
     Ok(make_frame(
         src,
@@ -1920,6 +1993,261 @@ fn chroma_resample(
             },
             VideoPlane {
                 stride: dst_cw,
+                data: v_dst,
+            },
+        ],
+    ))
+}
+
+/// Resample a tightly-packed 8-bit chroma pair between two subsampling
+/// layouts. Shared core of [`chroma_resample`] (alpha-less planar YUV)
+/// and [`yuva_chroma_resample`] (`Yuva*` family, where luma and alpha
+/// are copied and only the chroma pair goes through here).
+#[allow(clippy::too_many_arguments)]
+fn resample_chroma_pair(
+    u_src: &[u8],
+    v_src: &[u8],
+    w: usize,
+    h: usize,
+    src_wsub: usize,
+    src_hsub: usize,
+    dst_wsub: usize,
+    dst_hsub: usize,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let dst_cw = w / dst_wsub;
+    let dst_ch = h / dst_hsub;
+    let mut u_dst = vec![0u8; dst_cw * dst_ch];
+    let mut v_dst = vec![0u8; dst_cw * dst_ch];
+
+    // The dispatch table registers ordered pairs over `(4:2:0, 4:2:2,
+    // 4:4:4, 4:1:1)` — every combination not equal to the identity.
+    // Anything else is a registry bug so we route through
+    // `Error::unsupported`.
+    match (src_wsub, src_hsub, dst_wsub, dst_hsub) {
+        // 4:4:4 → 4:2:2  (horizontal pair-average)
+        (1, 1, 2, 1) => {
+            yuv::chroma_444_to_422(u_src, &mut u_dst, w, h);
+            yuv::chroma_444_to_422(v_src, &mut v_dst, w, h);
+        }
+        // 4:2:2 → 4:4:4  (horizontal duplicate)
+        (2, 1, 1, 1) => {
+            yuv::chroma_422_to_444(u_src, &mut u_dst, w, h);
+            yuv::chroma_422_to_444(v_src, &mut v_dst, w, h);
+        }
+        // 4:4:4 → 4:2:0  (2×2 box average)
+        (1, 1, 2, 2) => {
+            yuv::chroma_444_to_420(u_src, &mut u_dst, w, h);
+            yuv::chroma_444_to_420(v_src, &mut v_dst, w, h);
+        }
+        // 4:2:0 → 4:4:4  (2×2 nearest)
+        (2, 2, 1, 1) => {
+            yuv::chroma_420_to_444(u_src, &mut u_dst, w, h);
+            yuv::chroma_420_to_444(v_src, &mut v_dst, w, h);
+        }
+        // 4:2:2 → 4:2:0  (vertical pair-average; chroma width unchanged)
+        (2, 1, 2, 2) => {
+            yuv::chroma_422_to_420(u_src, &mut u_dst, w, h);
+            yuv::chroma_422_to_420(v_src, &mut v_dst, w, h);
+        }
+        // 4:2:0 → 4:2:2  (vertical duplicate; chroma width unchanged)
+        (2, 2, 2, 1) => {
+            yuv::chroma_420_to_422(u_src, &mut u_dst, w, h);
+            yuv::chroma_420_to_422(v_src, &mut v_dst, w, h);
+        }
+        // 4:4:4 → 4:1:1  (horizontal 4-sample box average)
+        (1, 1, 4, 1) => {
+            yuv::chroma_444_to_411(u_src, &mut u_dst, w, h);
+            yuv::chroma_444_to_411(v_src, &mut v_dst, w, h);
+        }
+        // 4:1:1 → 4:4:4  (horizontal 4× duplicate)
+        (4, 1, 1, 1) => {
+            yuv::chroma_411_to_444(u_src, &mut u_dst, w, h);
+            yuv::chroma_411_to_444(v_src, &mut v_dst, w, h);
+        }
+        // 4:2:2 → 4:1:1  (horizontal pair-average; vertical unchanged)
+        (2, 1, 4, 1) => {
+            yuv::chroma_422_to_411(u_src, &mut u_dst, w, h);
+            yuv::chroma_422_to_411(v_src, &mut v_dst, w, h);
+        }
+        // 4:1:1 → 4:2:2  (horizontal pair-duplicate; vertical unchanged)
+        (4, 1, 2, 1) => {
+            yuv::chroma_411_to_422(u_src, &mut u_dst, w, h);
+            yuv::chroma_411_to_422(v_src, &mut v_dst, w, h);
+        }
+        // 4:2:0 → 4:1:1  (horizontal pair-average + vertical duplicate)
+        (2, 2, 4, 1) => {
+            yuv::chroma_420_to_411(u_src, &mut u_dst, w, h);
+            yuv::chroma_420_to_411(v_src, &mut v_dst, w, h);
+        }
+        // 4:1:1 → 4:2:0  (horizontal duplicate to 4:2:2 wsub + vertical
+        // pair-average)
+        (4, 1, 2, 2) => {
+            yuv::chroma_411_to_420(u_src, &mut u_dst, w, h);
+            yuv::chroma_411_to_420(v_src, &mut v_dst, w, h);
+        }
+        _ => {
+            return Err(Error::unsupported(
+                "pixfmt: unregistered planar YUV chroma resample pair",
+            ))
+        }
+    }
+
+    Ok((u_dst, v_dst))
+}
+
+/// `Yuva*` → `Yuva*` chroma resample: luma (plane 0) and the
+/// full-resolution alpha plane (plane 3) are copied byte-for-byte; the
+/// chroma pair is resampled via [`resample_chroma_pair`]. No colour
+/// matrix — alpha and luma survive bit-exact.
+fn yuva_chroma_resample(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    src_wsub: usize,
+    src_hsub: usize,
+    dst_wsub: usize,
+    dst_hsub: usize,
+) -> Result<VideoFrame> {
+    if src.planes.len() < 4 {
+        return Err(Error::invalid(
+            "pixfmt: Yuva source needs 4 planes (Y, U, V, A)",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let wsub_max = src_wsub.max(dst_wsub);
+    let hsub_max = src_hsub.max(dst_hsub);
+    if w % wsub_max != 0 || h % hsub_max != 0 {
+        return Err(Error::invalid(
+            "pixfmt: Yuva chroma resample needs dimensions divisible by the wider subsampling",
+        ));
+    }
+    let src_cw = w / src_wsub;
+    let src_ch = h / src_hsub;
+    let dst_cw = w / dst_wsub;
+
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, src_cw, src_ch);
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, src_cw, src_ch);
+    let ap = gather_tight(&src.planes[3].data, src.planes[3].stride, w, h);
+    let (u_dst, v_dst) =
+        resample_chroma_pair(&u_src, &v_src, w, h, src_wsub, src_hsub, dst_wsub, dst_hsub)?;
+
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w,
+                data: yp,
+            },
+            VideoPlane {
+                stride: dst_cw,
+                data: u_dst,
+            },
+            VideoPlane {
+                stride: dst_cw,
+                data: v_dst,
+            },
+            VideoPlane {
+                stride: w,
+                data: ap,
+            },
+        ],
+    ))
+}
+
+/// 16-bit planar YUV → 16-bit planar YUV: luma copied word-for-word,
+/// chroma resampled at full 16-bit precision through the
+/// `yuv::chroma16le_*` primitives. Only the pairs over (4:2:0, 4:2:2,
+/// 4:4:4) are registered.
+fn chroma_resample16(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    src_wsub: usize,
+    src_hsub: usize,
+    dst_wsub: usize,
+    dst_hsub: usize,
+) -> Result<VideoFrame> {
+    if src.planes.len() < 3 {
+        return Err(Error::invalid(
+            "pixfmt: planar YUV source needs 3 planes (Y, U, V)",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let wsub_max = src_wsub.max(dst_wsub);
+    let hsub_max = src_hsub.max(dst_hsub);
+    if w % wsub_max != 0 || h % hsub_max != 0 {
+        return Err(Error::invalid(
+            "pixfmt: planar YUV chroma resample needs dimensions divisible by the wider subsampling",
+        ));
+    }
+    let src_cw = w / src_wsub;
+    let src_ch = h / src_hsub;
+    let dst_cw = w / dst_wsub;
+    let dst_ch = h / dst_hsub;
+
+    // All planes are 16-bit LE: two bytes per sample.
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
+    let u_src = gather_tight(
+        &src.planes[1].data,
+        src.planes[1].stride,
+        src_cw * 2,
+        src_ch,
+    );
+    let v_src = gather_tight(
+        &src.planes[2].data,
+        src.planes[2].stride,
+        src_cw * 2,
+        src_ch,
+    );
+    let mut u_dst = vec![0u8; dst_cw * dst_ch * 2];
+    let mut v_dst = vec![0u8; dst_cw * dst_ch * 2];
+
+    match (src_wsub, src_hsub, dst_wsub, dst_hsub) {
+        (1, 1, 2, 1) => {
+            yuv::chroma16le_444_to_422(&u_src, &mut u_dst, w, h);
+            yuv::chroma16le_444_to_422(&v_src, &mut v_dst, w, h);
+        }
+        (2, 1, 1, 1) => {
+            yuv::chroma16le_422_to_444(&u_src, &mut u_dst, w, h);
+            yuv::chroma16le_422_to_444(&v_src, &mut v_dst, w, h);
+        }
+        (1, 1, 2, 2) => {
+            yuv::chroma16le_444_to_420(&u_src, &mut u_dst, w, h);
+            yuv::chroma16le_444_to_420(&v_src, &mut v_dst, w, h);
+        }
+        (2, 2, 1, 1) => {
+            yuv::chroma16le_420_to_444(&u_src, &mut u_dst, w, h);
+            yuv::chroma16le_420_to_444(&v_src, &mut v_dst, w, h);
+        }
+        (2, 1, 2, 2) => {
+            yuv::chroma16le_422_to_420(&u_src, &mut u_dst, w, h);
+            yuv::chroma16le_422_to_420(&v_src, &mut v_dst, w, h);
+        }
+        (2, 2, 2, 1) => {
+            yuv::chroma16le_420_to_422(&u_src, &mut u_dst, w, h);
+            yuv::chroma16le_420_to_422(&v_src, &mut v_dst, w, h);
+        }
+        _ => {
+            return Err(Error::unsupported(
+                "pixfmt: unregistered 16-bit planar YUV chroma resample pair",
+            ))
+        }
+    }
+
+    Ok(make_frame(
+        src,
+        vec![
+            VideoPlane {
+                stride: w * 2,
+                data: yp,
+            },
+            VideoPlane {
+                stride: dst_cw * 2,
+                data: u_dst,
+            },
+            VideoPlane {
+                stride: dst_cw * 2,
                 data: v_dst,
             },
         ],
@@ -2538,16 +2866,37 @@ fn rgb_to_packed422(
 // -------------------------------------------------------------------------
 // Palette.
 
+/// `Pal8` → packed RGB(A). The colour table is resolved in priority
+/// order:
+///
+/// 1. the frame's own **palette side-channel** (a trailing `stride == 0`
+///    plane attached via `VideoFrame::set_palette` — packed 3-byte RGB
+///    entries, expanded here with opaque alpha), which is per-frame
+///    ground truth from a decoder;
+/// 2. the caller-supplied `ConvertOptions::palette` as before;
+/// 3. neither present → `Error::Invalid`.
 fn pal8_to_rgb(
     src: &VideoFrame,
     src_info: FrameInfo,
     opts: &ConvertOptions,
     alpha: bool,
 ) -> Result<VideoFrame> {
-    let palette = opts
-        .palette
-        .as_ref()
-        .ok_or_else(|| Error::invalid("pixfmt: Pal8 → RGB requires ConvertOptions.palette"))?;
+    // Frame-attached palette wins over the options bundle: it travels
+    // with the frame it describes.
+    let side_channel = src.palette().map(|raw| Palette {
+        colors: raw
+            .chunks_exact(3)
+            .map(|c| [c[0], c[1], c[2], 255])
+            .collect(),
+    });
+    let palette =
+        match (&side_channel, &opts.palette) {
+            (Some(p), _) => p,
+            (None, Some(p)) => p,
+            (None, None) => return Err(Error::invalid(
+                "pixfmt: Pal8 → RGB requires a frame-attached palette or ConvertOptions.palette",
+            )),
+        };
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let in_plane = &src.planes[0];
@@ -2580,6 +2929,11 @@ fn pal8_to_rgb(
     }
 }
 
+/// Packed RGB(A) → `Pal8`. Quantises against `ConvertOptions::palette`
+/// (required) and **attaches the colour table to the output frame** as
+/// the palette side-channel (`VideoFrame::set_palette`, packed 3-byte
+/// RGB entries), so the produced `Pal8` frame is self-describing: a
+/// later `Pal8 → RGB` expansion needs no options bundle.
 fn rgb_to_pal8(
     src: &VideoFrame,
     src_info: FrameInfo,
@@ -2601,13 +2955,23 @@ fn rgb_to_pal8(
         let tight = gather_tight(&in_plane.data, in_plane.stride, w * 3, h);
         pal8::quantise_rgb24_to_pal8(&tight, &mut out, w, h, palette, opts.dither);
     }
+    // Attach the table that was actually used so the frame carries its
+    // own colour meaning (side-channel format: 3-byte RGB per entry;
+    // the Palette's alpha column is not representable there and is
+    // dropped — consumers that need per-entry alpha keep the Palette).
+    let side_channel: Vec<u8> = palette
+        .colors
+        .iter()
+        .flat_map(|c| [c[0], c[1], c[2]])
+        .collect();
     Ok(make_frame(
         src,
         vec![VideoPlane {
             stride: w,
             data: out,
         }],
-    ))
+    )
+    .with_palette(side_channel))
 }
 
 // -------------------------------------------------------------------------
@@ -2662,29 +3026,37 @@ fn do_rgb_to_cmyk(src: &VideoFrame, src_info: FrameInfo, alpha_in: bool) -> Resu
 }
 
 // -------------------------------------------------------------------------
-// Yuva420P — planar 4:2:0 YUV with an additional full-resolution alpha
-// plane. The YUV planes (Y, U, V) are byte-identical to `Yuv420P`, so
-// every conversion path here borrows the existing 4:2:0 encoder/decoder
-// and only differs in how the trailing alpha plane is created, dropped,
-// or carried through.
+// Yuva420P / Yuva422P / Yuva444P — planar YUV with an additional
+// full-resolution alpha plane (plane 3 is `w × h` regardless of the
+// chroma grid). The YUV planes (Y, U, V) are byte-identical to the
+// alpha-less sibling, so every conversion path here borrows the
+// existing planar encoder/decoder for the format's chroma grid and only
+// differs in how the trailing alpha plane is created, dropped, or
+// carried through.
 
-/// `Yuv420P` → `Yuva420P`: copy Y / U / V verbatim and append a full
-/// `w × h` plane of `0xFF` (opaque) alpha. Tight-strided output.
-fn do_yuv420p_to_yuva420p(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+/// Alpha-less planar YUV → the `Yuva*` sibling: copy Y / U / V verbatim
+/// and append a full `w × h` plane of `0xFF` (opaque) alpha.
+/// Tight-strided output.
+fn do_yuv_to_yuva(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    wsub: usize,
+    hsub: usize,
+) -> Result<VideoFrame> {
     if src.planes.len() < 3 {
         return Err(Error::invalid(
-            "pixfmt: Yuv420P source needs 3 planes (Y, U, V)",
+            "pixfmt: planar YUV source needs 3 planes (Y, U, V)",
         ));
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 || h % 2 != 0 {
+    if w % wsub != 0 || h % hsub != 0 {
         return Err(Error::invalid(
-            "pixfmt: Yuv420P → Yuva420P requires even dimensions",
+            "pixfmt: YUV → YUVA requires dimensions divisible by the chroma subsampling",
         ));
     }
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w / wsub;
+    let ch = h / hsub;
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
     let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
     let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
@@ -2712,22 +3084,28 @@ fn do_yuv420p_to_yuva420p(src: &VideoFrame, src_info: FrameInfo) -> Result<Video
     ))
 }
 
-/// `Yuva420P` → `Yuv420P`: copy the leading three planes; drop alpha.
-fn do_yuva420p_to_yuv420p(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+/// `Yuva*` → the alpha-less planar sibling: copy the leading three
+/// planes; drop alpha.
+fn do_yuva_to_yuv(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    wsub: usize,
+    hsub: usize,
+) -> Result<VideoFrame> {
     if src.planes.len() < 4 {
         return Err(Error::invalid(
-            "pixfmt: Yuva420P source needs 4 planes (Y, U, V, A)",
+            "pixfmt: Yuva source needs 4 planes (Y, U, V, A)",
         ));
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 || h % 2 != 0 {
+    if w % wsub != 0 || h % hsub != 0 {
         return Err(Error::invalid(
-            "pixfmt: Yuva420P → Yuv420P requires even dimensions",
+            "pixfmt: YUVA → YUV requires dimensions divisible by the chroma subsampling",
         ));
     }
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w / wsub;
+    let ch = h / hsub;
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
     let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
     let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
@@ -2750,36 +3128,44 @@ fn do_yuva420p_to_yuv420p(src: &VideoFrame, src_info: FrameInfo) -> Result<Video
     ))
 }
 
-/// `Yuva420P` → `Rgb24` / `Rgba`: decode the 4:2:0 YUV part through the
-/// existing scalar/SIMD path, then either drop the source's alpha plane
-/// (`alpha = false`, output `Rgb24`) or interleave it into the
-/// destination's fourth byte (`alpha = true`, output `Rgba`).
-fn do_yuva420p_to_rgb(
+/// `Yuva*` → `Rgb24` / `Rgba`: decode the YUV part through the existing
+/// planar scalar/SIMD path for the format's chroma grid, then either
+/// drop the source's alpha plane (`alpha = false`, output `Rgb24`) or
+/// interleave it into the destination's fourth byte (`alpha = true`,
+/// output `Rgba`).
+fn do_yuva_to_rgb(
     src: &VideoFrame,
     src_info: FrameInfo,
     matrix: YuvMatrix,
+    wsub: usize,
+    hsub: usize,
     alpha: bool,
 ) -> Result<VideoFrame> {
     if src.planes.len() < 4 {
         return Err(Error::invalid(
-            "pixfmt: Yuva420P source needs 4 planes (Y, U, V, A)",
+            "pixfmt: Yuva source needs 4 planes (Y, U, V, A)",
         ));
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 || h % 2 != 0 {
+    if w % wsub != 0 || h % hsub != 0 {
         return Err(Error::invalid(
-            "pixfmt: Yuva420P → RGB requires even dimensions",
+            "pixfmt: YUVA → RGB requires dimensions divisible by the chroma subsampling",
         ));
     }
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w / wsub;
+    let ch = h / hsub;
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
     let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
     let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
 
     let mut rgb_buf = vec![0u8; w * h * 3];
-    yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix);
+    match (wsub, hsub) {
+        (1, 1) => yuv::yuv444_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
+        (2, 1) => yuv::yuv422_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
+        (2, 2) => yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
+        _ => return Err(Error::unsupported("pixfmt: unsupported YUVA subsampling")),
+    }
 
     if !alpha {
         return Ok(make_frame(
@@ -2810,25 +3196,28 @@ fn do_yuva420p_to_rgb(
     ))
 }
 
-/// `Rgb24` / `Rgba` → `Yuva420P`: encode 4:2:0 YUV through the existing
-/// path, then either synthesise an opaque alpha plane (`alpha_in = false`,
-/// source is `Rgb24`) or split the source's alpha out into the trailing
-/// plane (`alpha_in = true`, source is `Rgba`).
-fn do_rgb_to_yuva420p(
+/// `Rgb24` / `Rgba` → `Yuva*`: encode planar YUV through the existing
+/// path for the destination's chroma grid, then either synthesise an
+/// opaque alpha plane (`alpha_in = false`, source is `Rgb24`) or split
+/// the source's alpha out into the trailing plane (`alpha_in = true`,
+/// source is `Rgba`).
+fn do_rgb_to_yuva(
     src: &VideoFrame,
     src_info: FrameInfo,
     matrix: YuvMatrix,
+    wsub: usize,
+    hsub: usize,
     alpha_in: bool,
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 || h % 2 != 0 {
+    if w % wsub != 0 || h % hsub != 0 {
         return Err(Error::invalid(
-            "pixfmt: RGB → Yuva420P requires even dimensions",
+            "pixfmt: RGB → YUVA requires dimensions divisible by the chroma subsampling",
         ));
     }
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w / wsub;
+    let ch = h / hsub;
 
     let in_plane = &src.planes[0];
     // Tight RGB24 + alpha plane (full resolution; opaque if input is Rgb24).
@@ -2852,7 +3241,12 @@ fn do_rgb_to_yuva420p(
     let mut yp = vec![0u8; w * h];
     let mut up = vec![0u8; cw * ch];
     let mut vp = vec![0u8; cw * ch];
-    yuv::rgb24_to_yuv420(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix);
+    match (wsub, hsub) {
+        (1, 1) => yuv::rgb24_to_yuv444(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
+        (2, 1) => yuv::rgb24_to_yuv422(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
+        (2, 2) => yuv::rgb24_to_yuv420(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
+        _ => return Err(Error::unsupported("pixfmt: unsupported YUVA subsampling")),
+    }
 
     Ok(make_frame(
         src,

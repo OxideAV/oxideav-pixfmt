@@ -57,6 +57,11 @@ const ALL_FORMATS: &[PixelFormat] = &[
     PixelFormat::Gbrap12Le,
     PixelFormat::Gbrp14Le,
     PixelFormat::Gbrap14Le,
+    PixelFormat::Yuv420P16Le,
+    PixelFormat::Yuv422P16Le,
+    PixelFormat::Yuv444P16Le,
+    PixelFormat::Yuva422P,
+    PixelFormat::Yuva444P,
 ];
 
 fn plane(rows: usize, row_bytes: usize, seed: &mut u32) -> VideoPlane {
@@ -164,7 +169,7 @@ fn test_opts() -> ConvertOptions {
 /// is pinned so a regression that silently drops routes fails loudly.
 #[test]
 fn coverage_matrix_matches_supports() {
-    // The full 41 × 40 sweep converts every reachable pair; under the
+    // The full 46 × 45 sweep converts every reachable pair; under the
     // miri interpreter that is many minutes of work, so shrink twice:
     // 4 × 4 frames (the smallest size every subsampling grid accepts —
     // 4:1:1 needs width divisible by 4) and a deterministic subset of
@@ -202,18 +207,20 @@ fn coverage_matrix_matches_supports() {
             }
         }
     }
-    // Coverage floor after the GBR ↔ 8-bit packed rows landed: 217
-    // direct pairs and 1135 total reachable pairs out of 41 × 40 = 1640
-    // ordered pairs (the remainder needs more than one pivot or has no
-    // meaningful route). These may only go UP. The floors only hold for
-    // the full native sweep — the miri run covers a source subset.
+    // Coverage floor after the 16-bit YUV trio (`Yuv*P16Le`), the
+    // Yuva422P / Yuva444P family, and the deep YUV pivot tier landed:
+    // 261 direct pairs and 1379 total reachable pairs out of
+    // 46 × 45 = 2070 ordered pairs (the remainder needs more than one
+    // pivot or has no meaningful route). These may only go UP. The
+    // floors only hold for the full native sweep — the miri run covers
+    // a source subset.
     if src_stride == 1 {
         assert!(
-            direct_pairs >= 217,
+            direct_pairs >= 261,
             "direct coverage regressed: {direct_pairs}"
         );
         assert!(
-            ok_pairs >= 1135,
+            ok_pairs >= 1379,
             "total coverage regressed: {ok_pairs} (unsupported sample: {:?})",
             &unsupported[..unsupported.len().min(8)]
         );

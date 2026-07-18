@@ -46,6 +46,13 @@ impl FormatInfo {
             P::Yuv420P12Le => Self::yuv(12, 2, 2),
             P::Yuv422P12Le => Self::yuv(12, 2, 1),
             P::Yuv444P12Le => Self::yuv(12, 1, 1),
+            // 16-bit planar YUV — same three-plane LE-word layout as the
+            // 10/12-bit variants, but ALL 16 bits of every word are
+            // significant (full-scale is 65535, per the oxideav-core
+            // variant docs). `bit_depth` therefore reports 16.
+            P::Yuv420P16Le => Self::yuv(16, 2, 2),
+            P::Yuv422P16Le => Self::yuv(16, 2, 1),
+            P::Yuv444P16Le => Self::yuv(16, 1, 1),
             // Planar GBR / GBRA — 3-or-4 planes at 4:4:4 sampling, alpha
             // only on the `Gbrap*` variants. Each sample is stored as a
             // 16-bit LE word with the high bits zero; the bit-depth field
@@ -57,15 +64,11 @@ impl FormatInfo {
             P::Gbrap12Le => Self::gbr(12, true),
             P::Gbrp14Le => Self::gbr(14, false),
             P::Gbrap14Le => Self::gbr(14, true),
-            P::Yuva420P => Self {
-                bit_depth: 8,
-                planes: 4,
-                chroma_w_sub: 2,
-                chroma_h_sub: 2,
-                is_planar: true,
-                has_alpha: true,
-                is_palette: false,
-            },
+            // 8-bit planar YUV + a full-resolution alpha plane (plane 3
+            // is always `w × h` regardless of the chroma subsampling).
+            P::Yuva420P => Self::yuva(2, 2),
+            P::Yuva422P => Self::yuva(2, 1),
+            P::Yuva444P => Self::yuva(1, 1),
             P::Nv12 | P::Nv21 => Self {
                 bit_depth: 8,
                 planes: 2,
@@ -143,6 +146,21 @@ impl FormatInfo {
         }
     }
 
+    /// 8-bit planar YUV + alpha descriptor: 4 planes (Y, U, V, A) where
+    /// the alpha plane is always full resolution and only U/V follow the
+    /// chroma subsampling factors.
+    const fn yuva(wsub: u8, hsub: u8) -> Self {
+        Self {
+            bit_depth: 8,
+            planes: 4,
+            chroma_w_sub: wsub,
+            chroma_h_sub: hsub,
+            is_planar: true,
+            has_alpha: true,
+            is_palette: false,
+        }
+    }
+
     const fn packed(bits: u8, alpha: bool) -> Self {
         Self {
             bit_depth: bits,
@@ -186,9 +204,9 @@ impl FormatInfo {
     ///   the three colour planes are co-sited at 4:4:4 but the format
     ///   is RGB rather than YUV).
     /// - [`ChromaSubsampling::C444`] for 1×1 chroma siting on a YUV
-    ///   carrier (`Yuv444P*`, `YuvJ444P`).
+    ///   carrier (`Yuv444P*`, `YuvJ444P`, `Yuva444P`).
     /// - [`ChromaSubsampling::C422`] for 2×1 chroma siting
-    ///   (`Yuv422P*`, `YuvJ422P`, `Yuyv422`, `Uyvy422`).
+    ///   (`Yuv422P*`, `YuvJ422P`, `Yuva422P`, `Yuyv422`, `Uyvy422`).
     /// - [`ChromaSubsampling::C420`] for 2×2 chroma siting
     ///   (`Yuv420P*`, `YuvJ420P`, `Nv12`, `Nv21`, `Yuva420P`).
     /// - [`ChromaSubsampling::C411`] for 4×1 chroma siting
@@ -385,13 +403,14 @@ mod tests {
                 "expected C420 for {fmt:?}",
             );
         }
-        // 10/12-bit 4:2:0 mirror the 8-bit answer — bit depth is
+        // 10/12/16-bit 4:2:0 mirror the 8-bit answer — bit depth is
         // orthogonal to chroma siting.
-        for fmt in [P::Yuv420P10Le, P::Yuv420P12Le] {
+        for fmt in [P::Yuv420P10Le, P::Yuv420P12Le, P::Yuv420P16Le] {
             assert_eq!(FormatInfo::of(fmt).chroma_subsampling(), C::C420);
         }
 
-        // 4:2:2 — planar + packed carriers, all bit depths.
+        // 4:2:2 — planar + packed carriers, all bit depths, plus the
+        // alpha-bearing planar layout.
         for fmt in [
             P::Yuv422P,
             P::YuvJ422P,
@@ -399,6 +418,8 @@ mod tests {
             P::Uyvy422,
             P::Yuv422P10Le,
             P::Yuv422P12Le,
+            P::Yuv422P16Le,
+            P::Yuva422P,
         ] {
             assert_eq!(
                 FormatInfo::of(fmt).chroma_subsampling(),
@@ -415,6 +436,8 @@ mod tests {
             P::YuvJ444P,
             P::Yuv444P10Le,
             P::Yuv444P12Le,
+            P::Yuv444P16Le,
+            P::Yuva444P,
             P::Gbrp10Le,
             P::Gbrap10Le,
             P::Gbrp12Le,
@@ -521,6 +544,61 @@ mod tests {
                 }
                 C::Other => {}
             }
+        }
+    }
+
+    #[test]
+    fn yuv_16bit_mirrors_10bit_layout_at_full_width() {
+        // The 16-bit trio must mirror the 10-bit layouts in every
+        // dimension except bit_depth, which reports the full 16 (all 16
+        // bits of every LE word are significant — full-scale 65535).
+        let pairs = [
+            (P::Yuv420P10Le, P::Yuv420P16Le),
+            (P::Yuv422P10Le, P::Yuv422P16Le),
+            (P::Yuv444P10Le, P::Yuv444P16Le),
+        ];
+        for (a, b) in pairs {
+            let ia = FormatInfo::of(a);
+            let ib = FormatInfo::of(b);
+            assert_eq!(ia.planes, ib.planes);
+            assert_eq!(ia.chroma_w_sub, ib.chroma_w_sub);
+            assert_eq!(ia.chroma_h_sub, ib.chroma_h_sub);
+            assert_eq!(ia.is_planar, ib.is_planar);
+            assert_eq!(ia.has_alpha, ib.has_alpha);
+            assert_eq!(ib.bit_depth, 16);
+        }
+        // Core agreement: plane count / alpha / planar flags.
+        for fmt in [P::Yuv420P16Le, P::Yuv422P16Le, P::Yuv444P16Le] {
+            let info = FormatInfo::of(fmt);
+            assert_eq!(info.planes as usize, fmt.plane_count());
+            assert_eq!(info.has_alpha, fmt.has_alpha());
+            assert_eq!(info.is_planar, fmt.is_planar());
+        }
+    }
+
+    #[test]
+    fn yuva_family_shares_layout_with_alpha_less_siblings() {
+        // Each Yuva* variant mirrors its Yuv* sibling's chroma grid and
+        // adds exactly one (full-resolution, 8-bit) alpha plane.
+        let pairs = [
+            (P::Yuv420P, P::Yuva420P),
+            (P::Yuv422P, P::Yuva422P),
+            (P::Yuv444P, P::Yuva444P),
+        ];
+        for (yuv, yuva) in pairs {
+            let iy = FormatInfo::of(yuv);
+            let ia = FormatInfo::of(yuva);
+            assert_eq!(ia.bit_depth, 8);
+            assert_eq!(ia.planes, iy.planes + 1, "{yuva:?}");
+            assert_eq!(ia.chroma_w_sub, iy.chroma_w_sub);
+            assert_eq!(ia.chroma_h_sub, iy.chroma_h_sub);
+            assert!(ia.is_planar);
+            assert!(ia.has_alpha);
+            assert!(!ia.is_palette);
+            // Core agreement.
+            assert_eq!(ia.planes as usize, yuva.plane_count());
+            assert_eq!(ia.has_alpha, yuva.has_alpha());
+            assert_eq!(ia.is_planar, yuva.is_planar());
         }
     }
 

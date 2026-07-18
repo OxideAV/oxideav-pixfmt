@@ -240,10 +240,108 @@ fn pal8_decode_missing_palette_errors() {
         palette: Some(palette),
         color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
     };
-    let pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
+    let mut pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
     let pal8_info = FrameInfo::new(PixelFormat::Pal8, src_info.width, src_info.height);
-    // Now omit the palette — must fail.
+    // RGB → Pal8 attaches the colour table as the frame's palette
+    // side-channel, so decoding the frame it produced succeeds even
+    // without ConvertOptions.palette — the frame is self-describing.
     let bare = ConvertOptions::default();
+    assert!(
+        convert(&pal8, pal8_info, PixelFormat::Rgb24, &bare).is_ok(),
+        "side-channel palette must satisfy Pal8 → RGB"
+    );
+    // Strip the side-channel: with no attached palette AND no options
+    // palette, the conversion has no colour table at all — must fail.
+    assert!(
+        pal8.take_palette().is_some(),
+        "encode must attach a palette"
+    );
     let res = convert(&pal8, pal8_info, PixelFormat::Rgb24, &bare);
     assert!(res.is_err(), "palette omission must error");
+}
+
+#[test]
+fn pal8_side_channel_takes_precedence_and_roundtrips() {
+    use oxideav_core::{VideoFrame, VideoPlane};
+
+    // A 16 × 1 index ramp with an identity-gray attached palette:
+    // entry i = (i * 16, i * 16, i * 16).
+    let w = 16u32;
+    let indices: Vec<u8> = (0..16u8).collect();
+    let side: Vec<u8> = (0..16u8).flat_map(|i| [i * 16, i * 16, i * 16]).collect();
+    let frame = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: w as usize,
+            data: indices.clone(),
+        }],
+    }
+    .with_palette(side);
+    let info = FrameInfo::new(PixelFormat::Pal8, w, 1);
+
+    // Options carry a DIFFERENT (all-red) palette: the frame-attached
+    // table must win — the frame's own colours are ground truth.
+    let red = oxideav_pixfmt::Palette {
+        colors: (0..16).map(|_| [255, 0, 0, 255]).collect(),
+    };
+    let opts = ConvertOptions {
+        palette: Some(red),
+        ..Default::default()
+    };
+    let rgb = convert(&frame, info, PixelFormat::Rgb24, &opts).unwrap();
+    for (i, px) in rgb.planes[0].data.chunks_exact(3).enumerate() {
+        let want = (i as u8) * 16;
+        assert_eq!(px, [want, want, want], "index {i}");
+    }
+    // Rgba expansion synthesises opaque alpha from the 3-byte entries.
+    let rgba = convert(&frame, info, PixelFormat::Rgba, &ConvertOptions::default()).unwrap();
+    for (i, px) in rgba.planes[0].data.chunks_exact(4).enumerate() {
+        let want = (i as u8) * 16;
+        assert_eq!(px, [want, want, want, 255], "index {i}");
+    }
+}
+
+#[test]
+fn rgb_to_pal8_attaches_matching_side_channel() {
+    let (src, src_info) = gradient_rgb24(16, 8);
+    let palette = generate_palette(
+        &[(&src, src_info)],
+        &PaletteGenOptions {
+            strategy: PaletteStrategy::MedianCut,
+            max_colors: 32,
+            transparency: None,
+        },
+    )
+    .unwrap();
+    let opts = ConvertOptions {
+        dither: Dither::None,
+        palette: Some(palette.clone()),
+        color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
+    };
+    let pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
+    // The attached side-channel mirrors the quantisation palette's RGB
+    // columns entry-for-entry (alpha is not representable there).
+    let side = pal8.palette().expect("side-channel attached");
+    assert_eq!(side.len(), palette.colors.len() * 3);
+    for (entry, c) in side.chunks_exact(3).zip(palette.colors.iter()) {
+        assert_eq!(entry, &c[..3]);
+    }
+    // The index plane itself is unchanged by the attachment.
+    assert_eq!(pal8.image_planes().len(), 1);
+    assert_eq!(
+        pal8.image_planes()[0].data.len(),
+        (src_info.width * src_info.height) as usize
+    );
+    // Self-describing round-trip: decode with a default options bundle
+    // must equal decoding with the explicit palette.
+    let pal8_info = FrameInfo::new(PixelFormat::Pal8, src_info.width, src_info.height);
+    let via_side = convert(
+        &pal8,
+        pal8_info,
+        PixelFormat::Rgb24,
+        &ConvertOptions::default(),
+    )
+    .unwrap();
+    let via_opts = convert(&pal8, pal8_info, PixelFormat::Rgb24, &opts).unwrap();
+    assert_eq!(via_side.planes[0].data, via_opts.planes[0].data);
 }

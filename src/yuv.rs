@@ -748,6 +748,116 @@ pub fn chroma_411_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 }
 
 // ---------------------------------------------------------------------
+// 16-bit LE chroma resamplers — the same six subsample moves as the
+// 8-bit `chroma_*` helpers above, operating on planes of little-endian
+// 16-bit words (one word per chroma sample, all 16 bits significant —
+// the `Yuv*P16Le` storage). Rounding mirrors the 8-bit versions
+// exactly: pair averages round half up (`(a + b + 1) / 2`), the 2×2
+// box average rounds to nearest (`(s + 2) / 4`), and the expanders
+// duplicate samples (nearest). Buffers are byte slices holding
+// `samples * 2` bytes; the caller sizes them from the chroma grid.
+
+/// Read the little-endian 16-bit sample at index `i` of `buf`.
+#[inline]
+fn c16_get(buf: &[u8], i: usize) -> u32 {
+    (buf[i * 2] as u32) | ((buf[i * 2 + 1] as u32) << 8)
+}
+
+/// Write `v` as the little-endian 16-bit sample at index `i` of `buf`.
+#[inline]
+fn c16_put(buf: &mut [u8], i: usize, v: u32) {
+    buf[i * 2] = (v & 0xFF) as u8;
+    buf[i * 2 + 1] = (v >> 8) as u8;
+}
+
+/// 4:4:4 → 4:2:2 on 16-bit LE chroma (horizontal pair-average).
+/// Source plane is `w × h` samples; destination is `(w / 2) × h`.
+pub fn chroma16le_444_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let cw = w / 2;
+    for row in 0..h {
+        for cc in 0..cw {
+            let a = c16_get(src, row * w + cc * 2);
+            let b = c16_get(src, row * w + cc * 2 + 1);
+            c16_put(dst, row * cw + cc, (a + b).div_ceil(2));
+        }
+    }
+}
+
+/// 4:2:2 → 4:4:4 on 16-bit LE chroma (horizontal duplicate).
+/// Source plane is `(w / 2) × h` samples; destination is `w × h`.
+pub fn chroma16le_422_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let cw = w / 2;
+    for row in 0..h {
+        for cc in 0..cw {
+            let v = c16_get(src, row * cw + cc);
+            c16_put(dst, row * w + cc * 2, v);
+            c16_put(dst, row * w + cc * 2 + 1, v);
+        }
+    }
+}
+
+/// 4:4:4 → 4:2:0 on 16-bit LE chroma (2×2 box average, round to
+/// nearest). Source is `w × h`; destination is `(w / 2) × (h / 2)`.
+pub fn chroma16le_444_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let cw = w / 2;
+    let ch = h / 2;
+    for cr in 0..ch {
+        for cc in 0..cw {
+            let mut s = 0u32;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    s += c16_get(src, (cr * 2 + dy) * w + cc * 2 + dx);
+                }
+            }
+            c16_put(dst, cr * cw + cc, (s + 2) / 4);
+        }
+    }
+}
+
+/// 4:2:0 → 4:4:4 on 16-bit LE chroma (2×2 nearest broadcast).
+/// Source is `(w / 2) × (h / 2)`; destination is `w × h`.
+pub fn chroma16le_420_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let cw = w / 2;
+    for row in 0..h {
+        let cr = row / 2;
+        for cc in 0..cw {
+            let v = c16_get(src, cr * cw + cc);
+            c16_put(dst, row * w + cc * 2, v);
+            c16_put(dst, row * w + cc * 2 + 1, v);
+        }
+    }
+}
+
+/// 4:2:2 → 4:2:0 on 16-bit LE chroma (vertical pair-average; chroma
+/// width unchanged). Source is `(w / 2) × h`; destination is
+/// `(w / 2) × (h / 2)`.
+pub fn chroma16le_422_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let cw = w / 2;
+    let ch = h / 2;
+    for cr in 0..ch {
+        for cc in 0..cw {
+            let a = c16_get(src, (cr * 2) * cw + cc);
+            let b = c16_get(src, (cr * 2 + 1) * cw + cc);
+            c16_put(dst, cr * cw + cc, (a + b).div_ceil(2));
+        }
+    }
+}
+
+/// 4:2:0 → 4:2:2 on 16-bit LE chroma (vertical duplicate; chroma width
+/// unchanged). Source is `(w / 2) × (h / 2)`; destination is
+/// `(w / 2) × h`.
+pub fn chroma16le_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let cw = w / 2;
+    for row in 0..h {
+        let cr = row / 2;
+        for cc in 0..cw {
+            let v = c16_get(src, cr * cw + cc);
+            c16_put(dst, row * cw + cc, v);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // NV12 / NV21 ↔ Yuv420P.
 
 pub fn nv12_uv_split(uv: &[u8], up: &mut [u8], vp: &mut [u8], cw: usize, ch: usize) {
@@ -1021,12 +1131,24 @@ pub fn full_to_limited_chroma(plane: &mut [u8]) {
 }
 
 // ---------------------------------------------------------------------
-// Bit-depth conversion between high-precision planar YUV (10/12-bit,
+// Bit-depth conversion between high-precision planar YUV (10/12/16-bit,
 // each sample a 16-bit little-endian word carrying the value in its low
-// `bits` bits) and the 8-bit planar siblings. A single plane is treated
-// as a flat array of samples; the caller (convert.rs) sizes each plane
-// from the format's subsampling geometry, so the same primitive serves
-// Y, U and V on every 4:2:0 / 4:2:2 / 4:4:4 layout.
+// `bits` bits — for `bits == 16` the whole word is significant and
+// full-scale is 65535) and the 8-bit planar siblings. A single plane is
+// treated as a flat array of samples; the caller (convert.rs) sizes each
+// plane from the format's subsampling geometry, so the same primitive
+// serves Y, U and V on every 4:2:0 / 4:2:2 / 4:4:4 layout.
+//
+// Precision policy (shared by every depth move in this crate): widening
+// places the value in the top bits and replicates its MSBs into the
+// freed low bits, so zero maps to zero, peak maps to peak, and the
+// result tracks the ideal `v * (2^dst - 1) / (2^src - 1)` rescale to
+// within one output code; narrowing truncates the low bits — the exact
+// inverse of the replication fill, making narrow-of-widen lossless. No
+// dithering is applied at any depth change: the mapping stays
+// deterministic, monotonic and bit-exact under round-trips, which the
+// codec pipelines this crate feeds (lossless intermediates, reference
+// comparisons) value over decorrelated quantisation noise.
 
 /// Down-convert one plane of `count` samples from a `bits`-significant
 /// 16-bit LE source to 8-bit. Each sample is read as a little-endian
