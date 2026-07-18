@@ -43,9 +43,9 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`                                    |
 | Planar GBR              | `Gbrp10/12/14Le` ↔ `Rgb48Le` / `Rgb24`, `Gbrap10/12/14Le` ↔ `Rgba64Le` / `Rgba` |
 | YUV planar ↔ RGB        | `Yuv420P` / `Yuv422P` / `Yuv444P` ↔ `Rgb24` / `Rgba`, plus the full-range `YuvJ*` families direct ↔ RGB |
-| Bit-depth ladder        | planar YUV 8 ↔ 10 ↔ 12 bit (same layout, exact round-trips); `Gray8` ↔ `Gray10Le` ↔ `Gray12Le` ↔ `Gray16Le` |
+| Bit-depth ladder        | planar YUV 8 ↔ 10 ↔ 12 ↔ 16 bit (same layout, exact round-trips; `Yuv*P16Le` is full-scale 65535); `Gray8` ↔ `Gray10Le` ↔ `Gray12Le` ↔ `Gray16Le` |
 | Chroma subsampling      | `4:4:4` ↔ `4:2:2` ↔ `4:2:0` (SIMD-accelerated up- and down-sample)          |
-| Direct planar ↔ planar  | `Yuv420P` / `Yuv422P` / `Yuv444P` all-to-all + same on `YuvJ*` (no RGB hop) |
+| Direct planar ↔ planar  | `Yuv420P` / `Yuv422P` / `Yuv444P` all-to-all + same on `YuvJ*` and on the 16-bit `Yuv*P16Le` trio (no RGB hop) |
 | Semi-planar             | `NV12` / `NV21` ↔ `Yuv420P` / `Rgb24` / `Rgba`                              |
 | Packed 4:2:2            | `Yuyv422` / `Uyvy422` ↔ `Yuv422P` / `Rgb24` / `Rgba` + Yuyv ↔ Uyvy swap     |
 | Full ↔ limited range    | `YuvJ420P` / `YuvJ422P` / `YuvJ444P` ↔ `Yuv*`                               |
@@ -53,20 +53,20 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Gray ↔ RGB              | `Gray8` → all six packed RGB orders; `Rgb24` / `Rgba` → `Gray8` (luminance) |
 | Grayscale / mono        | `Gray8` / `Gray16Le`, `MonoBlack` / `MonoWhite` ↔ `Gray8`                   |
 | Grey + alpha            | `Ya8` ↔ `Gray8` / `Rgb24` / `Rgba` (luma broadcast, alpha carried through)  |
-| YUV + alpha             | `Yuva420P` ↔ `Yuv420P` / `Rgb24` / `Rgba` (alpha plane carried bit-exact)   |
-| Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither |
+| YUV + alpha             | `Yuva420P` / `Yuva422P` / `Yuva444P` ↔ siblings / each other / `Rgb24` / `Rgba` (alpha plane carried bit-exact) |
+| Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither; frames carry their table in-band via the `VideoFrame` palette side-channel |
 | Colour matrices         | BT.601 / BT.709 / BT.2020, limited (studio) / full (JPEG) range             |
 | Dither strategies       | None, 8×8 ordered Bayer, Floyd–Steinberg                                    |
 | Alpha / compositing     | Porter-Duff "over" (premul + straight), premul/unpremul, alpha-mask blit    |
 | Format introspection    | `FormatInfo::of(fmt)` → planes / bit-depth / `ChromaSubsampling` typed view |
-| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot — 1135 of the 1640 ordered format pairs convert; `supports()` / `supports_direct()` report availability |
+| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier) — 1379 of the 2070 ordered format pairs convert; `supports()` / `supports_direct()` report availability |
 
 ## Roadmap
 
 The pixel-format universe used by general-purpose video tooling runs
-to roughly two hundred entries; this crate currently covers the 41
+to roughly two hundred entries; this crate currently covers the 46
 `PixelFormat` variants oxideav-core defines — every variant now has at
-least one conversion route, and 1135 of the 1640 ordered pairs resolve
+least one conversion route, and 1379 of the 2070 ordered pairs resolve
 directly or through one staged pivot. The
 remaining gap is mostly long-tail or hardware-specific. The
 formats below are *planned* — they're not implemented yet, but they
@@ -83,14 +83,14 @@ variants and `convert()` paths will land over time.
 | GBR planar               | deep-RGB and 8-bit `Rgb24`/`Rgba` hops shipped (see table above); a native 8-bit `Gbrp` variant remains a core-enum addition |
 | Legacy planar YUV        | `Yuv410P`, `Yuv440P` (+ `YuvJ*` mirrors) — DV, MJPEG, SD                   |
 | 4:2:2 / 4:4:4 NV         | `Nv16`, `Nv24` — common on Android / embedded                              |
-| Alpha-bearing YUV        | `YuvA422P`, `YuvA444P` (8-bit `Yuva420P` shipped — see table above)        |
+| Alpha-bearing YUV        | shipped — `Yuva420P` / `Yuva422P` / `Yuva444P` (see table above)           |
 
 **Tier 2 — mid-term:**
 
 | family                | additions                                                                     |
 | --------------------- | ----------------------------------------------------------------------------- |
 | Big-endian mirrors    | `Rgb48Be`, `Rgba64Be`, `Gray16Be`, `Yuv420P10Be`, … of every `*Le` we ship    |
-| Higher-precision YUV  | `Yuv420P9/14/16Le`, same for `422` / `444` (8 ↔ 10 ↔ 12 ladder shipped — see table above; high-bit ↔ RGB currently stages through the 8-bit sibling, a full-precision direct path remains) |
+| Higher-precision YUV  | `Yuv420P9/14Le`, same for `422` / `444` (the 8 ↔ 10 ↔ 12 ↔ 16 ladder and 16-bit chroma resample shipped — see table above; high-bit ↔ RGB currently stages through the 8-bit sibling, a full-precision direct path remains) |
 | 10/12/16-bit semi-pl. | `P010Le`, `P012Le`, `P016Le` — HEVC Main10, Dolby Vision                      |
 | DCI / cinema          | `Xyz12Le`                                                                     |
 | 8-bit low-bpp packed  | `Rgb8` (3-3-2), `Rgb4`, `Bgr4Byte`                                            |
@@ -278,7 +278,9 @@ colour matrix — e.g. `Yuyv422 → Yuv420P` keeps luma byte-exact), RGB
 pivots otherwise with alpha-capable before alpha-less (`Yuva420P →
 Bgra` carries alpha bit-exact) and deep before 8-bit when either
 endpoint is deeper than 8 bits (`Gbrp10Le → Gbrp12Le` round-trips
-exactly through `Rgb48Le`). Staged routes are exactly as correct as
+exactly through `Rgb48Le`; deep YUV → YUV moves pivot through the
+16-bit `Yuv*P16Le` tier so `Yuv420P16Le → Yuv422P10Le` keeps the top
+10 bits of every sample). Staged routes are exactly as correct as
 their two legs but can round twice; `supports(src, dst)` and
 `supports_direct(src, dst)` let callers tell the two cases apart.
 
@@ -433,7 +435,7 @@ A [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) harness lives
 under [`fuzz/`](fuzz/) and runs daily in CI. The `convert_geometry`
 target does not feed arbitrary bytes at a parser — there is none. It
 instead *constructs* a structurally-valid source frame from the fuzzer's
-input (a source pixel format — all 41 enum variants are buildable,
+input (a source pixel format — all 46 enum variants are buildable,
 small / odd dimensions, extra stride padding) and drives every
 `(src, dst)` conversion, direct and staged alike, asserting
 that none panics, integer-overflows, reads out of bounds, or aborts. A

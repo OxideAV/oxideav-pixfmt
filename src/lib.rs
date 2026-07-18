@@ -43,7 +43,8 @@
 //!   Gray8 full-range luminance projection.
 //! - Yuv420P/422P/444P all-to-all direct (chroma resample only — luma
 //!   copied byte-for-byte, no RGB hop), plus the same six pairs on the
-//!   full-range `YuvJ*` family.
+//!   full-range `YuvJ*` family AND on the 16-bit `Yuv*P16Le` family
+//!   (full 16-bit precision chroma resample, identical rounding).
 //! - Yuv411P ↔ Yuv420P/422P/444P (chroma resample only — luma copied),
 //!   plus Yuv411P ↔ Rgb24/Rgba under BT.601/709/2020. The 4:1:1 layout
 //!   has chroma horizontally subsampled by 4 (NTSC DV-25 / JPEG
@@ -63,13 +64,24 @@
 //! - Rgb48Le ↔ Rgb24, Rgba64Le ↔ Rgba (bit-shift).
 //! - Planar GBR(A) at 10/12/14 bits ↔ both the deep packed formats
 //!   (Rgb48Le / Rgba64Le) and the 8-bit packed ones (Rgb24 / Rgba).
-//! - The full bit-depth ladder: planar YUV 8 ↔ 10 ↔ 12 bit (same
+//! - The full bit-depth ladder: planar YUV 8 ↔ 10 ↔ 12 ↔ 16 bit (same
 //!   subsampling; MSB-replicated widen / truncating narrow, exact
-//!   round-trips), and Gray8 ↔ Gray10Le ↔ Gray12Le ↔ Gray16Le.
+//!   round-trips), and Gray8 ↔ Gray10Le ↔ Gray12Le ↔ Gray16Le. On the
+//!   `Yuv*P16Le` trio every bit of the LE word is significant
+//!   (full-scale 65535), so the 8 → 16 widen is the exact ×257 mapping.
 //! - Gray16Le ↔ Gray8.
 //! - MonoBlack/MonoWhite ↔ Gray8.
-//! - Pal8 → Rgb24/Rgba requires `opts.palette`.
-//! - Rgb24/Rgba → Pal8 requires `opts.palette`; dithering per `opts.dither`.
+//! - Yuva420P/422P/444P (planar YUV + full-resolution alpha plane):
+//!   promote/drop vs the alpha-less siblings, alpha-preserving chroma
+//!   resample inside the family (luma + alpha bit-exact), Rgb24/Rgba
+//!   interop (alpha carried / dropped / synthesised opaque), and Gray8
+//!   luma extraction.
+//! - Pal8 → Rgb24/Rgba uses the frame's attached palette side-channel
+//!   ([`oxideav_core::VideoFrame::palette`]) when present, falling back
+//!   to `opts.palette`; with neither, `Error::Invalid`.
+//! - Rgb24/Rgba → Pal8 requires `opts.palette`; dithering per
+//!   `opts.dither`. The output frame carries the table it was quantised
+//!   against as its palette side-channel, so it is self-describing.
 //! - Cmyk ↔ Rgb24/Rgba — uncalibrated device-CMYK approximation (see
 //!   [`cmyk`] for the formula and the caveats around ICC profiles and
 //!   Adobe-inverted JPEGs).
@@ -77,10 +89,34 @@
 //! Pairs without a direct entry are resolved automatically through a
 //! **single-pivot staged conversion** (one intermediate format, chosen
 //! in a fidelity-aware order: YUV pivots for YUV → YUV moves so no
-//! colour matrix enters the path, alpha-capable and deep RGB pivots
+//! colour matrix enters the path — with the 16-bit `Yuv*P16Le` tier
+//! preferred when either endpoint is deeper than 8 bits, so chroma is
+//! resampled at full precision — and alpha-capable / deep RGB pivots
 //! preferred where the endpoints call for them). [`supports`] /
 //! [`supports_direct`] report per-pair availability; anything neither
 //! direct nor stageable returns `Error::Unsupported`.
+//!
+//! # Bit-depth precision policy
+//!
+//! Every depth change in the crate (8 ↔ 10 ↔ 12 ↔ 16 on planar YUV,
+//! the deep grayscale ladder, and the GBR(A) widen/narrow steps) uses
+//! one deterministic rule and **no dithering**:
+//!
+//! - **Widening** places the value in the top bits and replicates its
+//!   MSBs into the freed low bits. Zero maps to zero, full-scale maps
+//!   to full-scale, the mapping is strictly monotonic, and it tracks
+//!   the ideal `v · (2^dst − 1) / (2^src − 1)` rescale within one
+//!   output code (exactly, for 8 → 16, where the ratio is the integer
+//!   257).
+//! - **Narrowing** truncates the low bits (keeps the top ones) — the
+//!   exact inverse of the replication fill, so widen → narrow and
+//!   narrow-of-widen round-trips are lossless.
+//!
+//! Dithered quantisation is deliberately excluded from depth moves:
+//! codec pipelines feeding this crate (lossless intermediates,
+//! reference comparisons, bit-exact round-trip tests) need
+//! deterministic, invertible mappings. `Dither` applies only to the
+//! palette quantisation path (`Rgb24`/`Rgba` → `Pal8`).
 
 pub mod alpha;
 pub mod cmyk;
