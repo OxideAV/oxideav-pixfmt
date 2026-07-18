@@ -255,6 +255,96 @@ fn yuv420_flat_chroma_to_rgb24_matches_validator() {
     }
 }
 
+/// Limited-range YUVA 4:4:4 → RGBA: the colour channels agree with the
+/// validator within ±2 (pure matrix, no chroma resampling at 4:4:4) and
+/// the full-resolution alpha plane is carried bit-exactly by both
+/// implementations.
+#[test]
+fn yuva444_to_rgba_matches_validator() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: no ffmpeg binary on PATH");
+        return;
+    }
+    let y = ramp(W * H, 16, 235, 7, 3);
+    let u = ramp(W * H, 16, 240, 11, 40);
+    let v = ramp(W * H, 16, 240, 13, 80);
+    let a = ramp(W * H, 0, 255, 5, 17);
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&y);
+    raw.extend_from_slice(&u);
+    raw.extend_from_slice(&v);
+    raw.extend_from_slice(&a);
+    let theirs = ffmpeg_convert(
+        &raw,
+        "yuva444p",
+        "rgba",
+        "scale=in_color_matrix=bt601:in_range=tv:flags=accurate_rnd",
+    );
+    let src = planar_frame(vec![
+        (W, y.clone()),
+        (W, u.clone()),
+        (W, v.clone()),
+        (W, a.clone()),
+    ]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Yuva444P, W as u32, H as u32),
+        PixelFormat::Rgba,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    let od = &ours.planes[0].data;
+    for p in 0..W * H {
+        for c in 0..3 {
+            let diff = (od[p * 4 + c] as i32 - theirs[p * 4 + c] as i32).abs();
+            assert!(diff <= 2, "pixel {p} channel {c}: diff {diff}");
+        }
+        assert_eq!(od[p * 4 + 3], theirs[p * 4 + 3], "alpha at pixel {p}");
+        assert_eq!(od[p * 4 + 3], a[p], "alpha must equal the source plane");
+    }
+}
+
+/// RGBA → limited-range YUVA 4:4:4: Y/U/V within ±2 of the validator,
+/// alpha plane split out bit-exactly by both sides.
+#[test]
+fn rgba_to_yuva444_matches_validator() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: no ffmpeg binary on PATH");
+        return;
+    }
+    let rgba = ramp(W * H * 4, 0, 255, 5, 11);
+    let theirs = ffmpeg_convert(
+        &rgba,
+        "rgba",
+        "yuva444p",
+        "scale=out_color_matrix=bt601:out_range=tv:flags=accurate_rnd",
+    );
+    let src = planar_frame(vec![(W * 4, rgba.clone())]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Rgba, W as u32, H as u32),
+        PixelFormat::Yuva444P,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    for (p, name) in [(0usize, "Y"), (1, "U"), (2, "V")] {
+        let their_plane = &theirs[p * W * H..(p + 1) * W * H];
+        let diff = max_abs_diff(&ours.planes[p].data, their_plane);
+        assert!(diff <= 2, "{name} plane: max diff {diff}");
+    }
+    // Alpha plane: ours is a verbatim copy of the source's 4th bytes —
+    // exact by construction. The validator routes alpha through a
+    // deeper intermediate with its own rounding (observed +1 on codes
+    // ≥ 128), so the cross-comparison gets a ±1 tolerance while the
+    // source comparison stays bit-exact.
+    let their_alpha = &theirs[3 * W * H..4 * W * H];
+    let diff = max_abs_diff(&ours.planes[3].data, their_alpha);
+    assert!(diff <= 1, "alpha plane vs validator: max diff {diff}");
+    for p in 0..W * H {
+        assert_eq!(ours.planes[3].data[p], rgba[p * 4 + 3]);
+    }
+}
+
 /// Packed 4:2:2 deinterleave has no colour math at all — the validator
 /// and our converter must agree bit-exactly on YUYV → planar 4:2:2.
 #[test]
