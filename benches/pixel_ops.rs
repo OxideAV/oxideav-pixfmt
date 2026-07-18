@@ -237,6 +237,50 @@ fn bench_chroma_resample(c: &mut Criterion) {
     g.finish();
 }
 
+// -------------------------------------------------------------------------
+// 16-bit LE chroma resample — the `Yuv*P16Le` family's direct moves.
+// Buffers hold LE words (two bytes per chroma sample); throughput is
+// output-buffer bytes, directly comparable to the 8-bit group above.
+
+fn bench_chroma_resample16(c: &mut Criterion) {
+    let (w, h) = (1920, 1080);
+    // 4:4:4 chroma plane: w × h words; 4:2:2: (w/2) × h; 4:2:0:
+    // (w/2) × (h/2). synth() sizes are in bytes (words × 2).
+    let src444 = synth(w * 2, h, 1);
+    let src422 = synth(w, h, 1);
+    let src420 = synth(w, h / 2, 1);
+    let mut dst_422 = vec![0u8; w * h];
+    let mut dst_420 = vec![0u8; w * (h / 2)];
+    let mut dst_444 = vec![0u8; w * 2 * h];
+
+    let mut g = c.benchmark_group("chroma_resample16");
+    g.throughput(Throughput::Bytes((w * h) as u64));
+    g.bench_function("444_to_422_1920x1080", |b| {
+        b.iter(|| yuv::chroma16le_444_to_422(&src444, &mut dst_422, w, h));
+    });
+    g.throughput(Throughput::Bytes((w * (h / 2)) as u64));
+    g.bench_function("444_to_420_1920x1080", |b| {
+        b.iter(|| yuv::chroma16le_444_to_420(&src444, &mut dst_420, w, h));
+    });
+    g.throughput(Throughput::Bytes((w * (h / 2)) as u64));
+    g.bench_function("422_to_420_1920x1080", |b| {
+        b.iter(|| yuv::chroma16le_422_to_420(&src422, &mut dst_420, w, h));
+    });
+    g.throughput(Throughput::Bytes((w * 2 * h) as u64));
+    g.bench_function("422_to_444_1920x1080", |b| {
+        b.iter(|| yuv::chroma16le_422_to_444(&src422, &mut dst_444, w, h));
+    });
+    g.throughput(Throughput::Bytes((w * h) as u64));
+    g.bench_function("420_to_422_1920x1080", |b| {
+        b.iter(|| yuv::chroma16le_420_to_422(&src420, &mut dst_422, w, h));
+    });
+    g.throughput(Throughput::Bytes((w * 2 * h) as u64));
+    g.bench_function("420_to_444_1920x1080", |b| {
+        b.iter(|| yuv::chroma16le_420_to_444(&src420, &mut dst_444, w, h));
+    });
+    g.finish();
+}
+
 criterion_group!(
     name = pixel_ops;
     config = Criterion::default().sample_size(30);
@@ -246,6 +290,7 @@ criterion_group!(
         bench_gray,
         bench_deep_rgb,
         bench_nv12,
-        bench_chroma_resample
+        bench_chroma_resample,
+        bench_chroma_resample16
 );
 criterion_main!(pixel_ops);
