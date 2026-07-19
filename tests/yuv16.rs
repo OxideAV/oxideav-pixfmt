@@ -421,10 +421,12 @@ fn convert_cross_depth_16_roundtrips() {
 }
 
 /// Cross-depth + cross-subsampling pairs involving the 16-bit trio all
-/// resolve (directly or via one pivot), and the deep staged routes keep
-/// full input precision on luma: `Yuv420P16Le → Yuv422P10Le` pivots
-/// through `Yuv422P16Le`, so every output luma word is exactly the top
-/// 10 bits of the input word (an 8-bit pivot would zero the low 2).
+/// resolve — since the computed planar-family tier landed they are
+/// *direct* (single-step, no pivot) — and keep full input precision on
+/// luma: `Yuv420P16Le → Yuv422P10Le` resamples chroma at the deeper
+/// 16-bit width and only then narrows, so every output luma word is
+/// exactly the top 10 bits of the input word (an 8-bit intermediate
+/// would zero the low 2).
 #[test]
 fn staged_deep_pivot_preserves_luma_precision() {
     let opts = ConvertOptions::default();
@@ -433,7 +435,7 @@ fn staged_deep_pivot_preserves_luma_precision() {
     let info = FrameInfo::new(PixelFormat::Yuv420P16Le, w as u32, h as u32);
 
     assert!(supports(PixelFormat::Yuv420P16Le, PixelFormat::Yuv422P10Le));
-    assert!(!supports_direct(
+    assert!(supports_direct(
         PixelFormat::Yuv420P16Le,
         PixelFormat::Yuv422P10Le
     ));
@@ -449,6 +451,83 @@ fn staged_deep_pivot_preserves_luma_precision() {
     for i in 0..w * h {
         let want = (rd16(&src.planes[0].data, i) >> 8) as u8;
         assert_eq!(out8.planes[0].data[i], want, "luma sample {i}");
+    }
+}
+
+/// The cross-depth + cross-subsampling pairs that had no route before
+/// the computed planar-family tier (e.g. `Yuv420P10Le → Yuv422P12Le`,
+/// or the same-depth 10/12-bit cross-subsampling moves) now resolve as
+/// direct single-step conversions, with the reference depth/resample
+/// model: luma is the straight widen (10 → 12 MSB replication), chroma
+/// is widened first and then resampled at the deeper width (4:2:0 →
+/// 4:2:2 is a vertical duplicate, so each output chroma word is exactly
+/// the widened source word).
+#[test]
+fn cross_depth_cross_subsampling_closure() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (16usize, 8usize);
+    // Every 10/12-bit cross-subsampling pair (same or different depth)
+    // must now be direct.
+    let deep = [
+        PixelFormat::Yuv420P10Le,
+        PixelFormat::Yuv422P10Le,
+        PixelFormat::Yuv444P10Le,
+        PixelFormat::Yuv420P12Le,
+        PixelFormat::Yuv422P12Le,
+        PixelFormat::Yuv444P12Le,
+    ];
+    for &a in &deep {
+        for &b in &deep {
+            assert!(supports_direct(a, b), "{a:?} → {b:?} must be direct");
+        }
+    }
+
+    // Reference model for the pair the r417 round left unresolved.
+    let src = synth16(PixelFormat::Yuv420P10Le, w, h, 2, 2);
+    // Mask samples to 10 significant bits.
+    let src = VideoFrame {
+        pts: None,
+        planes: src
+            .planes
+            .iter()
+            .map(|p| VideoPlane {
+                stride: p.stride,
+                data: p
+                    .data
+                    .chunks_exact(2)
+                    .flat_map(|c| (u16::from_le_bytes([c[0], c[1]]) & 0x3FF).to_le_bytes())
+                    .collect(),
+            })
+            .collect(),
+    };
+    let out = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Yuv420P10Le, w as u32, h as u32),
+        PixelFormat::Yuv422P12Le,
+        &opts,
+    )
+    .expect("420P10 → 422P12");
+    let widen12 = |v: u16| -> u16 { (v << 2) | (v >> 8) };
+    for i in 0..w * h {
+        assert_eq!(
+            rd16(&out.planes[0].data, i),
+            widen12(rd16(&src.planes[0].data, i)),
+            "luma {i}"
+        );
+    }
+    // Chroma: widen to 12 bits, then 4:2:0 → 4:2:2 vertical duplicate.
+    let cw = w / 2;
+    for row in 0..h {
+        let cr = row / 2;
+        for cc in 0..cw {
+            for (p, name) in [(1usize, "U"), (2usize, "V")] {
+                assert_eq!(
+                    rd16(&out.planes[p].data, row * cw + cc),
+                    widen12(rd16(&src.planes[p].data, cr * cw + cc)),
+                    "{name} ({row},{cc})"
+                );
+            }
+        }
     }
 }
 

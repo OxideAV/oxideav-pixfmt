@@ -9,10 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(convert)* computed planar-family dispatch tier: every ordered pair
+  inside the uniform planar YUV(A) family ({Yuv,Yuva} × {420,422,444} ×
+  {8,10,12,16}) is now a direct single-step conversion — depth move,
+  chroma resample (performed at the deeper of the two depths) and alpha
+  carry/drop/opaque-synthesis fused in one op — plus direct
+  `Rgb24`/`Rgba`/`Gray8` interop for every family member. Closes the
+  cross-depth + cross-subsampling gap (e.g. `Yuv420P10Le → Yuv422P12Le`)
+  left by the previous round; ordered-pair coverage 1379/2070 →
+  2480/2652 (714 direct), and every pair involving the six new deep Yuva
+  formats resolves
 - *(format_info)* descriptors for the six deep Yuva formats added in
   oxideav-core 0.1.31 (`Yuva422P10Le`/`12Le`/`16Le`,
   `Yuva444P10Le`/`12Le`/`16Le`): 4-plane planar, full-resolution alpha,
   16-bit LE words with 10/12/16 significant bits
+
+### Changed
+
+- `Gray8` → deep planar YUV now synthesises chroma at the exact neutral
+  mid-code `1 << (bits - 1)` (512 at 10 bits, 32768 at 16) instead of
+  the widened 8-bit 128 the old staged route produced, and 8-bit ↔ deep
+  cross-subsampling moves resample chroma at the deeper width before
+  narrowing (previously quantised through an 8-bit pivot first)
 
 ## [0.1.6](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.5...v0.1.6) - 2026-07-09
 

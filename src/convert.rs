@@ -109,7 +109,7 @@ pub fn convert(
     if src_info.format == dst_format {
         return Ok(src.clone());
     }
-    if let Some(op) = lookup(src_info.format, dst_format) {
+    if let Some(op) = lookup_any(src_info.format, dst_format) {
         return op.apply(src, src_info, opts);
     }
     if let Some((first, pivot, second)) = lookup_staged(src_info.format, dst_format) {
@@ -126,14 +126,15 @@ pub fn convert(
 /// True when `convert()` can carry out `src → dst` — directly or via a
 /// single staged pivot. `src == dst` is always supported (passthrough).
 pub fn supports(src: PixelFormat, dst: PixelFormat) -> bool {
-    src == dst || lookup(src, dst).is_some() || lookup_staged(src, dst).is_some()
+    src == dst || lookup_any(src, dst).is_some() || lookup_staged(src, dst).is_some()
 }
 
-/// True when a *direct* (single-table-entry) conversion exists for
-/// `src → dst`, i.e. `convert()` will not stage through an intermediate
-/// format. `src == dst` counts as direct.
+/// True when a *direct* (single-step) conversion exists for `src → dst`
+/// — either an explicit coverage-table entry or a computed planar-family
+/// op — i.e. `convert()` will not stage through an intermediate format.
+/// `src == dst` counts as direct.
 pub fn supports_direct(src: PixelFormat, dst: PixelFormat) -> bool {
-    src == dst || lookup(src, dst).is_some()
+    src == dst || lookup_any(src, dst).is_some()
 }
 
 /// Pivot preference for staged conversions. YUV carriage pivots keep
@@ -206,17 +207,151 @@ fn is_yuv_carriage(f: PixelFormat) -> bool {
             | P::Yuva420P
             | P::Yuva422P
             | P::Yuva444P
+            | P::Yuva422P10Le
+            | P::Yuva422P12Le
+            | P::Yuva422P16Le
+            | P::Yuva444P10Le
+            | P::Yuva444P12Le
+            | P::Yuva444P16Le
             | P::Yuyv422
             | P::Uyvy422
     )
 }
 
+/// Layout descriptor for the *uniform planar YUV(A) family*: 3 planes
+/// (Y, U, V) — or 4 with a full-resolution alpha plane — at 4:2:0 /
+/// 4:2:2 / 4:4:4 chroma siting, every sample either one byte
+/// (`bits == 8`) or a 16-bit LE word carrying `bits` significant low
+/// bits (10 / 12 / 16), limited-range carriage.
+///
+/// Formats matching this shape are handled by a *computed* dispatch
+/// tier (see [`lookup_computed`]) that generates the conversion
+/// parametrically instead of enumerating hundreds of table rows: any
+/// ordered pair inside the family (depth move + chroma resample +
+/// alpha drop / carry / synthesis fused in one step), plus
+/// `Rgb24` / `Rgba` / `Gray8` interop. Full-range `YuvJ*`, 4:1:1,
+/// semi-planar NV and packed 4:2:2 layouts are deliberately *not* part
+/// of the family — their extra semantics (range rescale, 4× siting,
+/// interleaving) stay on the explicit table rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlanarYuv {
+    /// Chroma horizontal subsample factor (1 or 2).
+    wsub: usize,
+    /// Chroma vertical subsample factor (1 or 2).
+    hsub: usize,
+    /// Significant bits per sample: 8 (byte storage) or 10 / 12 / 16
+    /// (16-bit LE word storage).
+    bits: u32,
+    /// Whether a full-resolution alpha plane trails as plane 3, stored
+    /// at the same depth as the colour planes.
+    alpha: bool,
+}
+
+impl PlanarYuv {
+    /// Bytes per sample word (1 for 8-bit storage, 2 for LE-16).
+    const fn sample_bytes(&self) -> usize {
+        if self.bits > 8 {
+            2
+        } else {
+            1
+        }
+    }
+}
+
+/// The [`PlanarYuv`] descriptor for `f`, or `None` when `f` is not a
+/// member of the uniform planar family.
+fn planar_yuv_desc(f: PixelFormat) -> Option<PlanarYuv> {
+    use PixelFormat as P;
+    let (wsub, hsub, bits, alpha) = match f {
+        P::Yuv420P => (2, 2, 8, false),
+        P::Yuv422P => (2, 1, 8, false),
+        P::Yuv444P => (1, 1, 8, false),
+        P::Yuv420P10Le => (2, 2, 10, false),
+        P::Yuv422P10Le => (2, 1, 10, false),
+        P::Yuv444P10Le => (1, 1, 10, false),
+        P::Yuv420P12Le => (2, 2, 12, false),
+        P::Yuv422P12Le => (2, 1, 12, false),
+        P::Yuv444P12Le => (1, 1, 12, false),
+        P::Yuv420P16Le => (2, 2, 16, false),
+        P::Yuv422P16Le => (2, 1, 16, false),
+        P::Yuv444P16Le => (1, 1, 16, false),
+        P::Yuva420P => (2, 2, 8, true),
+        P::Yuva422P => (2, 1, 8, true),
+        P::Yuva444P => (1, 1, 8, true),
+        P::Yuva422P10Le => (2, 1, 10, true),
+        P::Yuva422P12Le => (2, 1, 12, true),
+        P::Yuva422P16Le => (2, 1, 16, true),
+        P::Yuva444P10Le => (1, 1, 10, true),
+        P::Yuva444P12Le => (1, 1, 12, true),
+        P::Yuva444P16Le => (1, 1, 16, true),
+        _ => return None,
+    };
+    Some(PlanarYuv {
+        wsub,
+        hsub,
+        bits,
+        alpha,
+    })
+}
+
+/// Computed dispatch tier: conversions derived from the [`PlanarYuv`]
+/// family descriptors rather than enumerated as table rows. Consulted
+/// only when [`lookup`] has no explicit entry, so every pair the table
+/// names keeps its exact historical behaviour. A computed op is still a
+/// *direct* (single-step) conversion for [`supports_direct`] purposes.
+fn lookup_computed(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
+    use PixelFormat as P;
+    match (planar_yuv_desc(src), planar_yuv_desc(dst)) {
+        // Anywhere-to-anywhere inside the planar family: depth move,
+        // chroma resample and alpha handling fused into one step (the
+        // chroma pair is resampled at the deeper of the two depths).
+        (Some(s), Some(d)) => Some(ConvertOp::PlanarFamily { src: s, dst: d }),
+        // Family member → packed RGB / Gray8.
+        (Some(s), None) => match dst {
+            P::Rgba => Some(ConvertOp::PlanarFamilyToRgb {
+                src: s,
+                alpha: true,
+            }),
+            P::Rgb24 => Some(ConvertOp::PlanarFamilyToRgb {
+                src: s,
+                alpha: false,
+            }),
+            P::Gray8 => Some(ConvertOp::PlanarFamilyToGray { src: s }),
+            _ => None,
+        },
+        // Packed RGB / Gray8 → family member.
+        (None, Some(d)) => match src {
+            P::Rgba => Some(ConvertOp::RgbToPlanarFamily {
+                dst: d,
+                alpha_in: true,
+            }),
+            P::Rgb24 => Some(ConvertOp::RgbToPlanarFamily {
+                dst: d,
+                alpha_in: false,
+            }),
+            P::Gray8 => Some(ConvertOp::GrayToPlanarFamily { dst: d }),
+            _ => None,
+        },
+        (None, None) => None,
+    }
+}
+
+/// Single-step lookup across both dispatch tiers: the explicit coverage
+/// table first (exact historical behaviour), then the computed planar
+/// family tier.
+fn lookup_any(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
+    lookup(src, dst)
+        .copied()
+        .or_else(|| lookup_computed(src, dst))
+}
+
 /// Find a single-pivot staged route `src → pivot → dst` where both legs
-/// are direct table entries. Returns the two ops and the pivot format.
+/// are direct (table or computed) ops. Returns the two ops and the
+/// pivot format.
 fn lookup_staged(
     src: PixelFormat,
     dst: PixelFormat,
-) -> Option<(&'static ConvertOp, PixelFormat, &'static ConvertOp)> {
+) -> Option<(ConvertOp, PixelFormat, ConvertOp)> {
     let yuv_first = is_yuv_carriage(src) && is_yuv_carriage(dst);
     let deep = crate::format_info::FormatInfo::of(src).bit_depth > 8
         || crate::format_info::FormatInfo::of(dst).bit_depth > 8;
@@ -231,7 +366,7 @@ fn lookup_staged(
         if pivot == src || pivot == dst {
             continue;
         }
-        if let (Some(first), Some(second)) = (lookup(src, pivot), lookup(pivot, dst)) {
+        if let (Some(first), Some(second)) = (lookup_any(src, pivot), lookup_any(pivot, dst)) {
             return Some((first, pivot, second));
         }
     }
@@ -964,6 +1099,48 @@ enum ConvertOp {
         src_bits: u32,
         dst_bits: u32,
     },
+    /// Computed tier (see [`lookup_computed`]): any ordered pair inside
+    /// the uniform planar YUV(A) family. Fuses the depth move, the
+    /// chroma resample (performed at the deeper of the two depths) and
+    /// the alpha handling (carry with depth move / drop / synthesise
+    /// opaque full-scale) into one step. Luma — and a carried alpha
+    /// plane — never touch the resampler, so they survive bit-exact
+    /// whenever the depths match.
+    PlanarFamily {
+        src: PlanarYuv,
+        dst: PlanarYuv,
+    },
+    /// Computed tier: planar family member → packed `Rgb24` / `Rgba`.
+    /// Deep planes are reduced to 8 bits (truncation, per the crate
+    /// depth policy) before the proven 8-bit scalar/SIMD decode; alpha
+    /// is carried (reduced to 8 bits), synthesised opaque, or dropped.
+    PlanarFamilyToRgb {
+        src: PlanarYuv,
+        alpha: bool,
+    },
+    /// Computed tier: packed `Rgb24` / `Rgba` → planar family member.
+    /// Encodes through the proven 8-bit path, then widens every plane
+    /// (MSB replication) to the destination depth; alpha is split out
+    /// of an `Rgba` source or synthesised opaque full-scale.
+    RgbToPlanarFamily {
+        dst: PlanarYuv,
+        alpha_in: bool,
+    },
+    /// Computed tier: planar family member → `Gray8` luma extraction
+    /// (deep luma truncated to 8 bits, then limited → full range
+    /// rescale; chroma and alpha dropped).
+    PlanarFamilyToGray {
+        src: PlanarYuv,
+    },
+    /// Computed tier: `Gray8` → planar family member. The gray plane
+    /// becomes luma (full → limited range, then widened to the family
+    /// depth); chroma is synthesised at the exact neutral mid-code
+    /// `1 << (bits - 1)` (512 at 10 bits, 32768 at 16 — not the
+    /// widened 8-bit 128, which lands a couple of codes off neutral);
+    /// alpha (when present) is synthesised opaque full-scale.
+    GrayToPlanarFamily {
+        dst: PlanarYuv,
+    },
 }
 
 impl ConvertOp {
@@ -1106,6 +1283,15 @@ impl ConvertOp {
             Self::GrayDepthRescale { src_bits, dst_bits } => {
                 do_gray_depth_rescale(src, src_info, src_bits, dst_bits)
             }
+            Self::PlanarFamily { src: s, dst: d } => planar_family(src, src_info, s, d),
+            Self::PlanarFamilyToRgb { src: s, alpha } => {
+                planar_family_to_rgb(src, src_info, matrix, s, alpha)
+            }
+            Self::RgbToPlanarFamily { dst: d, alpha_in } => {
+                rgb_to_planar_family(src, src_info, matrix, d, alpha_in)
+            }
+            Self::PlanarFamilyToGray { src: s } => planar_family_to_gray(src, src_info, s),
+            Self::GrayToPlanarFamily { dst: d } => gray_to_planar_family(src, src_info, d),
         }
     }
 }
@@ -2184,7 +2370,6 @@ fn chroma_resample16(
     let src_cw = w / src_wsub;
     let src_ch = h / src_hsub;
     let dst_cw = w / dst_wsub;
-    let dst_ch = h / dst_hsub;
 
     // All planes are 16-bit LE: two bytes per sample.
     let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
@@ -2200,40 +2385,8 @@ fn chroma_resample16(
         src_cw * 2,
         src_ch,
     );
-    let mut u_dst = vec![0u8; dst_cw * dst_ch * 2];
-    let mut v_dst = vec![0u8; dst_cw * dst_ch * 2];
-
-    match (src_wsub, src_hsub, dst_wsub, dst_hsub) {
-        (1, 1, 2, 1) => {
-            yuv::chroma16le_444_to_422(&u_src, &mut u_dst, w, h);
-            yuv::chroma16le_444_to_422(&v_src, &mut v_dst, w, h);
-        }
-        (2, 1, 1, 1) => {
-            yuv::chroma16le_422_to_444(&u_src, &mut u_dst, w, h);
-            yuv::chroma16le_422_to_444(&v_src, &mut v_dst, w, h);
-        }
-        (1, 1, 2, 2) => {
-            yuv::chroma16le_444_to_420(&u_src, &mut u_dst, w, h);
-            yuv::chroma16le_444_to_420(&v_src, &mut v_dst, w, h);
-        }
-        (2, 2, 1, 1) => {
-            yuv::chroma16le_420_to_444(&u_src, &mut u_dst, w, h);
-            yuv::chroma16le_420_to_444(&v_src, &mut v_dst, w, h);
-        }
-        (2, 1, 2, 2) => {
-            yuv::chroma16le_422_to_420(&u_src, &mut u_dst, w, h);
-            yuv::chroma16le_422_to_420(&v_src, &mut v_dst, w, h);
-        }
-        (2, 2, 2, 1) => {
-            yuv::chroma16le_420_to_422(&u_src, &mut u_dst, w, h);
-            yuv::chroma16le_420_to_422(&v_src, &mut v_dst, w, h);
-        }
-        _ => {
-            return Err(Error::unsupported(
-                "pixfmt: unregistered 16-bit planar YUV chroma resample pair",
-            ))
-        }
-    }
+    let (u_dst, v_dst) =
+        resample_chroma16_pair(&u_src, &v_src, w, h, src_wsub, src_hsub, dst_wsub, dst_hsub)?;
 
     Ok(make_frame(
         src,
@@ -2252,6 +2405,466 @@ fn chroma_resample16(
             },
         ],
     ))
+}
+
+/// Resample a tightly-packed 16-bit LE chroma pair between two
+/// subsampling layouts over (4:2:0, 4:2:2, 4:4:4). The `chroma16le_*`
+/// primitives operate on whole LE words, so the same code path serves
+/// every LSB-anchored significant width (10 / 12 / 16 bits). Shared by
+/// [`chroma_resample16`] and the computed [`planar_family`] op.
+#[allow(clippy::too_many_arguments)]
+fn resample_chroma16_pair(
+    u_src: &[u8],
+    v_src: &[u8],
+    w: usize,
+    h: usize,
+    src_wsub: usize,
+    src_hsub: usize,
+    dst_wsub: usize,
+    dst_hsub: usize,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let dst_cw = w / dst_wsub;
+    let dst_ch = h / dst_hsub;
+    let mut u_dst = vec![0u8; dst_cw * dst_ch * 2];
+    let mut v_dst = vec![0u8; dst_cw * dst_ch * 2];
+
+    match (src_wsub, src_hsub, dst_wsub, dst_hsub) {
+        (1, 1, 2, 1) => {
+            yuv::chroma16le_444_to_422(u_src, &mut u_dst, w, h);
+            yuv::chroma16le_444_to_422(v_src, &mut v_dst, w, h);
+        }
+        (2, 1, 1, 1) => {
+            yuv::chroma16le_422_to_444(u_src, &mut u_dst, w, h);
+            yuv::chroma16le_422_to_444(v_src, &mut v_dst, w, h);
+        }
+        (1, 1, 2, 2) => {
+            yuv::chroma16le_444_to_420(u_src, &mut u_dst, w, h);
+            yuv::chroma16le_444_to_420(v_src, &mut v_dst, w, h);
+        }
+        (2, 2, 1, 1) => {
+            yuv::chroma16le_420_to_444(u_src, &mut u_dst, w, h);
+            yuv::chroma16le_420_to_444(v_src, &mut v_dst, w, h);
+        }
+        (2, 1, 2, 2) => {
+            yuv::chroma16le_422_to_420(u_src, &mut u_dst, w, h);
+            yuv::chroma16le_422_to_420(v_src, &mut v_dst, w, h);
+        }
+        (2, 2, 2, 1) => {
+            yuv::chroma16le_420_to_422(u_src, &mut u_dst, w, h);
+            yuv::chroma16le_420_to_422(v_src, &mut v_dst, w, h);
+        }
+        _ => {
+            return Err(Error::unsupported(
+                "pixfmt: unregistered 16-bit planar YUV chroma resample pair",
+            ))
+        }
+    }
+
+    Ok((u_dst, v_dst))
+}
+
+// -------------------------------------------------------------------------
+// Computed planar-family ops (see `PlanarYuv` / `lookup_computed`).
+
+/// Move one gathered (tight) plane of `count` samples between two
+/// planar-family storage depths: 8-bit planes are a byte per sample,
+/// deeper planes 16-bit LE words with `bits` significant low bits.
+/// Equal depths degrade to a copy (masked for the deep widths); the
+/// widen / narrow legs follow the crate-wide MSB-replicate / truncate
+/// policy via the shared `yuv::depth_*` primitives.
+fn plane_to_depth(src: &[u8], count: usize, src_bits: u32, dst_bits: u32) -> Vec<u8> {
+    match (src_bits > 8, dst_bits > 8) {
+        (false, false) => src[..count].to_vec(),
+        (false, true) => {
+            let mut out = vec![0u8; count * 2];
+            yuv::depth_up_8_to_le16_plane(src, &mut out, count, dst_bits);
+            out
+        }
+        (true, false) => {
+            let mut out = vec![0u8; count];
+            yuv::depth_down_le16_plane(src, &mut out, count, src_bits);
+            out
+        }
+        (true, true) => {
+            let mut out = vec![0u8; count * 2];
+            yuv::depth_rescale_le16_plane(src, &mut out, count, src_bits, dst_bits);
+            out
+        }
+    }
+}
+
+/// Resample a tightly-packed chroma pair at the storage depth implied
+/// by `bits`: byte planes route through the 8-bit primitives, LE-word
+/// planes through the 16-bit ones (identical rounding conventions).
+#[allow(clippy::too_many_arguments)]
+fn resample_pair_at_depth(
+    u_src: &[u8],
+    v_src: &[u8],
+    w: usize,
+    h: usize,
+    src_wsub: usize,
+    src_hsub: usize,
+    dst_wsub: usize,
+    dst_hsub: usize,
+    bits: u32,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    if bits > 8 {
+        resample_chroma16_pair(u_src, v_src, w, h, src_wsub, src_hsub, dst_wsub, dst_hsub)
+    } else {
+        resample_chroma_pair(u_src, v_src, w, h, src_wsub, src_hsub, dst_wsub, dst_hsub)
+    }
+}
+
+/// A plane of `count` opaque (full-scale) alpha samples at `bits`
+/// depth: `0xFF` bytes for 8-bit storage, LE words of `(1 << bits) - 1`
+/// for the deep widths.
+fn opaque_plane(count: usize, bits: u32) -> Vec<u8> {
+    if bits > 8 {
+        let full = ((1u32 << bits) - 1) as u16;
+        let [lo, hi] = full.to_le_bytes();
+        let mut out = vec![0u8; count * 2];
+        for word in out.chunks_exact_mut(2) {
+            word[0] = lo;
+            word[1] = hi;
+        }
+        out
+    } else {
+        vec![0xFF; count]
+    }
+}
+
+/// A plane of `count` neutral chroma samples at `bits` depth: the exact
+/// mid-code `1 << (bits - 1)` (128 / 512 / 2048 / 32768).
+fn neutral_chroma_plane(count: usize, bits: u32) -> Vec<u8> {
+    if bits > 8 {
+        let mid = (1u32 << (bits - 1)) as u16;
+        let [lo, hi] = mid.to_le_bytes();
+        let mut out = vec![0u8; count * 2];
+        for word in out.chunks_exact_mut(2) {
+            word[0] = lo;
+            word[1] = hi;
+        }
+        out
+    } else {
+        vec![128; count]
+    }
+}
+
+/// Computed `PlanarFamily` op: any ordered pair inside the uniform
+/// planar YUV(A) family. Luma (and a carried alpha plane) go through a
+/// straight depth move; the chroma pair is resampled at the **deeper**
+/// of the two depths — widen-then-resample when the destination is
+/// deeper, resample-then-narrow otherwise — so no precision is thrown
+/// away before an average is taken. Alpha is carried (depth-moved),
+/// dropped, or synthesised opaque full-scale per the two descriptors.
+fn planar_family(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    s: PlanarYuv,
+    d: PlanarYuv,
+) -> Result<VideoFrame> {
+    let need = if s.alpha { 4 } else { 3 };
+    if src.planes.len() < need {
+        return Err(Error::invalid(
+            "pixfmt: planar YUV(A) source is missing planes",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let wsub_max = s.wsub.max(d.wsub);
+    let hsub_max = s.hsub.max(d.hsub);
+    if w % wsub_max != 0 || h % hsub_max != 0 {
+        return Err(Error::invalid(
+            "pixfmt: planar YUV(A) conversion needs dimensions divisible by the wider subsampling",
+        ));
+    }
+    let scw = w / s.wsub;
+    let sch = h / s.hsub;
+    let dcw = w / d.wsub;
+    let dch = h / d.hsub;
+    let sb_src = s.sample_bytes();
+    let sb_dst = d.sample_bytes();
+
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb_src, h);
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, scw * sb_src, sch);
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, scw * sb_src, sch);
+
+    // Luma: straight depth move, never resampled.
+    let yp = plane_to_depth(&y_src, w * h, s.bits, d.bits);
+
+    // Chroma: resample at the deeper of the two depths.
+    let (up, vp) = if (s.wsub, s.hsub) == (d.wsub, d.hsub) {
+        (
+            plane_to_depth(&u_src, scw * sch, s.bits, d.bits),
+            plane_to_depth(&v_src, scw * sch, s.bits, d.bits),
+        )
+    } else if d.bits >= s.bits {
+        let u_mid = plane_to_depth(&u_src, scw * sch, s.bits, d.bits);
+        let v_mid = plane_to_depth(&v_src, scw * sch, s.bits, d.bits);
+        resample_pair_at_depth(&u_mid, &v_mid, w, h, s.wsub, s.hsub, d.wsub, d.hsub, d.bits)?
+    } else {
+        let (u_mid, v_mid) =
+            resample_pair_at_depth(&u_src, &v_src, w, h, s.wsub, s.hsub, d.wsub, d.hsub, s.bits)?;
+        (
+            plane_to_depth(&u_mid, dcw * dch, s.bits, d.bits),
+            plane_to_depth(&v_mid, dcw * dch, s.bits, d.bits),
+        )
+    };
+
+    let mut planes = vec![
+        VideoPlane {
+            stride: w * sb_dst,
+            data: yp,
+        },
+        VideoPlane {
+            stride: dcw * sb_dst,
+            data: up,
+        },
+        VideoPlane {
+            stride: dcw * sb_dst,
+            data: vp,
+        },
+    ];
+    if d.alpha {
+        let ap = if s.alpha {
+            let a_src = gather_tight(&src.planes[3].data, src.planes[3].stride, w * sb_src, h);
+            plane_to_depth(&a_src, w * h, s.bits, d.bits)
+        } else {
+            opaque_plane(w * h, d.bits)
+        };
+        planes.push(VideoPlane {
+            stride: w * sb_dst,
+            data: ap,
+        });
+    }
+    Ok(make_frame(src, planes))
+}
+
+/// Computed `PlanarFamilyToRgb` op: family member → `Rgb24` / `Rgba`.
+/// Deep planes are truncated to 8 bits (crate depth policy) and decoded
+/// through the proven 8-bit scalar/SIMD matrix for the source's chroma
+/// grid; alpha is interleaved (reduced to 8 bits), synthesised opaque,
+/// or dropped.
+fn planar_family_to_rgb(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    s: PlanarYuv,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    let need = if s.alpha { 4 } else { 3 };
+    if src.planes.len() < need {
+        return Err(Error::invalid(
+            "pixfmt: planar YUV(A) source is missing planes",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % s.wsub != 0 || h % s.hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: YUV → RGB requires dimensions divisible by chroma subsampling",
+        ));
+    }
+    let cw = w / s.wsub;
+    let ch = h / s.hsub;
+    let sb = s.sample_bytes();
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * sb, ch);
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * sb, ch);
+    let yp = plane_to_depth(&y_src, w * h, s.bits, 8);
+    let up = plane_to_depth(&u_src, cw * ch, s.bits, 8);
+    let vp = plane_to_depth(&v_src, cw * ch, s.bits, 8);
+
+    let mut rgb_buf = vec![0u8; w * h * 3];
+    match (s.wsub, s.hsub) {
+        (1, 1) => yuv::yuv444_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
+        (2, 1) => yuv::yuv422_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
+        (2, 2) => yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
+        _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
+    }
+
+    if !alpha {
+        return Ok(make_frame(
+            src,
+            vec![VideoPlane {
+                stride: w * 3,
+                data: rgb_buf,
+            }],
+        ));
+    }
+    let ap = if s.alpha {
+        let a_src = gather_tight(&src.planes[3].data, src.planes[3].stride, w * sb, h);
+        plane_to_depth(&a_src, w * h, s.bits, 8)
+    } else {
+        vec![255u8; w * h]
+    };
+    let mut rgba = vec![0u8; w * h * 4];
+    for i in 0..w * h {
+        rgba[i * 4] = rgb_buf[i * 3];
+        rgba[i * 4 + 1] = rgb_buf[i * 3 + 1];
+        rgba[i * 4 + 2] = rgb_buf[i * 3 + 2];
+        rgba[i * 4 + 3] = ap[i];
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 4,
+            data: rgba,
+        }],
+    ))
+}
+
+/// Computed `RgbToPlanarFamily` op: `Rgb24` / `Rgba` → family member.
+/// Encodes through the proven 8-bit path for the destination's chroma
+/// grid, then widens every plane to the family depth (MSB replication —
+/// identical bytes to the historical encode-then-`DepthUpYuv` staged
+/// route). Alpha is split out of an `Rgba` source (widened) or
+/// synthesised opaque full-scale.
+fn rgb_to_planar_family(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    d: PlanarYuv,
+    alpha_in: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % d.wsub != 0 || h % d.hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: RGB → YUV requires dimensions divisible by subsampling",
+        ));
+    }
+    let cw = w / d.wsub;
+    let ch = h / d.hsub;
+    let sb = d.sample_bytes();
+
+    let in_plane = &src.planes[0];
+    let mut rgb24: Vec<u8> = Vec::with_capacity(w * h * 3);
+    let mut alpha8: Vec<u8> = Vec::new();
+    if alpha_in {
+        alpha8 = vec![0xFF; w * h];
+        for row in 0..h {
+            let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
+            for i in 0..w {
+                rgb24.push(sr[i * 4]);
+                rgb24.push(sr[i * 4 + 1]);
+                rgb24.push(sr[i * 4 + 2]);
+                alpha8[row * w + i] = sr[i * 4 + 3];
+            }
+        }
+    } else {
+        rgb24 = gather_tight(&in_plane.data, in_plane.stride, w * 3, h);
+    }
+
+    let mut yp8 = vec![0u8; w * h];
+    let mut up8 = vec![0u8; cw * ch];
+    let mut vp8 = vec![0u8; cw * ch];
+    match (d.wsub, d.hsub) {
+        (1, 1) => yuv::rgb24_to_yuv444(&rgb24, &mut yp8, &mut up8, &mut vp8, w, h, matrix),
+        (2, 1) => yuv::rgb24_to_yuv422(&rgb24, &mut yp8, &mut up8, &mut vp8, w, h, matrix),
+        (2, 2) => yuv::rgb24_to_yuv420(&rgb24, &mut yp8, &mut up8, &mut vp8, w, h, matrix),
+        _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
+    }
+
+    let mut planes = vec![
+        VideoPlane {
+            stride: w * sb,
+            data: plane_to_depth(&yp8, w * h, 8, d.bits),
+        },
+        VideoPlane {
+            stride: cw * sb,
+            data: plane_to_depth(&up8, cw * ch, 8, d.bits),
+        },
+        VideoPlane {
+            stride: cw * sb,
+            data: plane_to_depth(&vp8, cw * ch, 8, d.bits),
+        },
+    ];
+    if d.alpha {
+        let ap = if alpha_in {
+            plane_to_depth(&alpha8, w * h, 8, d.bits)
+        } else {
+            opaque_plane(w * h, d.bits)
+        };
+        planes.push(VideoPlane {
+            stride: w * sb,
+            data: ap,
+        });
+    }
+    Ok(make_frame(src, planes))
+}
+
+/// Computed `PlanarFamilyToGray` op: luma extraction from any family
+/// member. Deep luma is truncated to 8 bits, then rescaled from the
+/// family's limited range to full-range `Gray8`; chroma and alpha are
+/// dropped. Only the luma plane is touched, so odd dimensions are fine
+/// even on subsampled sources (mirrors the 8-bit `YuvLumaToGray` rows).
+fn planar_family_to_gray(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    s: PlanarYuv,
+) -> Result<VideoFrame> {
+    if src.planes.is_empty() {
+        return Err(Error::invalid("pixfmt: YUV source needs a luma plane"));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let sb = s.sample_bytes();
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
+    let mut yp = plane_to_depth(&y_src, w * h, s.bits, 8);
+    yuv::limited_to_full_luma(&mut yp);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w,
+            data: yp,
+        }],
+    ))
+}
+
+/// Computed `GrayToPlanarFamily` op: `Gray8` → any family member. The
+/// gray plane becomes luma (full → limited range at 8 bits, then
+/// widened); chroma is synthesised at the exact neutral mid-code
+/// `1 << (bits - 1)`; alpha (when the destination carries it) is
+/// synthesised opaque full-scale.
+fn gray_to_planar_family(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    d: PlanarYuv,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % d.wsub != 0 || h % d.hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: Gray8 → subsampled YUV requires dimensions divisible by the subsampling",
+        ));
+    }
+    let cw = w / d.wsub;
+    let ch = h / d.hsub;
+    let sb = d.sample_bytes();
+    let mut luma8 = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    yuv::full_to_limited_luma(&mut luma8);
+    let mut planes = vec![
+        VideoPlane {
+            stride: w * sb,
+            data: plane_to_depth(&luma8, w * h, 8, d.bits),
+        },
+        VideoPlane {
+            stride: cw * sb,
+            data: neutral_chroma_plane(cw * ch, d.bits),
+        },
+        VideoPlane {
+            stride: cw * sb,
+            data: neutral_chroma_plane(cw * ch, d.bits),
+        },
+    ];
+    if d.alpha {
+        planes.push(VideoPlane {
+            stride: w * sb,
+            data: opaque_plane(w * h, d.bits),
+        });
+    }
+    Ok(make_frame(src, planes))
 }
 
 /// High-precision planar YUV (16-bit LE, `bits` significant) → 8-bit
