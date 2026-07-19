@@ -53,20 +53,22 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Gray ↔ RGB              | `Gray8` → all six packed RGB orders; `Rgb24` / `Rgba` → `Gray8` (luminance) |
 | Grayscale / mono        | `Gray8` / `Gray16Le`, `MonoBlack` / `MonoWhite` ↔ `Gray8`                   |
 | Grey + alpha            | `Ya8` ↔ `Gray8` / `Rgb24` / `Rgba` (luma broadcast, alpha carried through)  |
-| YUV + alpha             | `Yuva420P` / `Yuva422P` / `Yuva444P` ↔ siblings / each other / `Rgb24` / `Rgba` (alpha plane carried bit-exact) |
+| YUV + alpha             | the full 9-member Yuva family — `Yuva420P` / `Yuva422P` / `Yuva444P` plus the deep `Yuva422P` / `Yuva444P` 10/12/16-bit members — ↔ siblings / each other / `Rgb24` / `Rgba` / `Gray8`; every ordered pair inside the family is direct; alpha bit-exact at same depth, MSB-widened / truncated across depths |
+| Significant bits        | source frames may carry the per-plane significant-bits side-channel (e.g. 12-bit luma + 10-bit chroma on a `P16Le` surface): `convert()` treats marked planes at their recorded depth, rejects invalid records with `Error::Invalid`, and never propagates a stale record |
 | Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither; frames carry their table in-band via the `VideoFrame` palette side-channel |
 | Colour matrices         | BT.601 / BT.709 / BT.2020, limited (studio) / full (JPEG) range             |
 | Dither strategies       | None, 8×8 ordered Bayer, Floyd–Steinberg                                    |
 | Alpha / compositing     | Porter-Duff "over" (premul + straight), premul/unpremul, alpha-mask blit    |
 | Format introspection    | `FormatInfo::of(fmt)` → planes / bit-depth / `ChromaSubsampling` typed view |
-| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier) — 1379 of the 2070 ordered format pairs convert; `supports()` / `supports_direct()` report availability |
+| Planar-family engine    | a computed dispatch tier makes *every* ordered pair inside the uniform planar YUV(A) family ({Yuv,Yuva} × {420,422,444} × {8,10,12,16}) a direct single-step conversion: depth move + chroma resample (at the deeper of the two depths) + alpha handling fused in one op |
+| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier) — 2480 of the 2652 ordered format pairs convert; `supports()` / `supports_direct()` report availability |
 
 ## Roadmap
 
 The pixel-format universe used by general-purpose video tooling runs
-to roughly two hundred entries; this crate currently covers the 46
+to roughly two hundred entries; this crate currently covers the 52
 `PixelFormat` variants oxideav-core defines — every variant now has at
-least one conversion route, and 1379 of the 2070 ordered pairs resolve
+least one conversion route, and 2480 of the 2652 ordered pairs resolve
 directly or through one staged pivot. The
 remaining gap is mostly long-tail or hardware-specific. The
 formats below are *planned* — they're not implemented yet, but they
@@ -83,14 +85,14 @@ variants and `convert()` paths will land over time.
 | GBR planar               | deep-RGB and 8-bit `Rgb24`/`Rgba` hops shipped (see table above); a native 8-bit `Gbrp` variant remains a core-enum addition |
 | Legacy planar YUV        | `Yuv410P`, `Yuv440P` (+ `YuvJ*` mirrors) — DV, MJPEG, SD                   |
 | 4:2:2 / 4:4:4 NV         | `Nv16`, `Nv24` — common on Android / embedded                              |
-| Alpha-bearing YUV        | shipped — `Yuva420P` / `Yuva422P` / `Yuva444P` (see table above)           |
+| Alpha-bearing YUV        | shipped — the 8-bit trio **and** the deep 10/12/16-bit `Yuva422P*` / `Yuva444P*` members (see table above); a deep `Yuva420P10/12/16Le` remains a core-enum addition |
 
 **Tier 2 — mid-term:**
 
 | family                | additions                                                                     |
 | --------------------- | ----------------------------------------------------------------------------- |
 | Big-endian mirrors    | `Rgb48Be`, `Rgba64Be`, `Gray16Be`, `Yuv420P10Be`, … of every `*Le` we ship    |
-| Higher-precision YUV  | `Yuv420P9/14Le`, same for `422` / `444` (the 8 ↔ 10 ↔ 12 ↔ 16 ladder and 16-bit chroma resample shipped — see table above; high-bit ↔ RGB currently stages through the 8-bit sibling, a full-precision direct path remains) |
+| Higher-precision YUV  | `Yuv420P9/14Le`, same for `422` / `444` (the 8 ↔ 10 ↔ 12 ↔ 16 ladder, 16-bit chroma resample, and direct high-bit ↔ RGB / Gray8 interop shipped — see table above; the RGB matrix itself still runs at 8 bits, a full-precision deep matrix remains) |
 | 10/12/16-bit semi-pl. | `P010Le`, `P012Le`, `P016Le` — HEVC Main10, Dolby Vision                      |
 | DCI / cinema          | `Xyz12Le`                                                                     |
 | 8-bit low-bpp packed  | `Rgb8` (3-3-2), `Rgb4`, `Bgr4Byte`                                            |
@@ -435,12 +437,16 @@ A [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) harness lives
 under [`fuzz/`](fuzz/) and runs daily in CI. The `convert_geometry`
 target does not feed arbitrary bytes at a parser — there is none. It
 instead *constructs* a structurally-valid source frame from the fuzzer's
-input (a source pixel format — all 46 enum variants are buildable,
-small / odd dimensions, extra stride padding) and drives every
+input (a source pixel format — all 52 enum variants are buildable,
+small / odd dimensions, extra stride padding, and optional hostile
+side-channel records: fuzz-length palettes on `Pal8` and
+significant-bits records with zero bits, above-nominal values, and
+wrong lengths) and drives every
 `(src, dst)` conversion, direct and staged alike, asserting
 that none panics, integer-overflows, reads out of bounds, or aborts. A
 converter may legitimately return `Err` for geometry it cannot represent
-(e.g. an odd width on a 4:2:0 layout); only a crash is a finding. This
+(e.g. an odd width on a 4:2:0 layout) or for an invalid record; only a
+crash is a finding. This
 target's first run caught an out-of-bounds chroma read on subsampled
 YUV → RGB at odd dimensions.
 
