@@ -28,8 +28,16 @@
 //!     plane's tight row stride.
 //!   * byte 4 — destination-format rotation: instead of every dst, start
 //!     the dst sweep at this offset so successive inputs spread coverage.
-//!   * remaining bytes — used to fill the plane data (cycled), so the
-//!     per-pixel maths sees varied samples rather than a constant.
+//!   * remaining bytes (`fill`) — used to fill the plane data (cycled),
+//!     so the per-pixel maths sees varied samples rather than a
+//!     constant. The head of `fill` doubles as side-channel control:
+//!     `fill[0] & 1` attaches a fuzz-length palette record to Pal8
+//!     sources, and `fill[0] & 2` attaches a **hostile significant-bits
+//!     record** (`fill[1] % 9` bytes taken verbatim from `fill[2..]` —
+//!     including 0, values above the surface depth, and lengths that
+//!     don't match the plane count). Per the documented `convert()`
+//!     policy such records must be honoured, ignored, or rejected with
+//!     `Err` — never panic.
 
 use libfuzzer_sys::fuzz_target;
 
@@ -87,6 +95,12 @@ const FORMATS: &[PixelFormat] = &[
     PixelFormat::Yuv444P16Le,
     PixelFormat::Yuva422P,
     PixelFormat::Yuva444P,
+    PixelFormat::Yuva422P10Le,
+    PixelFormat::Yuva422P12Le,
+    PixelFormat::Yuva444P10Le,
+    PixelFormat::Yuva444P12Le,
+    PixelFormat::Yuva422P16Le,
+    PixelFormat::Yuva444P16Le,
 ];
 
 /// Map a raw fuzzer byte to a small dimension, biased toward the values
@@ -250,6 +264,20 @@ fuzz_target!(|data: &[u8]| {
     if fmt == PixelFormat::Pal8 && !fill.is_empty() && fill[0] & 1 == 1 {
         let len = (fill.len().min(768) / 3) * 3;
         src.set_palette(fill[..len].to_vec());
+    }
+
+    // Optionally attach a hostile per-plane significant-bits record
+    // (second side-channel kind, stride == usize::MAX sentinel): raw
+    // fuzz bytes of fuzz-chosen length, deliberately including zero
+    // bits, values above the surface's nominal depth, and lengths
+    // shorter / longer than the image-plane count. The documented
+    // convert() policy is honour-or-reject (Error::Invalid) — and on
+    // Pal8 the record is ignored and composes with the palette record.
+    // Any panic is a finding.
+    if fill.len() >= 2 && fill[0] & 2 != 0 {
+        let rec_len = (fill[1] % 9) as usize;
+        let rec: Vec<u8> = fill[2..].iter().copied().take(rec_len).collect();
+        src.set_significant_bits(rec);
     }
 
     // A palette is needed for Pal8 → RGB and RGB → Pal8; supply a full

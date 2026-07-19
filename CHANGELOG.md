@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   oxideav-core 0.1.31 (`Yuva422P10Le`/`12Le`/`16Le`,
   `Yuva444P10Le`/`12Le`/`16Le`): 4-plane planar, full-resolution alpha,
   16-bit LE words with 10/12/16 significant bits
+- *(fuzz)* convert_geometry now builds the six deep Yuva formats as
+  sources and attaches hostile significant-bits records (zero bits,
+  above-nominal values, wrong lengths, composed with the Pal8 palette
+  record) — the no-panic contract covers the whole side-channel policy
 
 ### Changed
 
