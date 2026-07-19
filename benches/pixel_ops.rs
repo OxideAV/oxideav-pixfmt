@@ -281,6 +281,79 @@ fn bench_chroma_resample16(c: &mut Criterion) {
     g.finish();
 }
 
+/// End-to-end `convert()` timings for the computed planar-family ops —
+/// the fused depth-move + chroma-resample + alpha-handling tier that
+/// serves every in-family pair without a table row. Frame-level (not
+/// per-plane) so allocation and plane gathering are included, matching
+/// what a codec pipeline pays.
+fn bench_planar_family(c: &mut Criterion) {
+    use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
+    use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+
+    let (w, h) = (1920usize, 1080usize);
+    let opts = ConvertOptions::default();
+
+    // Deep Yuva 4:4:4 16-bit source: 4 full-res LE16 planes
+    // (`synth(row_bytes, rows, 1)` — content is irrelevant, the deep
+    // primitives mask to the significant width on read).
+    let deep_yuva = VideoFrame {
+        pts: None,
+        planes: (0..4)
+            .map(|_| VideoPlane {
+                stride: w * 2,
+                data: synth(w * 2, h, 1),
+            })
+            .collect(),
+    };
+    let deep_info = FrameInfo::new(PixelFormat::Yuva444P16Le, w as u32, h as u32);
+
+    // Deep non-alpha 4:2:0 10-bit source: chroma rows are (w / 2)
+    // LE16 words = w bytes.
+    let deep_420 = VideoFrame {
+        pts: None,
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: synth(w * 2, h, 1),
+            },
+            VideoPlane {
+                stride: w,
+                data: synth(w, h / 2, 1),
+            },
+            VideoPlane {
+                stride: w,
+                data: synth(w, h / 2, 1),
+            },
+        ],
+    };
+    let deep_420_info = FrameInfo::new(PixelFormat::Yuv420P10Le, w as u32, h as u32);
+
+    let mut g = c.benchmark_group("planar_family_convert");
+    g.sample_size(20);
+    // Resample-then-narrow + alpha depth move (16-bit 4:4:4 → 10-bit
+    // 4:2:2 with alpha).
+    g.throughput(Throughput::Bytes((w * h * 2 * 4) as u64));
+    g.bench_function("yuva444p16_to_yuva422p10_1920x1080", |b| {
+        b.iter(|| {
+            convert(&deep_yuva, deep_info, PixelFormat::Yuva422P10Le, &opts).expect("convert")
+        });
+    });
+    // Widen-then-resample (10-bit 4:2:0 → 12-bit 4:2:2), the r417
+    // leftover pair now served directly.
+    g.throughput(Throughput::Bytes((w * h * 2) as u64));
+    g.bench_function("yuv420p10_to_yuv422p12_1920x1080", |b| {
+        b.iter(|| {
+            convert(&deep_420, deep_420_info, PixelFormat::Yuv422P12Le, &opts).expect("convert")
+        });
+    });
+    // Alpha drop + straight depth narrow (deep Yuva → 8-bit sibling).
+    g.throughput(Throughput::Bytes((w * h * 2 * 4) as u64));
+    g.bench_function("yuva444p16_to_yuva444p_1920x1080", |b| {
+        b.iter(|| convert(&deep_yuva, deep_info, PixelFormat::Yuva444P, &opts).expect("convert"));
+    });
+    g.finish();
+}
+
 criterion_group!(
     name = pixel_ops;
     config = Criterion::default().sample_size(30);
@@ -291,6 +364,7 @@ criterion_group!(
         bench_deep_rgb,
         bench_nv12,
         bench_chroma_resample,
-        bench_chroma_resample16
+        bench_chroma_resample16,
+        bench_planar_family
 );
 criterion_main!(pixel_ops);
