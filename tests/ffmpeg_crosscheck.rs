@@ -345,6 +345,131 @@ fn rgba_to_yuva444_matches_validator() {
     }
 }
 
+/// True when the validator binary lists `name` among its raw pixel
+/// formats (still a black-box probe: only the documented `-pix_fmts`
+/// listing is consulted).
+fn validator_supports_pix_fmt(name: &str) -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-pix_fmts"])
+        .output()
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.split_whitespace().nth(1) == Some(name))
+        })
+        .unwrap_or(false)
+}
+
+/// Widen an 8-bit code to a 10-bit LE word with MSB replication — the
+/// closest 10-bit code to the ideal rescale, so both implementations'
+/// narrowing policies (truncation here, rounding there) land back on
+/// the same 8-bit value and the comparison stays about the deep-plane
+/// plumbing and the matrix, not about narrowing policy.
+fn widen10(v: u8) -> u16 {
+    ((v as u16) << 2) | ((v as u16) >> 6)
+}
+
+fn le16_plane_from8(codes: &[u8]) -> Vec<u8> {
+    codes
+        .iter()
+        .flat_map(|&v| widen10(v).to_le_bytes())
+        .collect()
+}
+
+/// Deep YUVA 4:4:4 (10-bit) → RGBA: colour channels within ±2 of the
+/// validator, alpha within ±1 (its alpha narrowing rounds where ours
+/// truncates — the fixture's widened codes make both land on the same
+/// 8-bit value, verified exactly against the source model).
+#[test]
+fn yuva444p10_to_rgba_matches_validator() {
+    if !ffmpeg_available() || !validator_supports_pix_fmt("yuva444p10le") {
+        eprintln!("skipping: no ffmpeg binary / no yuva444p10le support");
+        return;
+    }
+    let y8 = ramp(W * H, 16, 235, 7, 3);
+    let u8v = ramp(W * H, 16, 240, 11, 40);
+    let v8 = ramp(W * H, 16, 240, 13, 80);
+    let a8 = ramp(W * H, 0, 255, 5, 17);
+    let (y, u, v, a) = (
+        le16_plane_from8(&y8),
+        le16_plane_from8(&u8v),
+        le16_plane_from8(&v8),
+        le16_plane_from8(&a8),
+    );
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&y);
+    raw.extend_from_slice(&u);
+    raw.extend_from_slice(&v);
+    raw.extend_from_slice(&a);
+    let theirs = ffmpeg_convert(
+        &raw,
+        "yuva444p10le",
+        "rgba",
+        "scale=in_color_matrix=bt601:in_range=tv:flags=accurate_rnd",
+    );
+    let src = planar_frame(vec![(W * 2, y), (W * 2, u), (W * 2, v), (W * 2, a)]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Yuva444P10Le, W as u32, H as u32),
+        PixelFormat::Rgba,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    let od = &ours.planes[0].data;
+    for p in 0..W * H {
+        for c in 0..3 {
+            let diff = (od[p * 4 + c] as i32 - theirs[p * 4 + c] as i32).abs();
+            assert!(diff <= 2, "pixel {p} channel {c}: diff {diff}");
+        }
+        let adiff = (od[p * 4 + 3] as i32 - theirs[p * 4 + 3] as i32).abs();
+        assert!(adiff <= 1, "alpha at pixel {p}: diff {adiff}");
+        assert_eq!(od[p * 4 + 3], a8[p], "alpha must round-trip the 8-bit code");
+    }
+}
+
+/// Alpha drop on the deep family is pure plumbing (no colour math): our
+/// `Yuva444P10Le → Yuv444P10Le` must agree bit-exactly with the
+/// validator's format-only conversion, word for LE word.
+#[test]
+fn deep_yuva_alpha_drop_bit_exact_vs_validator() {
+    if !ffmpeg_available()
+        || !validator_supports_pix_fmt("yuva444p10le")
+        || !validator_supports_pix_fmt("yuv444p10le")
+    {
+        eprintln!("skipping: no ffmpeg binary / no deep yuva support");
+        return;
+    }
+    let y = le16_plane_from8(&ramp(W * H, 16, 235, 7, 3));
+    let u = le16_plane_from8(&ramp(W * H, 16, 240, 11, 40));
+    let v = le16_plane_from8(&ramp(W * H, 16, 240, 13, 80));
+    let a = le16_plane_from8(&ramp(W * H, 0, 255, 5, 17));
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&y);
+    raw.extend_from_slice(&u);
+    raw.extend_from_slice(&v);
+    raw.extend_from_slice(&a);
+    let theirs = ffmpeg_convert(&raw, "yuva444p10le", "yuv444p10le", "format=yuv444p10le");
+    let src = planar_frame(vec![
+        (W * 2, y.clone()),
+        (W * 2, u.clone()),
+        (W * 2, v.clone()),
+        (W * 2, a),
+    ]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Yuva444P10Le, W as u32, H as u32),
+        PixelFormat::Yuv444P10Le,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    let n = W * H * 2;
+    assert_eq!(ours.planes.len(), 3);
+    assert_eq!(ours.planes[0].data, theirs[..n], "Y plane");
+    assert_eq!(ours.planes[1].data, theirs[n..2 * n], "U plane");
+    assert_eq!(ours.planes[2].data, theirs[2 * n..], "V plane");
+}
+
 /// Packed 4:2:2 deinterleave has no colour math at all — the validator
 /// and our converter must agree bit-exactly on YUYV → planar 4:2:2.
 #[test]
