@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(format_info)* descriptors for the six deep Yuva formats added in
+  oxideav-core 0.1.31 (`Yuva422P10Le`/`12Le`/`16Le`,
+  `Yuva444P10Le`/`12Le`/`16Le`): 4-plane planar, full-resolution alpha,
+  16-bit LE words with 10/12/16 significant bits
+
 ## [0.1.6](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.5...v0.1.6) - 2026-07-09
 
 ### Added
