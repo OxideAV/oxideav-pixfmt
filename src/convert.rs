@@ -100,6 +100,37 @@ pub fn convert_in_place_if_same(
 /// it matters). Staged paths are exactly as correct as their two legs —
 /// but they can round twice and, when the pivot is 8-bit, quantise a
 /// deeper source; callers that care can check [`supports_direct`].
+///
+/// # Per-plane significant-bits side-channel
+///
+/// A source frame may carry the per-plane significant-bits record
+/// defined by [`oxideav_core::VideoFrame::significant_bits`] (one
+/// LSB-anchored byte per image plane — e.g. `[12, 10, 10]` for 12-bit
+/// luma with 10-bit chroma on a `Yuv444P12Le` or `Yuv444P16Le`
+/// surface). `convert()` honours it with one policy:
+///
+/// - **Input**: every covered plane is treated as having exactly its
+///   recorded significant depth. Before dispatch, marked planes are
+///   *normalised* to the surface format's nominal depth by the
+///   crate-wide MSB-replicating widen (full-scale at `b` bits maps to
+///   full-scale at the nominal depth), so a record-carrying frame
+///   converts exactly like the equivalent frame whose samples were
+///   materialised at the nominal depth up front.
+/// - **Validation**: a record value of `0`, or one *greater than the
+///   surface format's nominal depth* (a significant-bits record can
+///   only refine a format's depth downward), rejects with
+///   `Error::Invalid`. Record bytes beyond the image-plane count are
+///   ignored; a shorter record leaves the uncovered planes at the
+///   nominal depth, per the core semantics.
+/// - **Output**: converted frames are always produced at the
+///   destination format's nominal depth and never carry a
+///   significant-bits record — a stale record is never propagated. The
+///   `src == dst` passthrough clone is the one exception: the frame is
+///   untouched, so its record still describes it and rides along.
+/// - **`Pal8`**: palette indices are identifiers, not magnitudes, so a
+///   significant-bits record on a `Pal8` source is meaningless for
+///   conversion and is ignored (the palette side-channel composes with
+///   it and is honoured as usual).
 pub fn convert(
     src: &VideoFrame,
     src_info: FrameInfo,
@@ -109,6 +140,11 @@ pub fn convert(
     if src_info.format == dst_format {
         return Ok(src.clone());
     }
+    // Materialise any significant-bits side-channel to the surface
+    // format's nominal depth (see the rustdoc above) so every converter
+    // below sees plain nominal-depth planes.
+    let normalized = normalize_significant_bits(src, src_info)?;
+    let src = normalized.as_ref().unwrap_or(src);
     if let Some(op) = lookup_any(src_info.format, dst_format) {
         return op.apply(src, src_info, opts);
     }
@@ -121,6 +157,96 @@ pub fn convert(
         "pixfmt: conversion {:?} → {:?} not implemented",
         src_info.format, dst_format
     )))
+}
+
+/// Widen an LSB-anchored `from`-bit value to `to` bits by repeating its
+/// bit pattern into the freed low bits (full MSB replication). Zero
+/// maps to zero, full-scale maps to full-scale, and the mapping is
+/// strictly monotonic — the same rule as the crate's depth ladder,
+/// generalised to widths below 8 bits (where the fill can be wider than
+/// the source and the pattern repeats more than once).
+fn widen_bits(v: u32, from: u32, to: u32) -> u32 {
+    let mut out = v << (to - from);
+    let mut fill = to - from;
+    while fill > 0 {
+        let take = fill.min(from);
+        out |= (v >> (from - take)) << (fill - take);
+        fill -= take;
+    }
+    out
+}
+
+/// Materialise a source frame's per-plane significant-bits side-channel
+/// (see the policy on [`convert`]): validate the record against the
+/// surface format and, when any covered plane is marked shallower than
+/// the format's nominal depth, return a copy with those planes widened
+/// (MSB replication) to the nominal depth and no side-channel records.
+/// Returns `Ok(None)` when no work is needed (no record, an all-nominal
+/// record, or a `Pal8` source, whose record is ignored).
+fn normalize_significant_bits(src: &VideoFrame, src_info: FrameInfo) -> Result<Option<VideoFrame>> {
+    let Some(record) = src.significant_bits() else {
+        return Ok(None);
+    };
+    let fmt = src_info.format;
+    // Palette indices are identifiers, not magnitudes — a record on a
+    // Pal8 frame carries no meaning for conversion.
+    if fmt == PixelFormat::Pal8 {
+        return Ok(None);
+    }
+    let nominal = crate::format_info::FormatInfo::of(fmt).bit_depth as u32;
+    let plane_count = src.image_plane_count();
+    // Validate the covered planes; bytes beyond the image-plane count
+    // are ignored (the record is defined per image plane).
+    let mut needs_work = false;
+    for (i, &b) in record.iter().take(plane_count).enumerate() {
+        let b = b as u32;
+        if b == 0 || b > nominal {
+            return Err(Error::invalid(format!(
+                "pixfmt: significant-bits record byte {i} = {b} out of range 1..={nominal} for {fmt:?}"
+            )));
+        }
+        if b < nominal {
+            needs_work = true;
+        }
+    }
+    if !needs_work {
+        return Ok(None);
+    }
+    // `needs_work` implies nominal > 1, so this is a byte-sample or
+    // LE16-word format (Mono's nominal of 1 pins every record value to
+    // 1). Widen each marked plane in place on a copy; padding bytes
+    // beyond the tight row width are widened too, harmlessly — no
+    // converter reads them.
+    let wide_words = nominal > 8;
+    let mut planes = Vec::with_capacity(plane_count);
+    for (i, plane) in src.image_planes().iter().enumerate() {
+        let b = record.get(i).map(|&b| b as u32).unwrap_or(nominal);
+        let mut data = plane.data.clone();
+        if b < nominal {
+            if wide_words {
+                let mask = (1u32 << b) - 1;
+                for word in data.chunks_exact_mut(2) {
+                    let v = u16::from_le_bytes([word[0], word[1]]) as u32 & mask;
+                    let out = widen_bits(v, b, nominal) as u16;
+                    word.copy_from_slice(&out.to_le_bytes());
+                }
+            } else {
+                let mask = (1u32 << b) - 1;
+                for byte in data.iter_mut() {
+                    let v = *byte as u32 & mask;
+                    *byte = widen_bits(v, b, 8) as u8;
+                }
+            }
+        }
+        planes.push(VideoPlane {
+            stride: plane.stride,
+            data,
+        });
+    }
+    Ok(Some(VideoFrame {
+        pts: src.pts,
+        planes,
+    }))
 }
 
 /// True when `convert()` can carry out `src → dst` — directly or via a

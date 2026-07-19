@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(convert)* honour the per-plane significant-bits side-channel from
+  oxideav-core 0.1.31: marked planes convert at their recorded depth
+  (normalised to the surface's nominal depth by the MSB-replicating
+  widen before dispatch — a `Yuv444P16Le` frame marked `[12, 10, 10]`
+  converts as 12-bit luma + 10-bit chroma, not full-range 16); outputs
+  are always nominal-depth and never carry a stale record; values of 0
+  or above the surface's nominal depth reject with `Error::Invalid`;
+  records on `Pal8` are ignored and compose with the palette
+  side-channel
 - *(convert)* computed planar-family dispatch tier: every ordered pair
   inside the uniform planar YUV(A) family ({Yuv,Yuva} × {420,422,444} ×
   {8,10,12,16}) is now a direct single-step conversion — depth move,
