@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.6...v0.1.7) - 2026-07-19
+
+### Added
+
+- *(convert)* significant-bits side-channel policy — normalise, validate, never propagate
+- *(convert)* computed planar-family tier — deep Yuva wiring + cross-depth/subsampling closure
+- *(format_info)* descriptors for the six deep Yuva formats (core 0.1.31)
+- *(convert)* wire the five core 0.1.30 pixel formats into the conversion matrix
+
+### Other
+
+- *(pixel_ops)* planar-family fused-convert group
+- crate-doc + README refresh for the deep Yuva / planar-family / significant-bits work
+- *(xcheck)* black-box validator coverage for the deep Yuva family
+- *(convert_geometry)* deep Yuva sources + hostile significant-bits records
+- *(pixel_ops)* 16-bit LE chroma resample group
+- crate-doc + README refresh for the 16-bit / Yuva / palette side-channel work
+- *(xcheck)* black-box validator coverage for Yuva444P <-> Rgba
+- *(convert_geometry)* cover the five new formats + Pal8 palette side-channel
+- *(yuva)* Yuva422P / Yuva444P family suite
+- *(yuv16)* reference-model suite for the 16-bit planar YUV trio
+
 ### Added
 
 - *(convert)* honour the per-plane significant-bits side-channel from
