@@ -499,3 +499,157 @@ fn yuyv_to_planar_bit_exact_vs_validator() {
     );
     assert_eq!(ours.planes[2].data, theirs[W * H + cw * H..], "V plane");
 }
+
+/// `Gbrp8` ↔ `Rgb24` is a zero-math plane reorder on both sides: the
+/// validator's format-only conversion must agree bit-exactly in both
+/// directions (G, B, R plane order per the format's definition).
+#[test]
+fn gbrp8_rgb24_bit_exact_vs_validator() {
+    if !ffmpeg_available() || !validator_supports_pix_fmt("gbrp") {
+        eprintln!("skipping: no ffmpeg binary / no gbrp support");
+        return;
+    }
+    // Planar G, B, R input.
+    let g = ramp(W * H, 0, 255, 7, 0);
+    let b = ramp(W * H, 0, 255, 11, 3);
+    let r = ramp(W * H, 0, 255, 5, 1);
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&g);
+    raw.extend_from_slice(&b);
+    raw.extend_from_slice(&r);
+    let theirs = ffmpeg_convert(&raw, "gbrp", "rgb24", "format=rgb24");
+    let src = planar_frame(vec![(W, g.clone()), (W, b.clone()), (W, r.clone())]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrp8, W as u32, H as u32),
+        PixelFormat::Rgb24,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    assert_eq!(ours.planes[0].data, theirs, "gbrp → rgb24");
+
+    // And the packed → planar direction.
+    let rgb = ramp(W * H * 3, 0, 255, 9, 2);
+    let theirs = ffmpeg_convert(&rgb, "rgb24", "gbrp", "format=gbrp");
+    let src = planar_frame(vec![(W * 3, rgb.clone())]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Rgb24, W as u32, H as u32),
+        PixelFormat::Gbrp8,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    let n = W * H;
+    assert_eq!(ours.planes[0].data, theirs[..n], "G plane");
+    assert_eq!(ours.planes[1].data, theirs[n..2 * n], "B plane");
+    assert_eq!(ours.planes[2].data, theirs[2 * n..], "R plane");
+}
+
+/// `Gbrp16Le` → `Rgb48Le` degenerates to a pure plane reorder (16
+/// significant bits, shift by zero) — bit-exact against the validator's
+/// format-only conversion, word for LE word.
+#[test]
+fn gbrp16_to_rgb48_bit_exact_vs_validator() {
+    if !ffmpeg_available()
+        || !validator_supports_pix_fmt("gbrp16le")
+        || !validator_supports_pix_fmt("rgb48le")
+    {
+        eprintln!("skipping: no ffmpeg binary / no gbrp16le support");
+        return;
+    }
+    // Full-width 16-bit words: any byte pattern is a legal sample.
+    let g: Vec<u8> = ramp(W * H * 2, 0, 255, 7, 0);
+    let b: Vec<u8> = ramp(W * H * 2, 0, 255, 11, 3);
+    let r: Vec<u8> = ramp(W * H * 2, 0, 255, 5, 1);
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&g);
+    raw.extend_from_slice(&b);
+    raw.extend_from_slice(&r);
+    let theirs = ffmpeg_convert(&raw, "gbrp16le", "rgb48le", "format=rgb48le");
+    let src = planar_frame(vec![(W * 2, g), (W * 2, b), (W * 2, r)]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrp16Le, W as u32, H as u32),
+        PixelFormat::Rgb48Le,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    assert_eq!(ours.planes[0].data, theirs);
+}
+
+/// Alpha drop at the deep 4:2:0 siting is pure plumbing: our
+/// `Yuva420P10Le → Yuv420P10Le` must agree bit-exactly with the
+/// validator's format-only conversion on all three surviving planes.
+#[test]
+fn deep_420_yuva_alpha_drop_bit_exact_vs_validator() {
+    if !ffmpeg_available()
+        || !validator_supports_pix_fmt("yuva420p10le")
+        || !validator_supports_pix_fmt("yuv420p10le")
+    {
+        eprintln!("skipping: no ffmpeg binary / no deep 4:2:0 yuva support");
+        return;
+    }
+    let cw = W / 2;
+    let ch = H / 2;
+    let y = le16_plane_from8(&ramp(W * H, 16, 235, 7, 3));
+    let u = le16_plane_from8(&ramp(cw * ch, 16, 240, 11, 40));
+    let v = le16_plane_from8(&ramp(cw * ch, 16, 240, 13, 80));
+    let a = le16_plane_from8(&ramp(W * H, 0, 255, 5, 17));
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&y);
+    raw.extend_from_slice(&u);
+    raw.extend_from_slice(&v);
+    raw.extend_from_slice(&a);
+    let theirs = ffmpeg_convert(&raw, "yuva420p10le", "yuv420p10le", "format=yuv420p10le");
+    let src = planar_frame(vec![
+        (W * 2, y.clone()),
+        (cw * 2, u.clone()),
+        (cw * 2, v.clone()),
+        (W * 2, a),
+    ]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Yuva420P10Le, W as u32, H as u32),
+        PixelFormat::Yuv420P10Le,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    let ny = W * H * 2;
+    let nc = cw * ch * 2;
+    assert_eq!(ours.planes.len(), 3);
+    assert_eq!(ours.planes[0].data, theirs[..ny], "Y plane");
+    assert_eq!(ours.planes[1].data, theirs[ny..ny + nc], "U plane");
+    assert_eq!(ours.planes[2].data, theirs[ny + nc..ny + 2 * nc], "V plane");
+}
+
+/// `Gbrap16Le` → `Rgba64Le` is the four-plane pure reorder — bit-exact
+/// against the validator, alpha word included.
+#[test]
+fn gbrap16_to_rgba64_bit_exact_vs_validator() {
+    if !ffmpeg_available()
+        || !validator_supports_pix_fmt("gbrap16le")
+        || !validator_supports_pix_fmt("rgba64le")
+    {
+        eprintln!("skipping: no ffmpeg binary / no gbrap16le support");
+        return;
+    }
+    let g: Vec<u8> = ramp(W * H * 2, 0, 255, 7, 0);
+    let b: Vec<u8> = ramp(W * H * 2, 0, 255, 11, 3);
+    let r: Vec<u8> = ramp(W * H * 2, 0, 255, 5, 1);
+    let a: Vec<u8> = ramp(W * H * 2, 0, 255, 13, 9);
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&g);
+    raw.extend_from_slice(&b);
+    raw.extend_from_slice(&r);
+    raw.extend_from_slice(&a);
+    let theirs = ffmpeg_convert(&raw, "gbrap16le", "rgba64le", "format=rgba64le");
+    let src = planar_frame(vec![(W * 2, g), (W * 2, b), (W * 2, r), (W * 2, a)]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrap16Le, W as u32, H as u32),
+        PixelFormat::Rgba64Le,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    assert_eq!(ours.planes[0].data, theirs);
+}
