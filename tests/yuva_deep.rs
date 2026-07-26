@@ -1,14 +1,15 @@
-//! Deep Yuva family suite — the 10/12/16-bit 4:2:2 / 4:4:4 planar
-//! YUV + full-resolution-alpha formats added in oxideav-core 0.1.31
-//! (`Yuva422P10Le`/`12Le`/`16Le`, `Yuva444P10Le`/`12Le`/`16Le`), wired
-//! through the computed planar-family dispatch tier.
+//! Deep Yuva family suite — the 10/12/16-bit planar YUV +
+//! full-resolution-alpha formats added in oxideav-core 0.1.31
+//! (`Yuva422P10Le`/`12Le`/`16Le`, `Yuva444P10Le`/`12Le`/`16Le`) and
+//! 0.1.33 (`Yuva420P10Le`/`12Le`/`16Le` — the remaining 4:2:0 siting),
+//! wired through the computed planar-family dispatch tier.
 //!
 //! Invariants mirror the established 8-bit Yuva suites plus the deep
 //! depth-ladder rules: the YUV planes behave exactly like the alpha-less
 //! deep sibling's, the alpha plane is a full-resolution sample carrier
 //! at the same depth (bit-exact across same-depth moves, widened /
 //! truncated across depth moves with the crate-wide MSB-replicate /
-//! truncate policy), and every ordered pair involving the six new
+//! truncate policy), and every ordered pair involving the nine deep
 //! formats resolves through `convert()`.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
@@ -62,8 +63,11 @@ fn synth_deep_yuva(bits: u32, w: usize, h: usize, wsub: usize, hsub: usize) -> V
     }
 }
 
-/// (format, bits, wsub, hsub) rows for the six deep Yuva formats.
+/// (format, bits, wsub, hsub) rows for the nine deep Yuva formats.
 const DEEP: &[(PixelFormat, u32, usize, usize)] = &[
+    (PixelFormat::Yuva420P10Le, 10, 2, 2),
+    (PixelFormat::Yuva420P12Le, 12, 2, 2),
+    (PixelFormat::Yuva420P16Le, 16, 2, 2),
     (PixelFormat::Yuva422P10Le, 10, 2, 1),
     (PixelFormat::Yuva422P12Le, 12, 2, 1),
     (PixelFormat::Yuva422P16Le, 16, 2, 1),
@@ -76,6 +80,9 @@ const DEEP: &[(PixelFormat, u32, usize, usize)] = &[
 fn alpha_less_sibling(fmt: PixelFormat) -> PixelFormat {
     use PixelFormat as P;
     match fmt {
+        P::Yuva420P10Le => P::Yuv420P10Le,
+        P::Yuva420P12Le => P::Yuv420P12Le,
+        P::Yuva420P16Le => P::Yuv420P16Le,
         P::Yuva422P10Le => P::Yuv422P10Le,
         P::Yuva422P12Le => P::Yuv422P12Le,
         P::Yuva422P16Le => P::Yuv422P16Le,
@@ -90,14 +97,15 @@ fn alpha_less_sibling(fmt: PixelFormat) -> PixelFormat {
 fn eight_bit_sibling(fmt: PixelFormat) -> PixelFormat {
     use PixelFormat as P;
     match fmt {
+        P::Yuva420P10Le | P::Yuva420P12Le | P::Yuva420P16Le => P::Yuva420P,
         P::Yuva422P10Le | P::Yuva422P12Le | P::Yuva422P16Le => P::Yuva422P,
         P::Yuva444P10Le | P::Yuva444P12Le | P::Yuva444P16Le => P::Yuva444P,
         _ => panic!("not a deep yuva format"),
     }
 }
 
-/// Every ordered pair inside the full 9-member Yuva family (8-bit trio
-/// + six deep members) is a *direct* single-step conversion.
+/// Every ordered pair inside the full 12-member Yuva family (8-bit trio
+/// + nine deep members) is a *direct* single-step conversion.
 #[test]
 fn yuva_family_all_pairs_direct() {
     use PixelFormat as P;
@@ -105,6 +113,9 @@ fn yuva_family_all_pairs_direct() {
         P::Yuva420P,
         P::Yuva422P,
         P::Yuva444P,
+        P::Yuva420P10Le,
+        P::Yuva420P12Le,
+        P::Yuva420P16Le,
         P::Yuva422P10Le,
         P::Yuva422P12Le,
         P::Yuva422P16Le,
@@ -209,6 +220,20 @@ fn deep_roundtrips_through_16bit() {
             1,
             1,
         ),
+        (
+            PixelFormat::Yuva420P10Le,
+            PixelFormat::Yuva420P16Le,
+            10,
+            2,
+            2,
+        ),
+        (
+            PixelFormat::Yuva420P12Le,
+            PixelFormat::Yuva420P16Le,
+            12,
+            2,
+            2,
+        ),
     ];
     for (lo_fmt, hi_fmt, bits, wsub, hsub) in cases {
         let mut src = synth_deep_yuva(bits, w, h, wsub, hsub);
@@ -271,6 +296,20 @@ fn same_depth_resample_luma_alpha_exact_chroma_matches_sibling() {
             PixelFormat::Yuva422P12Le,
             12,
             1,
+            1,
+        ),
+        (
+            PixelFormat::Yuva420P10Le,
+            PixelFormat::Yuva444P10Le,
+            10,
+            2,
+            2,
+        ),
+        (
+            PixelFormat::Yuva422P16Le,
+            PixelFormat::Yuva420P16Le,
+            16,
+            2,
             1,
         ),
     ];
@@ -347,6 +386,60 @@ fn cross_depth_cross_subsampling_reference_model() {
                     want_v,
                     "V ({row},{cc},{dx})"
                 );
+            }
+        }
+    }
+}
+
+/// 4:2:0 cross-depth + cross-subsampling reference model:
+/// `Yuva420P10Le → Yuva444P12Le` widens first (10 → 12, chroma is
+/// resampled at the deeper depth) and then replicates each chroma
+/// sample over its 2×2 luma block, so every output chroma word in the
+/// block equals the widened source word; luma and alpha are the
+/// straight widen, untouched by the resampler.
+#[test]
+fn deep_420_cross_depth_upsample_reference_model() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (8usize, 4usize);
+    let src = synth_deep_yuva(10, w, h, 2, 2);
+    let out = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Yuva420P10Le, w as u32, h as u32),
+        PixelFormat::Yuva444P12Le,
+        &opts,
+    )
+    .expect("420P10 → 444P12");
+    let (cw, ch) = (w / 2, h / 2);
+    for i in 0..w * h {
+        assert_eq!(
+            rd16(&out.planes[0].data, i),
+            widen(rd16(&src.planes[0].data, i), 10, 12),
+            "luma {i}"
+        );
+        assert_eq!(
+            rd16(&out.planes[3].data, i),
+            widen(rd16(&src.planes[3].data, i), 10, 12),
+            "alpha {i}"
+        );
+    }
+    for cr in 0..ch {
+        for cc in 0..cw {
+            let want_u = widen(rd16(&src.planes[1].data, cr * cw + cc), 10, 12);
+            let want_v = widen(rd16(&src.planes[2].data, cr * cw + cc), 10, 12);
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let at = (cr * 2 + dy) * w + cc * 2 + dx;
+                    assert_eq!(
+                        rd16(&out.planes[1].data, at),
+                        want_u,
+                        "U ({cr},{cc},{dy},{dx})"
+                    );
+                    assert_eq!(
+                        rd16(&out.planes[2].data, at),
+                        want_v,
+                        "V ({cr},{cc},{dy},{dx})"
+                    );
+                }
             }
         }
     }
@@ -659,6 +752,9 @@ fn every_ordered_pair_involving_deep_yuva_resolves() {
         P::Yuva444P12Le,
         P::Yuva422P16Le,
         P::Yuva444P16Le,
+        P::Yuva420P10Le,
+        P::Yuva420P12Le,
+        P::Yuva420P16Le,
     ];
     for &(deep_fmt, _, _, _) in DEEP {
         for &other in ALL {

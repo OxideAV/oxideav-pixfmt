@@ -339,6 +339,9 @@ fn is_yuv_carriage(f: PixelFormat) -> bool {
             | P::Yuva444P10Le
             | P::Yuva444P12Le
             | P::Yuva444P16Le
+            | P::Yuva420P10Le
+            | P::Yuva420P12Le
+            | P::Yuva420P16Le
             | P::Yuyv422
             | P::Uyvy422
     )
@@ -410,6 +413,9 @@ fn planar_yuv_desc(f: PixelFormat) -> Option<PlanarYuv> {
         P::Yuva444P10Le => (1, 1, 10, true),
         P::Yuva444P12Le => (1, 1, 12, true),
         P::Yuva444P16Le => (1, 1, 16, true),
+        P::Yuva420P10Le => (2, 2, 10, true),
+        P::Yuva420P12Le => (2, 2, 12, true),
+        P::Yuva420P16Le => (2, 2, 16, true),
         _ => return None,
     };
     Some(PlanarYuv {
