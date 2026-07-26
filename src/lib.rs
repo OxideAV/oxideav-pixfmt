@@ -62,8 +62,15 @@
 //!   Rgba, dropped on the way to Rgb24, and synthesised as opaque 255 on
 //!   the return paths from Gray8/Rgb24).
 //! - Rgb48Le ↔ Rgb24, Rgba64Le ↔ Rgba (bit-shift).
-//! - Planar GBR(A) at 10/12/14 bits ↔ both the deep packed formats
-//!   (Rgb48Le / Rgba64Le) and the 8-bit packed ones (Rgb24 / Rgba).
+//! - The full nine-member planar GBR(A) ladder — `Gbrp8` (byte planes)
+//!   through the 10/12/14-bit members to the full-width `Gbrp16Le` /
+//!   `Gbrap16Le` — ↔ **both** deep packed formats (Rgb48Le / Rgba64Le,
+//!   alpha synthesised opaque full-scale or dropped when the shapes
+//!   differ) and the 8-bit packed ones (Rgb24 / Rgba), plus Gray8
+//!   interop: full-range luminance projection on the way out (same
+//!   kernel as the packed RGB → Gray8 rows, alpha dropped) and an
+//!   MSB-replicated `r = g = b` broadcast on the way in — gray content
+//!   round-trips exactly.
 //! - The full bit-depth ladder: planar YUV 8 ↔ 10 ↔ 12 ↔ 16 bit (same
 //!   subsampling; MSB-replicated widen / truncating narrow, exact
 //!   round-trips), and Gray8 ↔ Gray10Le ↔ Gray12Le ↔ Gray16Le. On the
@@ -72,7 +79,8 @@
 //! - Gray16Le ↔ Gray8.
 //! - MonoBlack/MonoWhite ↔ Gray8.
 //! - The full planar YUV + alpha family — Yuva420P/422P/444P plus the
-//!   deep Yuva422P/Yuva444P members at 10/12/16 bits: promote/drop vs
+//!   deep 10/12/16-bit members at all three chroma sitings
+//!   (Yuva420P/422P/444P × 10/12/16Le): promote/drop vs
 //!   the alpha-less siblings, alpha-preserving chroma resample and
 //!   depth moves inside the family (luma + alpha bit-exact at same
 //!   depth, MSB-widened / truncated across depths), Rgb24/Rgba interop

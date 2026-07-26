@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Conversion coverage for the six oxideav-core 0.1.33 pixel formats:
+  - the GBR(A) depth-ladder ends `Gbrp8` (byte planes), `Gbrp16Le` and
+    `Gbrap16Le` (full-width LE16 words, all 16 bits significant) with
+    direct hops to both deep packed formats (`Rgb48Le` / `Rgba64Le` —
+    the 16-bit hop is a pure plane reorder, bit-exact both ways) and
+    the 8-bit packed ones (`Rgb24` / `Rgba` — exact ×257 widen /
+    top-byte narrow);
+  - the deep 4:2:0 Yuva trio `Yuva420P10Le` / `Yuva420P12Le` /
+    `Yuva420P16Le`, joining the computed planar-family tier: every
+    ordered pair inside the now-complete 24-member uniform planar
+    family ({Yuv,Yuva} × {420,422,444} × {8,10,12,16}) is a direct
+    fused conversion, plus `Rgb24` / `Rgba` / `Gray8` interop.
+- Alpha-crossing deep-packed GBR rows: every GBR(A) member converts
+  directly to **both** `Rgb48Le` and `Rgba64Le` (missing alpha
+  synthesised opaque full-scale, surplus alpha dropped), which closes
+  the cross-alpha GBR ↔ GBR staged routes (e.g. `Gbrp8 → Gbrap12Le`).
+- GBR(A) ↔ `Gray8` for the whole nine-member family: full-range
+  luminance projection out (same kernel as the packed RGB → Gray8
+  rows), MSB-replicated broadcast in — `r = g = b` content round-trips
+  exactly, and the Gray8 pivot now rescues GBR ↔ Mono and
+  GBR ↔ deep-grayscale routes.
+- Pair coverage after the above: **3224 of 3306** ordered pairs
+  reachable (912 direct) across the 58 formats — every ordered pair
+  involving the six new formats resolves; floors pinned in the
+  staged-matrix suite.
+- Validation: reference-model + round-trip suites for the new rows,
+  significant-bits side-channel pins on the new surfaces, four new
+  black-box validator cross-checks (bit-exact where the conversion is
+  pure plumbing), extended geometry fuzzing (824k executions, zero
+  findings) and a deep 4:2:0 Yuva bench case.
+
 ## [0.1.7](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.6...v0.1.7) - 2026-07-19
 
 ### Added
