@@ -64,6 +64,13 @@ impl FormatInfo {
             P::Gbrap12Le => Self::gbr(12, true),
             P::Gbrp14Le => Self::gbr(14, false),
             P::Gbrap14Le => Self::gbr(14, true),
+            // GBR(A) depth-ladder ends (core 0.1.33). `Gbrp8` stores one
+            // byte per sample (all 8 bits significant); the 16-bit pair
+            // stores LE words with ALL 16 bits significant (full-scale
+            // 65535, matching the `Yuv*P16Le` convention).
+            P::Gbrp8 => Self::gbr(8, false),
+            P::Gbrp16Le => Self::gbr(16, false),
+            P::Gbrap16Le => Self::gbr(16, true),
             // 8-bit planar YUV + a full-resolution alpha plane (plane 3
             // is always `w × h` regardless of the chroma subsampling).
             P::Yuva420P => Self::yuva(2, 2),
@@ -80,6 +87,12 @@ impl FormatInfo {
             P::Yuva444P10Le => Self::yuva_deep(10, 1, 1),
             P::Yuva444P12Le => Self::yuva_deep(12, 1, 1),
             P::Yuva444P16Le => Self::yuva_deep(16, 1, 1),
+            // Deep Yuva at the remaining 4:2:0 siting (core 0.1.33) —
+            // same 4-plane layout, chroma on the 2×2 grid, alpha always
+            // full resolution.
+            P::Yuva420P10Le => Self::yuva_deep(10, 2, 2),
+            P::Yuva420P12Le => Self::yuva_deep(12, 2, 2),
+            P::Yuva420P16Le => Self::yuva_deep(16, 2, 2),
             P::Nv12 | P::Nv21 => Self {
                 bit_depth: 8,
                 planes: 2,
@@ -362,6 +375,21 @@ mod tests {
         assert_eq!(info.bit_depth, 14);
         assert_eq!(info.planes, 4);
         assert!(info.has_alpha);
+
+        // Ladder ends (core 0.1.33): native 8-bit and full-width 16-bit.
+        let info = FormatInfo::of(P::Gbrp8);
+        assert_eq!(info.bit_depth, 8);
+        assert_eq!(info.planes, 3);
+        assert!(info.is_planar);
+        assert!(!info.has_alpha);
+        let info = FormatInfo::of(P::Gbrp16Le);
+        assert_eq!(info.bit_depth, 16);
+        assert_eq!(info.planes, 3);
+        assert!(!info.has_alpha);
+        let info = FormatInfo::of(P::Gbrap16Le);
+        assert_eq!(info.bit_depth, 16);
+        assert_eq!(info.planes, 4);
+        assert!(info.has_alpha);
     }
 
     #[test]
@@ -369,12 +397,15 @@ mod tests {
         // FormatInfo::planes must agree with the canonical
         // PixelFormat::plane_count for every GBR variant.
         for fmt in [
+            P::Gbrp8,
             P::Gbrp10Le,
             P::Gbrap10Le,
             P::Gbrp12Le,
             P::Gbrap12Le,
             P::Gbrp14Le,
             P::Gbrap14Le,
+            P::Gbrp16Le,
+            P::Gbrap16Le,
         ] {
             let info = FormatInfo::of(fmt);
             assert_eq!(
@@ -431,8 +462,16 @@ mod tests {
             );
         }
         // 10/12/16-bit 4:2:0 mirror the 8-bit answer — bit depth is
-        // orthogonal to chroma siting.
-        for fmt in [P::Yuv420P10Le, P::Yuv420P12Le, P::Yuv420P16Le] {
+        // orthogonal to chroma siting. The deep 4:2:0 Yuva trio (core
+        // 0.1.33) shares the grid.
+        for fmt in [
+            P::Yuv420P10Le,
+            P::Yuv420P12Le,
+            P::Yuv420P16Le,
+            P::Yuva420P10Le,
+            P::Yuva420P12Le,
+            P::Yuva420P16Le,
+        ] {
             assert_eq!(FormatInfo::of(fmt).chroma_subsampling(), C::C420);
         }
 
@@ -471,12 +510,15 @@ mod tests {
             P::Yuva444P10Le,
             P::Yuva444P12Le,
             P::Yuva444P16Le,
+            P::Gbrp8,
             P::Gbrp10Le,
             P::Gbrap10Le,
             P::Gbrp12Le,
             P::Gbrap12Le,
             P::Gbrp14Le,
             P::Gbrap14Le,
+            P::Gbrp16Le,
+            P::Gbrap16Le,
         ] {
             assert_eq!(
                 FormatInfo::of(fmt).chroma_subsampling(),
@@ -641,6 +683,9 @@ mod tests {
         // chroma grid and bit depth, adding exactly one full-resolution
         // alpha plane stored at the same depth.
         let pairs = [
+            (P::Yuv420P10Le, P::Yuva420P10Le),
+            (P::Yuv420P12Le, P::Yuva420P12Le),
+            (P::Yuv420P16Le, P::Yuva420P16Le),
             (P::Yuv422P10Le, P::Yuva422P10Le),
             (P::Yuv422P12Le, P::Yuva422P12Le),
             (P::Yuv422P16Le, P::Yuva422P16Le),
@@ -667,9 +712,13 @@ mod tests {
 
     #[test]
     fn deep_yuva_mirrors_8bit_yuva_grid_at_depth() {
-        // The deep 4:2:2 / 4:4:4 Yuva variants share their chroma grid
-        // with the 8-bit Yuva sibling — depth is orthogonal to siting.
+        // The deep Yuva variants (4:2:0 / 4:2:2 / 4:4:4) share their
+        // chroma grid with the 8-bit Yuva sibling — depth is orthogonal
+        // to siting.
         for (eight, deep) in [
+            (P::Yuva420P, P::Yuva420P10Le),
+            (P::Yuva420P, P::Yuva420P12Le),
+            (P::Yuva420P, P::Yuva420P16Le),
             (P::Yuva422P, P::Yuva422P10Le),
             (P::Yuva422P, P::Yuva422P12Le),
             (P::Yuva422P, P::Yuva422P16Le),
