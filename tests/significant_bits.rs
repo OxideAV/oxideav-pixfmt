@@ -397,3 +397,150 @@ fn record_applies_to_alpha_plane_on_staged_route() {
         assert_eq!(out.planes[0].data[i * 4 + 3], want, "alpha {i}");
     }
 }
+
+/// A record on a `Gbrp16Le` surface normalises the marked plane before
+/// the plane-reorder hop: plane 2 (R) marked 12-bit reaches `Rgb48Le`
+/// as its MSB-replicated 16-bit widen, while unmarked full-width
+/// planes ride across untouched.
+#[test]
+fn record_on_gbr16_surface_normalises_before_reorder() {
+    let (w, h) = (8usize, 4usize);
+    let mask12 = ((1u32 << 12) - 1) as u16;
+    let g = le16_plane((0..w * h).map(|i| (i as u16).wrapping_mul(2311).wrapping_add(17)));
+    let b = le16_plane((0..w * h).map(|i| (i as u16).wrapping_mul(929).wrapping_add(3)));
+    let r = le16_plane((0..w * h).map(|i| (i as u16).wrapping_mul(1597) & mask12));
+    let src = VideoFrame {
+        pts: None,
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: g.clone(),
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: b.clone(),
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: r.clone(),
+            },
+        ],
+    }
+    .with_significant_bits(vec![16, 16, 12]);
+    let out = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrp16Le, w as u32, h as u32),
+        PixelFormat::Rgb48Le,
+        &ConvertOptions::default(),
+    )
+    .expect("gbrp16 + record → rgb48");
+    for i in 0..w * h {
+        assert_eq!(
+            rd16(&out.planes[0].data, i * 3),
+            widen(rd16(&r, i) as u32, 12, 16) as u16,
+            "R word {i} must be the 12 → 16 widen"
+        );
+        assert_eq!(rd16(&out.planes[0].data, i * 3 + 1), rd16(&g, i), "G {i}");
+        assert_eq!(rd16(&out.planes[0].data, i * 3 + 2), rd16(&b, i), "B {i}");
+    }
+    assert!(out.significant_bits().is_none());
+}
+
+/// Byte-sample surfaces validate the record against their 8-bit
+/// nominal depth: 9 significant bits on `Gbrp8` is impossible and
+/// rejects, while a legal sub-8 record widens the marked plane.
+#[test]
+fn record_on_gbrp8_validates_and_normalises() {
+    let (w, h) = (4usize, 2usize);
+    let n = w * h;
+    let mk = |mul: usize, mask: usize| -> VideoPlane {
+        VideoPlane {
+            stride: w,
+            data: (0..n).map(|i| ((i * mul) & mask) as u8).collect(),
+        }
+    };
+    let frame = VideoFrame {
+        pts: None,
+        planes: vec![mk(7, 0xFF), mk(11, 0xFF), mk(5, 0x3F)],
+    };
+    // 9 > nominal 8 → Error::Invalid.
+    let bad = frame.clone().with_significant_bits(vec![8, 8, 9]);
+    assert!(convert(
+        &bad,
+        FrameInfo::new(PixelFormat::Gbrp8, w as u32, h as u32),
+        PixelFormat::Rgb24,
+        &ConvertOptions::default(),
+    )
+    .is_err());
+    // R plane genuinely 6-bit → widened to 8 before the reorder.
+    let marked = frame.clone().with_significant_bits(vec![8, 8, 6]);
+    let out = convert(
+        &marked,
+        FrameInfo::new(PixelFormat::Gbrp8, w as u32, h as u32),
+        PixelFormat::Rgb24,
+        &ConvertOptions::default(),
+    )
+    .expect("gbrp8 + record → rgb24");
+    for i in 0..n {
+        let r6 = frame.planes[2].data[i] as u32;
+        assert_eq!(
+            out.planes[0].data[i * 3],
+            widen(r6, 6, 8) as u8,
+            "R byte {i} must be the 6 → 8 widen"
+        );
+        assert_eq!(out.planes[0].data[i * 3 + 1], frame.planes[0].data[i]);
+        assert_eq!(out.planes[0].data[i * 3 + 2], frame.planes[1].data[i]);
+    }
+}
+
+/// The record covers the full-resolution alpha plane of the deep 4:2:0
+/// Yuva trio (plane index 3): an 8-bit-marked alpha on a
+/// `Yuva420P10Le` surface reaches `Rgba` as exactly the original 8-bit
+/// codes (widen to 10, then take the top 8 — the identity).
+#[test]
+fn record_on_deep_420_yuva_alpha_plane() {
+    let (w, h) = (8usize, 8usize);
+    let mask10 = ((1u32 << 10) - 1) as u16;
+    let (cw, ch) = (w / 2, h / 2);
+    let yp =
+        le16_plane((0..w * h).map(|i| (i as u16).wrapping_mul(2311).wrapping_add(17) & mask10));
+    let up = le16_plane((0..cw * ch).map(|i| (i as u16).wrapping_mul(929) & mask10));
+    let vp = le16_plane((0..cw * ch).map(|i| (i as u16).wrapping_mul(1597) & mask10));
+    let a8: Vec<u16> = (0..w * h)
+        .map(|i| (i as u16).wrapping_mul(613) & 0xFF)
+        .collect();
+    let ap = le16_plane(a8.iter().copied());
+    let src = VideoFrame {
+        pts: None,
+        planes: vec![
+            VideoPlane {
+                stride: w * 2,
+                data: yp,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: up,
+            },
+            VideoPlane {
+                stride: cw * 2,
+                data: vp,
+            },
+            VideoPlane {
+                stride: w * 2,
+                data: ap,
+            },
+        ],
+    }
+    .with_significant_bits(vec![10, 10, 10, 8]);
+    let out = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Yuva420P10Le, w as u32, h as u32),
+        PixelFormat::Rgba,
+        &ConvertOptions::default(),
+    )
+    .expect("yuva420p10 + record → rgba");
+    for (i, &a) in a8.iter().enumerate() {
+        assert_eq!(out.planes[0].data[i * 4 + 3], a as u8, "alpha {i}");
+    }
+    assert!(out.significant_bits().is_none());
+}
