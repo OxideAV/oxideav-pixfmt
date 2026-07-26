@@ -1531,6 +1531,232 @@ fn gbrp8_rgb48_widen_truncate_roundtrip() {
     }
 }
 
+/// Alpha-crossing deep-packed GBR rows: a missing alpha is synthesised
+/// opaque full-scale (65535 on the packed side, `(1 << bits) - 1` on
+/// the planar side), a surplus alpha is dropped, and the colour words
+/// keep the family shift convention exactly (they match the same-alpha
+/// row's output channel-for-channel).
+#[test]
+fn gbr_alpha_crossing_deep_packed() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (4u32, 2u32);
+    let n = (w * h) as usize;
+
+    // Gbrp10Le → Rgba64Le: colour words as the Rgb48Le row, alpha 65535.
+    let src = synth_gbr(w, h, 10, false);
+    let info = FrameInfo::new(PixelFormat::Gbrp10Le, w, h);
+    let rgba64 = convert(&src, info, PixelFormat::Rgba64Le, &opts).expect("gbrp10 → rgba64");
+    let rgb48 = convert(&src, info, PixelFormat::Rgb48Le, &opts).expect("gbrp10 → rgb48");
+    for i in 0..n {
+        for c in 0..3 {
+            assert_eq!(
+                read16le(&rgba64.planes[0].data, i * 8 + c * 2),
+                read16le(&rgb48.planes[0].data, i * 6 + c * 2),
+                "colour word {i}/{c}"
+            );
+        }
+        assert_eq!(read16le(&rgba64.planes[0].data, i * 8 + 6), 65535, "A {i}");
+    }
+
+    // Rgba64Le → Gbrp10Le drops alpha and equals the Rgb48Le route on
+    // the colour planes.
+    let back = convert(
+        &rgba64,
+        FrameInfo::new(PixelFormat::Rgba64Le, w, h),
+        PixelFormat::Gbrp10Le,
+        &opts,
+    )
+    .expect("rgba64 → gbrp10");
+    assert_eq!(back.planes.len(), 3);
+    for p in 0..3 {
+        assert_eq!(back.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+
+    // Rgb48Le → Gbrap12Le synthesises opaque (1 << 12) - 1.
+    let gbrap = convert(
+        &rgb48,
+        FrameInfo::new(PixelFormat::Rgb48Le, w, h),
+        PixelFormat::Gbrap12Le,
+        &opts,
+    )
+    .expect("rgb48 → gbrap12");
+    assert_eq!(gbrap.planes.len(), 4);
+    for i in 0..n {
+        assert_eq!(read16le(&gbrap.planes[3].data, i * 2), 4095, "opaque {i}");
+    }
+
+    // Gbrap12Le → Rgb48Le drops the alpha plane; colour equals the
+    // no-alpha sibling's route.
+    let src_a = synth_gbr(w, h, 12, true);
+    let via_rgb48 = convert(
+        &src_a,
+        FrameInfo::new(PixelFormat::Gbrap12Le, w, h),
+        PixelFormat::Rgb48Le,
+        &opts,
+    )
+    .expect("gbrap12 → rgb48");
+    let src_no_a = VideoFrame {
+        pts: None,
+        planes: src_a.planes[..3].to_vec(),
+    };
+    let want = convert(
+        &src_no_a,
+        FrameInfo::new(PixelFormat::Gbrp12Le, w, h),
+        PixelFormat::Rgb48Le,
+        &opts,
+    )
+    .expect("gbrp12 → rgb48");
+    assert_eq!(via_rgb48.planes[0].data, want.planes[0].data);
+
+    // Gbrp8 ↔ Rgba64Le: ×257 colour, opaque 65535, alpha dropped on
+    // the way back.
+    let src8 = synth_gbr8(w, h);
+    let rgba64 = convert(
+        &src8,
+        FrameInfo::new(PixelFormat::Gbrp8, w, h),
+        PixelFormat::Rgba64Le,
+        &opts,
+    )
+    .expect("gbrp8 → rgba64");
+    for i in 0..n {
+        assert_eq!(
+            read16le(&rgba64.planes[0].data, i * 8),
+            src8.planes[2].data[i] as u16 * 257,
+            "R {i}"
+        );
+        assert_eq!(read16le(&rgba64.planes[0].data, i * 8 + 6), 65535, "A {i}");
+    }
+    let back = convert(
+        &rgba64,
+        FrameInfo::new(PixelFormat::Rgba64Le, w, h),
+        PixelFormat::Gbrp8,
+        &opts,
+    )
+    .expect("rgba64 → gbrp8");
+    assert_eq!(back.planes.len(), 3);
+    for p in 0..3 {
+        assert_eq!(back.planes[p].data, src8.planes[p].data, "plane {p}");
+    }
+}
+
+/// GBR(A) ↔ Gray8: the gray broadcast widens with MSB replication into
+/// all three colour planes (alpha opaque when present), the projection
+/// recovers gray content exactly, and the direct GBR → Gray8 row equals
+/// the hand-staged narrow-to-Rgb24-then-project route sample-for-sample.
+#[test]
+fn gbr_gray8_broadcast_projection_roundtrip() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (8u32, 4u32);
+    let n = (w * h) as usize;
+    let gray = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: w as usize,
+            data: (0..n).map(|i| ((i * 11 + 3) & 0xFF) as u8).collect(),
+        }],
+    };
+    let gray_info = FrameInfo::new(PixelFormat::Gray8, w, h);
+    let widen = |v: u8, bits: u32| -> u16 {
+        let v = v as u32;
+        let shift = bits - 8;
+        (((v << shift) | (v >> (8 - shift))) & ((1u32 << bits) - 1)) as u16
+    };
+    for (fmt, bits, alpha) in [
+        (PixelFormat::Gbrp8, 8u32, false),
+        (PixelFormat::Gbrp10Le, 10, false),
+        (PixelFormat::Gbrp12Le, 12, false),
+        (PixelFormat::Gbrp14Le, 14, false),
+        (PixelFormat::Gbrp16Le, 16, false),
+        (PixelFormat::Gbrap10Le, 10, true),
+        (PixelFormat::Gbrap12Le, 12, true),
+        (PixelFormat::Gbrap14Le, 14, true),
+        (PixelFormat::Gbrap16Le, 16, true),
+    ] {
+        let gbr = convert(&gray, gray_info, fmt, &opts).expect("gray → gbr");
+        assert_eq!(gbr.planes.len(), if alpha { 4 } else { 3 }, "{fmt:?}");
+        for i in 0..n {
+            let v = gray.planes[0].data[i];
+            for p in 0..3 {
+                if bits > 8 {
+                    assert_eq!(
+                        read16le(&gbr.planes[p].data, i * 2),
+                        widen(v, bits),
+                        "{fmt:?} plane {p} sample {i}"
+                    );
+                } else {
+                    assert_eq!(gbr.planes[p].data[i], v, "{fmt:?} plane {p} sample {i}");
+                }
+            }
+            if alpha {
+                let want = ((1u32 << bits) - 1) as u16;
+                assert_eq!(
+                    read16le(&gbr.planes[3].data, i * 2),
+                    want,
+                    "{fmt:?} opaque {i}"
+                );
+            }
+        }
+        // Projection recovers the gray plane exactly (r = g = b input).
+        let back = convert(&gbr, FrameInfo::new(fmt, w, h), PixelFormat::Gray8, &opts)
+            .expect("gbr → gray");
+        assert_eq!(back.planes[0].data, gray.planes[0].data, "{fmt:?}");
+    }
+    // Direct row == hand-staged narrow + project on arbitrary content.
+    let src = synth_gbr(w, h, 12, false);
+    let info = FrameInfo::new(PixelFormat::Gbrp12Le, w, h);
+    let direct = convert(&src, info, PixelFormat::Gray8, &opts).expect("direct");
+    let mid = convert(&src, info, PixelFormat::Rgb24, &opts).expect("leg 1");
+    let staged = convert(
+        &mid,
+        FrameInfo::new(PixelFormat::Rgb24, w, h),
+        PixelFormat::Gray8,
+        &opts,
+    )
+    .expect("leg 2");
+    assert_eq!(direct.planes[0].data, staged.planes[0].data);
+}
+
+/// Cross-alpha GBR ↔ GBR moves and the Gray8-pivot rescues (Mono, deep
+/// grayscale) resolve — and produce structurally-correct frames.
+#[test]
+fn gbr_cross_alpha_and_gray_ladder_reachability() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (4u32, 2u32);
+    // Gbrp8 → Gbrap12Le: staged through Rgba64Le, alpha opaque.
+    let src8 = synth_gbr8(w, h);
+    let out = convert(
+        &src8,
+        FrameInfo::new(PixelFormat::Gbrp8, w, h),
+        PixelFormat::Gbrap12Le,
+        &opts,
+    )
+    .expect("gbrp8 → gbrap12");
+    assert_eq!(out.planes.len(), 4);
+    for i in 0..(w * h) as usize {
+        assert_eq!(read16le(&out.planes[3].data, i * 2), 4095, "opaque {i}");
+    }
+    // Gbrap16Le → Gbrp10Le: staged, alpha dropped.
+    let src = synth_gbr(w, h, 16, true);
+    let out = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrap16Le, w, h),
+        PixelFormat::Gbrp10Le,
+        &opts,
+    )
+    .expect("gbrap16 → gbrp10");
+    assert_eq!(out.planes.len(), 3);
+    // Mono and deep-grayscale routes over the Gray8 pivot.
+    for (a, b) in [
+        (PixelFormat::Gbrp8, PixelFormat::MonoBlack),
+        (PixelFormat::Gbrp16Le, PixelFormat::Gray16Le),
+        (PixelFormat::Gbrap16Le, PixelFormat::Gray10Le),
+        (PixelFormat::Gbrp10Le, PixelFormat::Gray12Le),
+    ] {
+        assert!(supports(a, b), "{a:?} → {b:?}");
+        assert!(supports(b, a), "{b:?} → {a:?}");
+    }
+}
+
 /// The ladder ends are reachable from the wider ecosystem through the
 /// staged fallback, and the in-ladder cross-depth moves resolve.
 #[test]

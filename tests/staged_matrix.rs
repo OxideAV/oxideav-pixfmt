@@ -68,6 +68,12 @@ const ALL_FORMATS: &[PixelFormat] = &[
     PixelFormat::Yuva444P12Le,
     PixelFormat::Yuva422P16Le,
     PixelFormat::Yuva444P16Le,
+    PixelFormat::Gbrp8,
+    PixelFormat::Gbrp16Le,
+    PixelFormat::Gbrap16Le,
+    PixelFormat::Yuva420P10Le,
+    PixelFormat::Yuva420P12Le,
+    PixelFormat::Yuva420P16Le,
 ];
 
 fn plane(rows: usize, row_bytes: usize, seed: &mut u32) -> VideoPlane {
@@ -114,9 +120,11 @@ fn build_frame(fmt: PixelFormat, w: usize, h: usize) -> VideoFrame {
         PixelFormat::Gbrp10Le
         | PixelFormat::Gbrp12Le
         | PixelFormat::Gbrp14Le
+        | PixelFormat::Gbrp16Le
         | PixelFormat::Gbrap10Le
         | PixelFormat::Gbrap12Le
-        | PixelFormat::Gbrap14Le => {
+        | PixelFormat::Gbrap14Le
+        | PixelFormat::Gbrap16Le => {
             let n = if info.has_alpha { 4 } else { 3 };
             (0..n)
                 .map(|_| {
@@ -213,20 +221,25 @@ fn coverage_matrix_matches_supports() {
             }
         }
     }
-    // Coverage floor after the deep Yuva family (core 0.1.31) and the
-    // computed planar-family dispatch tier landed: 714 direct pairs and
-    // 2480 total reachable pairs out of 52 × 51 = 2652 ordered pairs
-    // (the remainder needs more than one pivot or has no meaningful
-    // route — e.g. Mono ↔ deep grayscale). These may only go UP. The
-    // floors only hold for the full native sweep — the miri run covers
-    // a source subset.
+    // Coverage floor after the core 0.1.33 formats landed (GBR ladder
+    // ends + deep 4:2:0 Yuva trio + GBR alpha-crossing / Gray8 rows,
+    // round 430): 912 direct and 3224 reachable of the full
+    // 58 × 57 = 3306 ordered pairs. Every pair involving the six new
+    // formats resolves; the 82-pair remainder is legacy routes that
+    // need more than one pivot (e.g. Mono ↔ deep grayscale). These may
+    // only go UP. The floors only hold for the full native sweep — the
+    // miri run covers a source subset.
     if src_stride == 1 {
+        eprintln!(
+            "coverage: direct={direct_pairs} total={ok_pairs} of {}",
+            ALL_FORMATS.len() * (ALL_FORMATS.len() - 1)
+        );
         assert!(
-            direct_pairs >= 714,
+            direct_pairs >= 912,
             "direct coverage regressed: {direct_pairs}"
         );
         assert!(
-            ok_pairs >= 2480,
+            ok_pairs >= 3224,
             "total coverage regressed: {ok_pairs} (unsupported sample: {:?})",
             &unsupported[..unsupported.len().min(8)]
         );

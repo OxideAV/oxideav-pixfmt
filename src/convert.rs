@@ -804,12 +804,12 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         // deinterleave/interleave plus a `16 - bits` left-shift toward
         // the 16-bit container (and the reverse right-shift on the way
         // back) — no colour matrix. No `ColorSpace` knob applies.
-        (P::Gbrp10Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 10, alpha: false }),
-        (P::Gbrp12Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 12, alpha: false }),
-        (P::Gbrp14Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 14, alpha: false }),
-        (P::Gbrap10Le, P::Rgba64Le, GbrToPackedDeep { bits: 10, alpha: true }),
-        (P::Gbrap12Le, P::Rgba64Le, GbrToPackedDeep { bits: 12, alpha: true }),
-        (P::Gbrap14Le, P::Rgba64Le, GbrToPackedDeep { bits: 14, alpha: true }),
+        (P::Gbrp10Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 10, alpha_in: false, alpha_out: false }),
+        (P::Gbrp12Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 12, alpha_in: false, alpha_out: false }),
+        (P::Gbrp14Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 14, alpha_in: false, alpha_out: false }),
+        (P::Gbrap10Le, P::Rgba64Le, GbrToPackedDeep { bits: 10, alpha_in: true, alpha_out: true }),
+        (P::Gbrap12Le, P::Rgba64Le, GbrToPackedDeep { bits: 12, alpha_in: true, alpha_out: true }),
+        (P::Gbrap14Le, P::Rgba64Le, GbrToPackedDeep { bits: 14, alpha_in: true, alpha_out: true }),
         // Planar GBR(A) ↔ 8-bit packed RGB(A). Same plane reorder as the
         // deep rows with a bit-depth step folded in: narrowing keeps the
         // top 8 of the `bits` significant bits (truncation, matching the
@@ -830,12 +830,12 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgba,  P::Gbrap12Le, Packed8ToGbr { bits: 12, alpha: true }),
         (P::Rgba,  P::Gbrap14Le, Packed8ToGbr { bits: 14, alpha: true }),
 
-        (P::Rgb48Le,  P::Gbrp10Le,  PackedDeepToGbr { bits: 10, alpha: false }),
-        (P::Rgb48Le,  P::Gbrp12Le,  PackedDeepToGbr { bits: 12, alpha: false }),
-        (P::Rgb48Le,  P::Gbrp14Le,  PackedDeepToGbr { bits: 14, alpha: false }),
-        (P::Rgba64Le, P::Gbrap10Le, PackedDeepToGbr { bits: 10, alpha: true }),
-        (P::Rgba64Le, P::Gbrap12Le, PackedDeepToGbr { bits: 12, alpha: true }),
-        (P::Rgba64Le, P::Gbrap14Le, PackedDeepToGbr { bits: 14, alpha: true }),
+        (P::Rgb48Le,  P::Gbrp10Le,  PackedDeepToGbr { bits: 10, alpha_in: false, alpha_out: false }),
+        (P::Rgb48Le,  P::Gbrp12Le,  PackedDeepToGbr { bits: 12, alpha_in: false, alpha_out: false }),
+        (P::Rgb48Le,  P::Gbrp14Le,  PackedDeepToGbr { bits: 14, alpha_in: false, alpha_out: false }),
+        (P::Rgba64Le, P::Gbrap10Le, PackedDeepToGbr { bits: 10, alpha_in: true, alpha_out: true }),
+        (P::Rgba64Le, P::Gbrap12Le, PackedDeepToGbr { bits: 12, alpha_in: true, alpha_out: true }),
+        (P::Rgba64Le, P::Gbrap14Le, PackedDeepToGbr { bits: 14, alpha_in: true, alpha_out: true }),
 
         // GBR(A) depth-ladder ends (core 0.1.33). The 16-bit members
         // reuse the shared GBR ops with `bits = 16`: the deep-packed
@@ -845,18 +845,71 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         // dedicated byte-plane ops: Rgb24 interop is a zero-math plane
         // reorder (bit-exact, self-inverse), Rgb48Le interop widens
         // x257 / keeps the top byte, mirroring Rgb24 ↔ Rgb48Le.
-        (P::Gbrp16Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 16, alpha: false }),
-        (P::Gbrap16Le, P::Rgba64Le, GbrToPackedDeep { bits: 16, alpha: true }),
-        (P::Rgb48Le,  P::Gbrp16Le,  PackedDeepToGbr { bits: 16, alpha: false }),
-        (P::Rgba64Le, P::Gbrap16Le, PackedDeepToGbr { bits: 16, alpha: true }),
+        (P::Gbrp16Le,  P::Rgb48Le,  GbrToPackedDeep { bits: 16, alpha_in: false, alpha_out: false }),
+        (P::Gbrap16Le, P::Rgba64Le, GbrToPackedDeep { bits: 16, alpha_in: true, alpha_out: true }),
+        (P::Rgb48Le,  P::Gbrp16Le,  PackedDeepToGbr { bits: 16, alpha_in: false, alpha_out: false }),
+        (P::Rgba64Le, P::Gbrap16Le, PackedDeepToGbr { bits: 16, alpha_in: true, alpha_out: true }),
         (P::Gbrp16Le,  P::Rgb24, GbrToPacked8 { bits: 16, alpha: false }),
         (P::Gbrap16Le, P::Rgba,  GbrToPacked8 { bits: 16, alpha: true }),
         (P::Rgb24, P::Gbrp16Le,  Packed8ToGbr { bits: 16, alpha: false }),
         (P::Rgba,  P::Gbrap16Le, Packed8ToGbr { bits: 16, alpha: true }),
         (P::Gbrp8,   P::Rgb24,   Gbr8ToRgb24),
         (P::Rgb24,   P::Gbrp8,   Rgb24ToGbr8),
-        (P::Gbrp8,   P::Rgb48Le, Gbr8ToRgb48),
-        (P::Rgb48Le, P::Gbrp8,   Rgb48ToGbr8),
+        (P::Gbrp8,   P::Rgb48Le, Gbr8ToPackedDeep { alpha_out: false }),
+        (P::Rgb48Le, P::Gbrp8,   PackedDeepToGbr8 { alpha_in: false }),
+
+        // Alpha-crossing deep-packed GBR rows: every GBR(A) member has a
+        // direct hop to BOTH deep packed formats. Colour words keep the
+        // family shift convention; a missing alpha is synthesised opaque
+        // (full-scale 65535 on the packed side, `(1 << bits) - 1` on the
+        // planar side) and a surplus alpha is dropped. These rows give
+        // the staged fallback its alpha-crossing GBR pivot legs, closing
+        // e.g. Gbrp8 -> Gbrap12Le and Gbrap16Le -> Gbrp10Le.
+        (P::Gbrp10Le, P::Rgba64Le, GbrToPackedDeep { bits: 10, alpha_in: false, alpha_out: true }),
+        (P::Gbrp12Le, P::Rgba64Le, GbrToPackedDeep { bits: 12, alpha_in: false, alpha_out: true }),
+        (P::Gbrp14Le, P::Rgba64Le, GbrToPackedDeep { bits: 14, alpha_in: false, alpha_out: true }),
+        (P::Gbrp16Le, P::Rgba64Le, GbrToPackedDeep { bits: 16, alpha_in: false, alpha_out: true }),
+        (P::Gbrap10Le, P::Rgb48Le, GbrToPackedDeep { bits: 10, alpha_in: true, alpha_out: false }),
+        (P::Gbrap12Le, P::Rgb48Le, GbrToPackedDeep { bits: 12, alpha_in: true, alpha_out: false }),
+        (P::Gbrap14Le, P::Rgb48Le, GbrToPackedDeep { bits: 14, alpha_in: true, alpha_out: false }),
+        (P::Gbrap16Le, P::Rgb48Le, GbrToPackedDeep { bits: 16, alpha_in: true, alpha_out: false }),
+        (P::Rgba64Le, P::Gbrp10Le, PackedDeepToGbr { bits: 10, alpha_in: true, alpha_out: false }),
+        (P::Rgba64Le, P::Gbrp12Le, PackedDeepToGbr { bits: 12, alpha_in: true, alpha_out: false }),
+        (P::Rgba64Le, P::Gbrp14Le, PackedDeepToGbr { bits: 14, alpha_in: true, alpha_out: false }),
+        (P::Rgba64Le, P::Gbrp16Le, PackedDeepToGbr { bits: 16, alpha_in: true, alpha_out: false }),
+        (P::Rgb48Le, P::Gbrap10Le, PackedDeepToGbr { bits: 10, alpha_in: false, alpha_out: true }),
+        (P::Rgb48Le, P::Gbrap12Le, PackedDeepToGbr { bits: 12, alpha_in: false, alpha_out: true }),
+        (P::Rgb48Le, P::Gbrap14Le, PackedDeepToGbr { bits: 14, alpha_in: false, alpha_out: true }),
+        (P::Rgb48Le, P::Gbrap16Le, PackedDeepToGbr { bits: 16, alpha_in: false, alpha_out: true }),
+        (P::Gbrp8,    P::Rgba64Le, Gbr8ToPackedDeep { alpha_out: true }),
+        (P::Rgba64Le, P::Gbrp8,    PackedDeepToGbr8 { alpha_in: true }),
+
+        // GBR(A) <-> Gray8 for the whole nine-member family: narrow to
+        // 8 bits and project through the full-range Y' row of the
+        // selected primaries on the way out (same kernel as the packed
+        // RgbToGray rows, alpha dropped); broadcast the gray value into
+        // G = B = R at depth on the way in (MSB-replicated widen, alpha
+        // synthesised opaque). r = g = b content round-trips exactly,
+        // and the Gray8 pivot now rescues the GBR <-> Mono and
+        // GBR <-> deep-grayscale routes.
+        (P::Gbrp8,     P::Gray8, GbrToGray { bits: 8,  alpha_in: false }),
+        (P::Gbrp10Le,  P::Gray8, GbrToGray { bits: 10, alpha_in: false }),
+        (P::Gbrp12Le,  P::Gray8, GbrToGray { bits: 12, alpha_in: false }),
+        (P::Gbrp14Le,  P::Gray8, GbrToGray { bits: 14, alpha_in: false }),
+        (P::Gbrp16Le,  P::Gray8, GbrToGray { bits: 16, alpha_in: false }),
+        (P::Gbrap10Le, P::Gray8, GbrToGray { bits: 10, alpha_in: true }),
+        (P::Gbrap12Le, P::Gray8, GbrToGray { bits: 12, alpha_in: true }),
+        (P::Gbrap14Le, P::Gray8, GbrToGray { bits: 14, alpha_in: true }),
+        (P::Gbrap16Le, P::Gray8, GbrToGray { bits: 16, alpha_in: true }),
+        (P::Gray8, P::Gbrp8,     GrayToGbr { bits: 8,  alpha_out: false }),
+        (P::Gray8, P::Gbrp10Le,  GrayToGbr { bits: 10, alpha_out: false }),
+        (P::Gray8, P::Gbrp12Le,  GrayToGbr { bits: 12, alpha_out: false }),
+        (P::Gray8, P::Gbrp14Le,  GrayToGbr { bits: 14, alpha_out: false }),
+        (P::Gray8, P::Gbrp16Le,  GrayToGbr { bits: 16, alpha_out: false }),
+        (P::Gray8, P::Gbrap10Le, GrayToGbr { bits: 10, alpha_out: true }),
+        (P::Gray8, P::Gbrap12Le, GrayToGbr { bits: 12, alpha_out: true }),
+        (P::Gray8, P::Gbrap14Le, GrayToGbr { bits: 14, alpha_out: true }),
+        (P::Gray8, P::Gbrap16Le, GrayToGbr { bits: 16, alpha_out: true }),
 
         // High-precision planar YUV (10/12-bit, 16-bit LE storage with the
         // value in the low `bits` bits) ↔ the 8-bit planar siblings. Pure
@@ -1174,19 +1227,25 @@ enum ConvertOp {
     /// Planar GBR(A) → packed deep RGB (`Rgb48Le` / `Rgba64Le`). Reorders
     /// the G, B, R(, A) planes into packed R, G, B(, A) 16-bit words and
     /// left-shifts each `bits`-significant sample by `16 - bits` so the
-    /// packed word uses the full 16-bit range. `alpha` selects the
-    /// 4-plane / `Rgba64Le` shape.
+    /// packed word uses the full 16-bit range. `alpha_in` names the
+    /// source's 4-plane shape, `alpha_out` the packed `Rgba64Le` target;
+    /// when they differ the alpha plane is dropped (`Gbrap* → Rgb48Le`)
+    /// or synthesised opaque full-scale 65535 (`Gbrp* → Rgba64Le`).
     GbrToPackedDeep {
         bits: u8,
-        alpha: bool,
+        alpha_in: bool,
+        alpha_out: bool,
     },
     /// Packed deep RGB (`Rgb48Le` / `Rgba64Le`) → planar GBR(A). The
     /// inverse of [`Self::GbrToPackedDeep`]: splits the packed R, G, B(, A)
     /// words into G, B, R(, A) planes and right-shifts each by `16 - bits`
-    /// back into the `bits`-significant low range.
+    /// back into the `bits`-significant low range. Mismatched alpha
+    /// flags drop the packed alpha word (`Rgba64Le → Gbrp*`) or
+    /// synthesise an opaque `(1 << bits) - 1` plane (`Rgb48Le → Gbrap*`).
     PackedDeepToGbr {
         bits: u8,
-        alpha: bool,
+        alpha_in: bool,
+        alpha_out: bool,
     },
     /// High-precision planar YUV (`Yuv*P10Le` / `Yuv*P12Le` /
     /// `Yuv*P16Le`, 16-bit LE storage) → the 8-bit planar sibling
@@ -1230,13 +1289,38 @@ enum ConvertOp {
     Gbr8ToRgb24,
     /// Packed `Rgb24` → `Gbrp8`: the inverse plane split.
     Rgb24ToGbr8,
-    /// `Gbrp8` → packed `Rgb48Le`: plane reorder plus the exact ×257
+    /// `Gbrp8` → packed deep RGB: plane reorder plus the exact ×257
     /// widen into full-width 16-bit words (peak maps to peak),
-    /// mirroring `Rgb24 → Rgb48Le`.
-    Gbr8ToRgb48,
-    /// Packed `Rgb48Le` → `Gbrp8`: plane split keeping the top byte of
-    /// each word (truncation — the exact inverse of the ×257 widen).
-    Rgb48ToGbr8,
+    /// mirroring `Rgb24 → Rgb48Le`. `alpha_out` selects the `Rgba64Le`
+    /// shape with a synthesised opaque 65535 alpha word (`Gbrp8` never
+    /// carries alpha itself).
+    Gbr8ToPackedDeep {
+        alpha_out: bool,
+    },
+    /// Packed deep RGB (`Rgb48Le` / `Rgba64Le`) → `Gbrp8`: plane split
+    /// keeping the top byte of each word (truncation — the exact
+    /// inverse of the ×257 widen). `alpha_in` names the 4-component
+    /// source shape; its alpha word is dropped.
+    PackedDeepToGbr8 {
+        alpha_in: bool,
+    },
+    /// Planar GBR(A) → `Gray8`: narrow each colour plane to 8 bits
+    /// (top-bits truncation, crate depth policy) and project through
+    /// the full-range Y' row of the selected primaries — the same
+    /// kernel as the packed [`Self::RgbToGray`] rows, so `r = g = b`
+    /// content maps to itself exactly. Alpha (when present) is dropped.
+    GbrToGray {
+        bits: u32,
+        alpha_in: bool,
+    },
+    /// `Gray8` → planar GBR(A): broadcast the gray value into the G, B
+    /// and R planes at the family depth (MSB-replicated widen — peak
+    /// maps to peak, and [`Self::GbrToGray`] recovers the original
+    /// exactly). `alpha_out` appends an opaque full-scale alpha plane.
+    GrayToGbr {
+        bits: u32,
+        alpha_out: bool,
+    },
     /// Cross-depth planar YUV: rescale every plane between two
     /// `bits`-significant 16-bit LE storage widths (10 ↔ 12 ↔ 16) with
     /// the subsampling layout preserved. Widening replicates MSBs into
@@ -1424,12 +1508,27 @@ impl ConvertOp {
                 dst_wsub,
                 dst_hsub,
             } => chroma_resample16(src, src_info, src_wsub, src_hsub, dst_wsub, dst_hsub),
-            Self::GbrToPackedDeep { bits, alpha } => {
-                do_gbr_to_packed_deep(src, src_info, bits, alpha)
+            Self::GbrToPackedDeep {
+                bits,
+                alpha_in,
+                alpha_out,
+            } => do_gbr_to_packed_deep(src, src_info, bits, alpha_in, alpha_out),
+            Self::PackedDeepToGbr {
+                bits,
+                alpha_in,
+                alpha_out,
+            } => do_packed_deep_to_gbr(src, src_info, bits, alpha_in, alpha_out),
+            Self::Gbr8ToPackedDeep { alpha_out } => {
+                do_gbr8_to_packed_deep(src, src_info, alpha_out)
             }
-            Self::PackedDeepToGbr { bits, alpha } => {
-                do_packed_deep_to_gbr(src, src_info, bits, alpha)
+            Self::PackedDeepToGbr8 { alpha_in } => do_packed_deep_to_gbr8(src, src_info, alpha_in),
+            Self::GbrToGray { bits, alpha_in } => {
+                // Gray8 is a full-range space — like the packed RgbToGray
+                // rows, the projection always uses the full-range Y' row
+                // (the ColorSpace knob still picks the primaries).
+                do_gbr_to_gray(src, src_info, matrix.with_range(false), bits, alpha_in)
             }
+            Self::GrayToGbr { bits, alpha_out } => do_gray_to_gbr(src, src_info, bits, alpha_out),
             Self::DepthDownYuv { wsub, hsub, bits } => {
                 do_yuv_depth_down(src, src_info, wsub, hsub, bits)
             }
@@ -1440,8 +1539,6 @@ impl ConvertOp {
             Self::Packed8ToGbr { bits, alpha } => do_packed8_to_gbr(src, src_info, bits, alpha),
             Self::Gbr8ToRgb24 => do_gbr8_to_rgb24(src, src_info),
             Self::Rgb24ToGbr8 => do_rgb24_to_gbr8(src, src_info),
-            Self::Gbr8ToRgb48 => do_gbr8_to_rgb48(src, src_info),
-            Self::Rgb48ToGbr8 => do_rgb48_to_gbr8(src, src_info),
             Self::DepthRescaleYuv {
                 wsub,
                 hsub,
@@ -4088,9 +4185,10 @@ fn do_gbr_to_packed_deep(
     src: &VideoFrame,
     src_info: FrameInfo,
     bits: u8,
-    alpha: bool,
+    alpha_in: bool,
+    alpha_out: bool,
 ) -> Result<VideoFrame> {
-    let need = if alpha { 4 } else { 3 };
+    let need = if alpha_in { 4 } else { 3 };
     if src.planes.len() < need {
         return Err(Error::invalid(
             "pixfmt: GBR(A) source needs G, B, R(, A) planes",
@@ -4104,7 +4202,9 @@ fn do_gbr_to_packed_deep(
     let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
     let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 2, h);
     let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 2, h);
-    let a = if alpha {
+    // The alpha plane is only consulted when the packed target carries
+    // it; a surplus source alpha is dropped.
+    let a = if alpha_in && alpha_out {
         Some(gather_tight(
             &src.planes[3].data,
             src.planes[3].stride,
@@ -4114,7 +4214,7 @@ fn do_gbr_to_packed_deep(
     } else {
         None
     };
-    let comps = if alpha { 4 } else { 3 };
+    let comps = if alpha_out { 4 } else { 3 };
     let mut out = vec![0u8; w * h * comps * 2];
     for i in 0..w * h {
         let rv = rd16le(&r, i * 2) << shift;
@@ -4124,8 +4224,13 @@ fn do_gbr_to_packed_deep(
         wr16le(&mut out, base, rv);
         wr16le(&mut out, base + 2, gv);
         wr16le(&mut out, base + 4, bv);
-        if let Some(a) = &a {
-            let av = rd16le(a, i * 2) << shift;
+        if alpha_out {
+            // Carry the source alpha (shifted like the colour words) or
+            // synthesise the packed format's true opaque full-scale.
+            let av = match &a {
+                Some(a) => rd16le(a, i * 2) << shift,
+                None => 0xFFFF,
+            };
             wr16le(&mut out, base + 6, av);
         }
     }
@@ -4302,10 +4407,16 @@ fn do_rgb24_to_gbr8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame>
     ))
 }
 
-/// `Gbrp8` → packed `Rgb48Le`: plane reorder plus the exact ×257 widen
-/// (the 8 → 16 MSB replication — zero maps to zero, 255 to 65535), the
-/// same rule as `Rgb24 → Rgb48Le`.
-fn do_gbr8_to_rgb48(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+/// `Gbrp8` → packed deep RGB (`Rgb48Le` / `Rgba64Le`): plane reorder
+/// plus the exact ×257 widen (the 8 → 16 MSB replication — zero maps to
+/// zero, 255 to 65535), the same rule as `Rgb24 → Rgb48Le`. With
+/// `alpha_out` the fourth word is synthesised opaque 65535 (`Gbrp8`
+/// never carries alpha itself).
+fn do_gbr8_to_packed_deep(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    alpha_out: bool,
+) -> Result<VideoFrame> {
     if src.planes.len() < 3 {
         return Err(Error::invalid("pixfmt: GBR source needs G, B, R planes"));
     }
@@ -4314,35 +4425,45 @@ fn do_gbr8_to_rgb48(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame>
     let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
     let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w, h);
     let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w, h);
-    let mut out = vec![0u8; w * h * 6];
+    let comps = if alpha_out { 4 } else { 3 };
+    let mut out = vec![0u8; w * h * comps * 2];
     for i in 0..w * h {
-        let base = i * 6;
+        let base = i * comps * 2;
         wr16le(&mut out, base, r[i] as u16 * 257);
         wr16le(&mut out, base + 2, g[i] as u16 * 257);
         wr16le(&mut out, base + 4, b[i] as u16 * 257);
+        if alpha_out {
+            wr16le(&mut out, base + 6, 0xFFFF);
+        }
     }
     Ok(make_frame(
         src,
         vec![VideoPlane {
-            stride: w * 6,
+            stride: w * comps * 2,
             data: out,
         }],
     ))
 }
 
-/// Packed `Rgb48Le` → `Gbrp8`: plane split keeping the top byte of each
-/// 16-bit word (truncation — the exact inverse of the ×257 widen, so
-/// 8-bit content round-trips losslessly).
-fn do_rgb48_to_gbr8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+/// Packed deep RGB (`Rgb48Le` / `Rgba64Le`) → `Gbrp8`: plane split
+/// keeping the top byte of each 16-bit word (truncation — the exact
+/// inverse of the ×257 widen, so 8-bit content round-trips losslessly).
+/// An `Rgba64Le` source's alpha word is dropped.
+fn do_packed_deep_to_gbr8(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    alpha_in: bool,
+) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
+    let comps = if alpha_in { 4 } else { 3 };
     let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 6, h);
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h);
     let mut g = vec![0u8; w * h];
     let mut b = vec![0u8; w * h];
     let mut r = vec![0u8; w * h];
     for i in 0..w * h {
-        let base = i * 6;
+        let base = i * comps * 2;
         r[i] = (rd16le(&packed, base) >> 8) as u8;
         g[i] = (rd16le(&packed, base + 2) >> 8) as u8;
         b[i] = (rd16le(&packed, base + 4) >> 8) as u8;
@@ -4357,27 +4478,137 @@ fn do_rgb48_to_gbr8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame>
     ))
 }
 
+/// Planar GBR(A) → `Gray8`: narrow each colour plane to 8 bits (top
+/// bits — the crate depth policy) and run the full-range luminance
+/// projection under the Y' row of the selected primaries, exactly like
+/// the packed `RgbToGray` rows. Alpha (when present) is dropped.
+fn do_gbr_to_gray(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    bits: u32,
+    alpha_in: bool,
+) -> Result<VideoFrame> {
+    let need = if alpha_in { 4 } else { 3 };
+    if src.planes.len() < need {
+        return Err(Error::invalid(
+            "pixfmt: GBR(A) source needs G, B, R(, A) planes",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let sb = if bits > 8 { 2 } else { 1 };
+    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
+    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * sb, h);
+    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * sb, h);
+    // Interleave the top 8 bits of each sample into an R, G, B byte
+    // triple and reuse the proven packed projection kernel.
+    let mut rgb24 = vec![0u8; w * h * 3];
+    if bits > 8 {
+        let mask: u16 = (((1u32 << bits) - 1) & 0xFFFF) as u16;
+        let shift = bits - 8;
+        for i in 0..w * h {
+            rgb24[i * 3] = ((rd16le(&r, i * 2) & mask) >> shift) as u8;
+            rgb24[i * 3 + 1] = ((rd16le(&g, i * 2) & mask) >> shift) as u8;
+            rgb24[i * 3 + 2] = ((rd16le(&b, i * 2) & mask) >> shift) as u8;
+        }
+    } else {
+        for i in 0..w * h {
+            rgb24[i * 3] = r[i];
+            rgb24[i * 3 + 1] = g[i];
+            rgb24[i * 3 + 2] = b[i];
+        }
+    }
+    let mut gray = vec![0u8; w * h];
+    yuv::rgb24_to_gray8(&rgb24, &mut gray, w * h, matrix);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w,
+            data: gray,
+        }],
+    ))
+}
+
+/// `Gray8` → planar GBR(A): broadcast the gray byte into the G, B and R
+/// planes at the family depth (MSB-replicated widen — peak maps to
+/// peak, and [`do_gbr_to_gray`] recovers the original exactly because
+/// the projection of `r = g = b = v` is `v`). `alpha_out` appends an
+/// opaque full-scale alpha plane.
+fn do_gray_to_gbr(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    bits: u32,
+    alpha_out: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let gray = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let plane = if bits > 8 {
+        let shift = bits - 8;
+        let mask = (1u32 << bits) - 1;
+        let mut out = vec![0u8; w * h * 2];
+        for (i, &v) in gray.iter().enumerate() {
+            let v = v as u32;
+            wr16le(
+                &mut out,
+                i * 2,
+                (((v << shift) | (v >> (8 - shift))) & mask) as u16,
+            );
+        }
+        out
+    } else {
+        gray
+    };
+    let sb = if bits > 8 { 2 } else { 1 };
+    let mut planes = vec![
+        VideoPlane {
+            stride: w * sb,
+            data: plane.clone(),
+        },
+        VideoPlane {
+            stride: w * sb,
+            data: plane.clone(),
+        },
+        VideoPlane {
+            stride: w * sb,
+            data: plane,
+        },
+    ];
+    if alpha_out {
+        planes.push(VideoPlane {
+            stride: w * sb,
+            data: opaque_plane(w * h, bits),
+        });
+    }
+    Ok(make_frame(src, planes))
+}
+
 /// Packed `Rgb48Le` / `Rgba64Le` → planar GBR(A).
 fn do_packed_deep_to_gbr(
     src: &VideoFrame,
     src_info: FrameInfo,
     bits: u8,
-    alpha: bool,
+    alpha_in: bool,
+    alpha_out: bool,
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let shift = 16 - bits as u32;
-    let comps = if alpha { 4 } else { 3 };
+    let comps = if alpha_in { 4 } else { 3 };
     let in_plane = &src.planes[0];
     let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h);
     let mut g = vec![0u8; w * h * 2];
     let mut b = vec![0u8; w * h * 2];
     let mut r = vec![0u8; w * h * 2];
-    let mut a = if alpha {
+    let mut a = if alpha_out {
         vec![0u8; w * h * 2]
     } else {
         Vec::new()
     };
+    // Synthesised opaque alpha at the planar depth (used when the
+    // packed source has no alpha word to carry).
+    let opaque = ((1u32 << bits) - 1) as u16;
     for i in 0..w * h {
         let base = i * comps * 2;
         let rv = rd16le(&packed, base) >> shift;
@@ -4386,8 +4617,12 @@ fn do_packed_deep_to_gbr(
         wr16le(&mut r, i * 2, rv);
         wr16le(&mut g, i * 2, gv);
         wr16le(&mut b, i * 2, bv);
-        if alpha {
-            let av = rd16le(&packed, base + 6) >> shift;
+        if alpha_out {
+            let av = if alpha_in {
+                rd16le(&packed, base + 6) >> shift
+            } else {
+                opaque
+            };
             wr16le(&mut a, i * 2, av);
         }
     }
@@ -4405,7 +4640,7 @@ fn do_packed_deep_to_gbr(
             data: r,
         },
     ];
-    if alpha {
+    if alpha_out {
         planes.push(VideoPlane {
             stride: w * 2,
             data: a,
