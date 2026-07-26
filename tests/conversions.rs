@@ -2,7 +2,7 @@
 //! conversions. Every pair tested here must be lossless.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{convert, supports, ConvertOptions, FrameInfo};
 
 fn synth_rgba(w: u32, h: u32) -> (VideoFrame, FrameInfo) {
     let mut data = Vec::with_capacity((w * h * 4) as usize);
@@ -1272,4 +1272,280 @@ fn gbr_short_plane_count_rejected() {
     let src = synth_gbr(4, 2, 10, false);
     let info = FrameInfo::new(PixelFormat::Gbrap10Le, 4, 2);
     assert!(convert(&src, info, PixelFormat::Rgba64Le, &opts).is_err());
+}
+
+/// Build a `Gbrp8` frame (byte samples) with distinct per-plane ramps.
+fn synth_gbr8(w: u32, h: u32) -> VideoFrame {
+    let n = (w * h) as usize;
+    let ramp = |mul: usize, add: usize| -> Vec<u8> {
+        (0..n).map(|i| ((i * mul + add) & 0xFF) as u8).collect()
+    };
+    VideoFrame {
+        pts: None,
+        planes: vec![
+            VideoPlane {
+                stride: w as usize,
+                data: ramp(7, 0),
+            },
+            VideoPlane {
+                stride: w as usize,
+                data: ramp(11, 3),
+            },
+            VideoPlane {
+                stride: w as usize,
+                data: ramp(5, 1),
+            },
+        ],
+    }
+}
+
+/// `Gbrp16Le` ↔ `Rgb48Le` (and the alpha pair) is a pure plane reorder
+/// at 16 bits — the packed word equals the source word exactly, and the
+/// round-trip is bit-exact on every plane.
+#[test]
+fn gbr16_packed_deep_pure_reorder_roundtrip() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (6u32, 4u32);
+    let src = synth_gbr(w, h, 16, false);
+    let info = FrameInfo::new(PixelFormat::Gbrp16Le, w, h);
+    let packed = convert(&src, info, PixelFormat::Rgb48Le, &opts).expect("gbrp16 → rgb48");
+    let (g, b, r) = (
+        &src.planes[0].data,
+        &src.planes[1].data,
+        &src.planes[2].data,
+    );
+    for i in 0..(w * h) as usize {
+        let base = i * 6;
+        assert_eq!(read16le(&packed.planes[0].data, base), read16le(r, i * 2));
+        assert_eq!(
+            read16le(&packed.planes[0].data, base + 2),
+            read16le(g, i * 2)
+        );
+        assert_eq!(
+            read16le(&packed.planes[0].data, base + 4),
+            read16le(b, i * 2)
+        );
+    }
+    let back = convert(
+        &packed,
+        FrameInfo::new(PixelFormat::Rgb48Le, w, h),
+        PixelFormat::Gbrp16Le,
+        &opts,
+    )
+    .expect("rgb48 → gbrp16");
+    for p in 0..3 {
+        assert_eq!(back.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+    // Alpha pair: all four planes bit-exact through Rgba64Le.
+    let src = synth_gbr(w, h, 16, true);
+    let info = FrameInfo::new(PixelFormat::Gbrap16Le, w, h);
+    let packed = convert(&src, info, PixelFormat::Rgba64Le, &opts).expect("gbrap16 → rgba64");
+    for i in 0..(w * h) as usize {
+        assert_eq!(
+            read16le(&packed.planes[0].data, i * 8 + 6),
+            read16le(&src.planes[3].data, i * 2),
+            "alpha word {i}"
+        );
+    }
+    let back = convert(
+        &packed,
+        FrameInfo::new(PixelFormat::Rgba64Le, w, h),
+        PixelFormat::Gbrap16Le,
+        &opts,
+    )
+    .expect("rgba64 → gbrap16");
+    for p in 0..4 {
+        assert_eq!(back.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+}
+
+/// 8-bit packed content round-trips exactly through the full-width
+/// 16-bit GBR members: the widen is the exact ×257 (peak maps to peak),
+/// the narrow keeps the top byte.
+#[test]
+fn gbr16_8bit_widen_is_exact_257() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (8u32, 4u32);
+    let n = (w * h) as usize;
+    let rgb: Vec<u8> = (0..n * 3).map(|i| ((i * 3 + 5) & 0xFF) as u8).collect();
+    let src = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: (w * 3) as usize,
+            data: rgb.clone(),
+        }],
+    };
+    let planar = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Rgb24, w, h),
+        PixelFormat::Gbrp16Le,
+        &opts,
+    )
+    .expect("rgb24 → gbrp16");
+    // Plane order G, B, R; every word is the ×257 widen of the byte.
+    for i in 0..n {
+        assert_eq!(
+            read16le(&planar.planes[0].data, i * 2),
+            rgb[i * 3 + 1] as u16 * 257,
+            "G {i}"
+        );
+        assert_eq!(
+            read16le(&planar.planes[1].data, i * 2),
+            rgb[i * 3 + 2] as u16 * 257,
+            "B {i}"
+        );
+        assert_eq!(
+            read16le(&planar.planes[2].data, i * 2),
+            rgb[i * 3] as u16 * 257,
+            "R {i}"
+        );
+    }
+    let back = convert(
+        &planar,
+        FrameInfo::new(PixelFormat::Gbrp16Le, w, h),
+        PixelFormat::Rgb24,
+        &opts,
+    )
+    .expect("gbrp16 → rgb24");
+    assert_eq!(back.planes[0].data, rgb);
+    // Alpha variant through Gbrap16Le.
+    let rgba: Vec<u8> = (0..n * 4).map(|i| ((i * 7 + 9) & 0xFF) as u8).collect();
+    let src = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: (w * 4) as usize,
+            data: rgba.clone(),
+        }],
+    };
+    let planar = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Rgba, w, h),
+        PixelFormat::Gbrap16Le,
+        &opts,
+    )
+    .expect("rgba → gbrap16");
+    for i in 0..n {
+        assert_eq!(
+            read16le(&planar.planes[3].data, i * 2),
+            rgba[i * 4 + 3] as u16 * 257,
+            "A {i}"
+        );
+    }
+    let back = convert(
+        &planar,
+        FrameInfo::new(PixelFormat::Gbrap16Le, w, h),
+        PixelFormat::Rgba,
+        &opts,
+    )
+    .expect("gbrap16 → rgba");
+    assert_eq!(back.planes[0].data, rgba);
+}
+
+/// `Gbrp8` ↔ `Rgb24` is a zero-math plane reorder: known byte positions
+/// on the way out, bit-exact round-trips in both directions.
+#[test]
+fn gbrp8_rgb24_pure_reorder_bit_exact() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (6u32, 4u32);
+    let src = synth_gbr8(w, h);
+    let packed = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrp8, w, h),
+        PixelFormat::Rgb24,
+        &opts,
+    )
+    .expect("gbrp8 → rgb24");
+    let n = (w * h) as usize;
+    for i in 0..n {
+        assert_eq!(packed.planes[0].data[i * 3], src.planes[2].data[i], "R {i}");
+        assert_eq!(
+            packed.planes[0].data[i * 3 + 1],
+            src.planes[0].data[i],
+            "G {i}"
+        );
+        assert_eq!(
+            packed.planes[0].data[i * 3 + 2],
+            src.planes[1].data[i],
+            "B {i}"
+        );
+    }
+    let back = convert(
+        &packed,
+        FrameInfo::new(PixelFormat::Rgb24, w, h),
+        PixelFormat::Gbrp8,
+        &opts,
+    )
+    .expect("rgb24 → gbrp8");
+    for p in 0..3 {
+        assert_eq!(back.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+}
+
+/// `Gbrp8` ↔ `Rgb48Le`: the widen is the exact ×257 (zero → zero,
+/// 255 → 65535) and the narrow keeps the top byte, so the round-trip is
+/// lossless.
+#[test]
+fn gbrp8_rgb48_widen_truncate_roundtrip() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (6u32, 4u32);
+    let mut src = synth_gbr8(w, h);
+    // Rails on the first two G samples.
+    src.planes[0].data[0] = 0;
+    src.planes[0].data[1] = 255;
+    let packed = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrp8, w, h),
+        PixelFormat::Rgb48Le,
+        &opts,
+    )
+    .expect("gbrp8 → rgb48");
+    let n = (w * h) as usize;
+    for i in 0..n {
+        assert_eq!(
+            read16le(&packed.planes[0].data, i * 6),
+            src.planes[2].data[i] as u16 * 257,
+            "R {i}"
+        );
+        assert_eq!(
+            read16le(&packed.planes[0].data, i * 6 + 2),
+            src.planes[0].data[i] as u16 * 257,
+            "G {i}"
+        );
+        assert_eq!(
+            read16le(&packed.planes[0].data, i * 6 + 4),
+            src.planes[1].data[i] as u16 * 257,
+            "B {i}"
+        );
+    }
+    assert_eq!(read16le(&packed.planes[0].data, 2), 0, "zero rail");
+    assert_eq!(read16le(&packed.planes[0].data, 8), 65535, "peak rail");
+    let back = convert(
+        &packed,
+        FrameInfo::new(PixelFormat::Rgb48Le, w, h),
+        PixelFormat::Gbrp8,
+        &opts,
+    )
+    .expect("rgb48 → gbrp8");
+    for p in 0..3 {
+        assert_eq!(back.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+}
+
+/// The ladder ends are reachable from the wider ecosystem through the
+/// staged fallback, and the in-ladder cross-depth moves resolve.
+#[test]
+fn gbr_ladder_end_reachability() {
+    for (a, b) in [
+        (PixelFormat::Gbrp8, PixelFormat::Yuv420P),
+        (PixelFormat::Gbrp8, PixelFormat::Gbrp16Le),
+        (PixelFormat::Gbrp8, PixelFormat::Gbrp10Le),
+        (PixelFormat::Gbrp16Le, PixelFormat::Gbrp12Le),
+        (PixelFormat::Gbrp16Le, PixelFormat::Yuv444P16Le),
+        (PixelFormat::Gbrap16Le, PixelFormat::Yuva444P16Le),
+        (PixelFormat::Gbrap16Le, PixelFormat::Bgra),
+        (PixelFormat::Gbrap16Le, PixelFormat::Rgba64Le),
+    ] {
+        assert!(supports(a, b), "{a:?} → {b:?}");
+        assert!(supports(b, a), "{b:?} → {a:?}");
+    }
 }
