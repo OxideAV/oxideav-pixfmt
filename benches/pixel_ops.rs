@@ -351,6 +351,15 @@ fn bench_planar_family(c: &mut Criterion) {
     g.bench_function("yuva444p16_to_yuva444p_1920x1080", |b| {
         b.iter(|| convert(&deep_yuva, deep_info, PixelFormat::Yuva444P, &opts).expect("convert"));
     });
+    // Down to the deep 4:2:0 Yuva siting (core 0.1.33): 16-bit 4:4:4
+    // with alpha → 10-bit 4:2:0 with alpha — resample-then-narrow on
+    // chroma plus the alpha depth move, the new family corner.
+    g.throughput(Throughput::Bytes((w * h * 2 * 4) as u64));
+    g.bench_function("yuva444p16_to_yuva420p10_1920x1080", |b| {
+        b.iter(|| {
+            convert(&deep_yuva, deep_info, PixelFormat::Yuva420P10Le, &opts).expect("convert")
+        });
+    });
     g.finish();
 }
 
