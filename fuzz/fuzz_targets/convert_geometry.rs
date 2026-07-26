@@ -101,6 +101,12 @@ const FORMATS: &[PixelFormat] = &[
     PixelFormat::Yuva444P12Le,
     PixelFormat::Yuva422P16Le,
     PixelFormat::Yuva444P16Le,
+    PixelFormat::Gbrp8,
+    PixelFormat::Gbrp16Le,
+    PixelFormat::Gbrap16Le,
+    PixelFormat::Yuva420P10Le,
+    PixelFormat::Yuva420P12Le,
+    PixelFormat::Yuva420P16Le,
 ];
 
 /// Map a raw fuzzer byte to a small dimension, biased toward the values
@@ -200,17 +206,21 @@ fn build_frame(fmt: PixelFormat, w: u32, h: u32, pad: usize, fill: &[u8]) -> Opt
                 build_plane(ch, cw * 2, pad, fill, &mut seed),
             ]
         }
-        // Planar GBR(A) — 3 or 4 planes, each a 16-bit-per-sample 4:4:4
-        // plane (w samples × 2 bytes per row).
-        PixelFormat::Gbrp10Le
+        // Planar GBR(A) — 3 or 4 planes at 4:4:4, either 16-bit LE words
+        // (2 bytes per sample) or, for Gbrp8, plain bytes.
+        PixelFormat::Gbrp8
+        | PixelFormat::Gbrp10Le
         | PixelFormat::Gbrp12Le
         | PixelFormat::Gbrp14Le
+        | PixelFormat::Gbrp16Le
         | PixelFormat::Gbrap10Le
         | PixelFormat::Gbrap12Le
-        | PixelFormat::Gbrap14Le => {
+        | PixelFormat::Gbrap14Le
+        | PixelFormat::Gbrap16Le => {
             let n = if info.has_alpha { 4 } else { 3 };
+            let sb = luma_bytes_per_sample(&info);
             (0..n)
-                .map(|_| build_plane(hu, wu * 2, pad, fill, &mut seed))
+                .map(|_| build_plane(hu, wu * sb, pad, fill, &mut seed))
                 .collect()
         }
         // Generic planar YUV (incl. Yuva420P). Y at full res; chroma at
