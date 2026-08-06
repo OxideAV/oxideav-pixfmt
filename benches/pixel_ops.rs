@@ -360,6 +360,12 @@ fn bench_planar_family(c: &mut Criterion) {
             convert(&deep_yuva, deep_info, PixelFormat::Yuva420P10Le, &opts).expect("convert")
         });
     });
+    // Full-precision deep matrix (round 438): 16-bit 4:4:4 + alpha →
+    // packed Rgba64Le through the Q30 kernels, alpha word verbatim.
+    g.throughput(Throughput::Bytes((w * h * 2 * 4) as u64));
+    g.bench_function("yuva444p16_to_rgba64_deep_matrix_1920x1080", |b| {
+        b.iter(|| convert(&deep_yuva, deep_info, PixelFormat::Rgba64Le, &opts).expect("convert"));
+    });
     g.finish();
 }
 
