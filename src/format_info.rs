@@ -71,6 +71,11 @@ impl FormatInfo {
             P::Gbrp8 => Self::gbr(8, false),
             P::Gbrp16Le => Self::gbr(16, false),
             P::Gbrap16Le => Self::gbr(16, true),
+            // 8-bit planar GBR + alpha (core 0.1.34): byte samples, all
+            // 8 bits significant, alpha as full-resolution plane 3 —
+            // the alpha-carrying companion completing the GBR(A) ladder
+            // at every depth.
+            P::Gbrap8 => Self::gbr(8, true),
             // 8-bit planar YUV + a full-resolution alpha plane (plane 3
             // is always `w × h` regardless of the chroma subsampling).
             P::Yuva420P => Self::yuva(2, 2),
@@ -118,8 +123,11 @@ impl FormatInfo {
             // RGB family
             P::Rgb24 | P::Bgr24 => Self::packed(8, false),
             P::Rgba | P::Bgra | P::Argb | P::Abgr => Self::packed(8, true),
-            // CMYK — 4 components packed 8-bit, no alpha.
-            P::Cmyk => Self::packed(8, false),
+            // CMYK — 4 components packed 8-bit, no alpha. The inverted
+            // variant (core 0.1.34) shares the byte layout exactly and
+            // differs only in the ink-value convention (0 = full ink),
+            // which is a sample-semantics matter, not a layout one.
+            P::Cmyk | P::CmykInverted => Self::packed(8, false),
             P::Rgb48Le => Self::packed(16, false),
             P::Rgba64Le => Self::packed(16, true),
             // Gray
@@ -128,6 +136,11 @@ impl FormatInfo {
             P::Gray10Le => Self::packed(10, false),
             P::Gray12Le => Self::packed(12, false),
             P::Ya8 => Self::packed(8, true),
+            // Packed 16-bit gray + alpha (core 0.1.34): interleaved Y
+            // then A, each a LE 16-bit word with ALL 16 bits
+            // significant (full-scale 65535, the `Gray16Le`
+            // convention).
+            P::Ya16Le => Self::packed(16, true),
             P::MonoBlack | P::MonoWhite => Self {
                 bit_depth: 1,
                 planes: 1,
@@ -390,6 +403,60 @@ mod tests {
         assert_eq!(info.bit_depth, 16);
         assert_eq!(info.planes, 4);
         assert!(info.has_alpha);
+
+        // 8-bit + alpha (core 0.1.34): the last hole in the ladder —
+        // byte samples, 4 planes, alpha set.
+        let info = FormatInfo::of(P::Gbrap8);
+        assert_eq!(info.bit_depth, 8);
+        assert_eq!(info.planes, 4);
+        assert!(info.is_planar);
+        assert!(info.has_alpha);
+        // Layout-metadata identical to Gbrp8 except the alpha plane.
+        let plain = FormatInfo::of(P::Gbrp8);
+        assert_eq!(info.planes, plain.planes + 1);
+        assert_eq!(info.bit_depth, plain.bit_depth);
+        assert_eq!(info.chroma_w_sub, plain.chroma_w_sub);
+        assert_eq!(info.chroma_h_sub, plain.chroma_h_sub);
+    }
+
+    #[test]
+    fn ya16le_packed_deep_gray_alpha() {
+        // Packed 16-bit gray + alpha (core 0.1.34): single interleaved
+        // plane of LE16 words, all 16 bits significant, alpha carried.
+        let info = FormatInfo::of(P::Ya16Le);
+        assert_eq!(info.bit_depth, 16);
+        assert_eq!(info.planes, 1);
+        assert!(!info.is_planar);
+        assert!(info.has_alpha);
+        assert!(!info.is_palette);
+        assert_eq!(info.chroma_subsampling(), ChromaSubsampling::None);
+        // Mirrors Ya8 in every dimension except depth.
+        let ya8 = FormatInfo::of(P::Ya8);
+        assert_eq!(info.planes, ya8.planes);
+        assert_eq!(info.has_alpha, ya8.has_alpha);
+        assert_eq!(ya8.bit_depth, 8);
+        // Core agreement.
+        assert_eq!(info.planes as usize, P::Ya16Le.plane_count());
+        assert_eq!(info.has_alpha, P::Ya16Le.has_alpha());
+        assert_eq!(info.is_planar, P::Ya16Le.is_planar());
+    }
+
+    #[test]
+    fn cmyk_inverted_mirrors_cmyk_layout() {
+        // CmykInverted (core 0.1.34) is metadata-identical to Cmyk: the
+        // inversion is a sample-value convention, not a layout change.
+        let reg = FormatInfo::of(P::Cmyk);
+        let inv = FormatInfo::of(P::CmykInverted);
+        assert_eq!(reg, inv);
+        assert_eq!(inv.bit_depth, 8);
+        assert_eq!(inv.planes, 1);
+        assert!(!inv.is_planar);
+        assert!(!inv.has_alpha);
+        assert_eq!(inv.chroma_subsampling(), ChromaSubsampling::None);
+        // Core agreement.
+        assert_eq!(inv.planes as usize, P::CmykInverted.plane_count());
+        assert_eq!(inv.has_alpha, P::CmykInverted.has_alpha());
+        assert_eq!(inv.is_planar, P::CmykInverted.is_planar());
     }
 
     #[test]
@@ -398,6 +465,7 @@ mod tests {
         // PixelFormat::plane_count for every GBR variant.
         for fmt in [
             P::Gbrp8,
+            P::Gbrap8,
             P::Gbrp10Le,
             P::Gbrap10Le,
             P::Gbrp12Le,
@@ -511,6 +579,7 @@ mod tests {
             P::Yuva444P12Le,
             P::Yuva444P16Le,
             P::Gbrp8,
+            P::Gbrap8,
             P::Gbrp10Le,
             P::Gbrap10Le,
             P::Gbrp12Le,
@@ -547,10 +616,12 @@ mod tests {
             P::Gray10Le,
             P::Gray12Le,
             P::Ya8,
+            P::Ya16Le,
             P::MonoBlack,
             P::MonoWhite,
             P::Pal8,
             P::Cmyk,
+            P::CmykInverted,
         ] {
             let info = FormatInfo::of(fmt);
             assert_eq!(
