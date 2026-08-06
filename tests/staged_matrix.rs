@@ -74,6 +74,9 @@ const ALL_FORMATS: &[PixelFormat] = &[
     PixelFormat::Yuva420P10Le,
     PixelFormat::Yuva420P12Le,
     PixelFormat::Yuva420P16Le,
+    PixelFormat::Gbrap8,
+    PixelFormat::Ya16Le,
+    PixelFormat::CmykInverted,
 ];
 
 fn plane(rows: usize, row_bytes: usize, seed: &mut u32) -> VideoPlane {
@@ -100,7 +103,11 @@ fn build_frame(fmt: PixelFormat, w: usize, h: usize) -> VideoFrame {
         | PixelFormat::Bgra
         | PixelFormat::Argb
         | PixelFormat::Abgr
-        | PixelFormat::Cmyk => vec![plane(h, w * 4, &mut seed)],
+        | PixelFormat::Cmyk
+        | PixelFormat::CmykInverted => vec![plane(h, w * 4, &mut seed)],
+        // Packed 16-bit grey + alpha: one interleaved plane of LE16
+        // word pairs, all 16 bits significant (no masking needed).
+        PixelFormat::Ya16Le => vec![plane(h, w * 4, &mut seed)],
         PixelFormat::Rgb48Le => vec![plane(h, w * 6, &mut seed)],
         PixelFormat::Rgba64Le => vec![plane(h, w * 8, &mut seed)],
         PixelFormat::Gray8 | PixelFormat::Pal8 => vec![plane(h, w, &mut seed)],
@@ -183,7 +190,7 @@ fn test_opts() -> ConvertOptions {
 /// is pinned so a regression that silently drops routes fails loudly.
 #[test]
 fn coverage_matrix_matches_supports() {
-    // The full 52 × 51 sweep converts every reachable pair; under the
+    // The full 61 × 60 sweep converts every reachable pair; under the
     // miri interpreter that is many minutes of work, so shrink twice:
     // 4 × 4 frames (the smallest size every subsampling grid accepts —
     // 4:1:1 needs width divisible by 4) and a deterministic subset of
@@ -221,25 +228,25 @@ fn coverage_matrix_matches_supports() {
             }
         }
     }
-    // Coverage floor after the core 0.1.33 formats landed (GBR ladder
-    // ends + deep 4:2:0 Yuva trio + GBR alpha-crossing / Gray8 rows,
-    // round 430): 912 direct and 3224 reachable of the full
-    // 58 × 57 = 3306 ordered pairs. Every pair involving the six new
-    // formats resolves; the 82-pair remainder is legacy routes that
-    // need more than one pivot (e.g. Mono ↔ deep grayscale). These may
-    // only go UP. The floors only hold for the full native sweep — the
-    // miri run covers a source subset.
+    // Coverage floor after the core 0.1.34 formats landed (Gbrap8 +
+    // Ya16Le + CmykInverted, round 438): 944 direct and 3568 reachable
+    // of the full 61 × 60 = 3660 ordered pairs. Every pair involving
+    // Gbrap8 and Ya16Le resolves; CmykInverted inherits the same
+    // routes-that-need-two-pivots remainder as Cmyk (Mono / deep
+    // grayscale partners), which with the legacy 82 leaves 92
+    // unreachable. These may only go UP. The floors only hold for the
+    // full native sweep — the miri run covers a source subset.
     if src_stride == 1 {
         eprintln!(
             "coverage: direct={direct_pairs} total={ok_pairs} of {}",
             ALL_FORMATS.len() * (ALL_FORMATS.len() - 1)
         );
         assert!(
-            direct_pairs >= 912,
+            direct_pairs >= 944,
             "direct coverage regressed: {direct_pairs}"
         );
         assert!(
-            ok_pairs >= 3224,
+            ok_pairs >= 3568,
             "total coverage regressed: {ok_pairs} (unsupported sample: {:?})",
             &unsupported[..unsupported.len().min(8)]
         );
