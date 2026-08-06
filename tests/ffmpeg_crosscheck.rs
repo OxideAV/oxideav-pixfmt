@@ -653,3 +653,79 @@ fn gbrap16_to_rgba64_bit_exact_vs_validator() {
     .expect("convert");
     assert_eq!(ours.planes[0].data, theirs);
 }
+
+/// `Gbrap8` ↔ `Rgba` is the byte-tier four-plane pure reorder —
+/// bit-exact against the validator in both directions, alpha included.
+#[test]
+fn gbrap8_rgba_bit_exact_vs_validator() {
+    if !ffmpeg_available() || !validator_supports_pix_fmt("gbrap") {
+        eprintln!("skipping: no ffmpeg binary / no gbrap support");
+        return;
+    }
+    let g = ramp(W * H, 0, 255, 7, 0);
+    let b = ramp(W * H, 0, 255, 11, 3);
+    let r = ramp(W * H, 0, 255, 5, 1);
+    let a = ramp(W * H, 0, 255, 13, 5);
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&g);
+    raw.extend_from_slice(&b);
+    raw.extend_from_slice(&r);
+    raw.extend_from_slice(&a);
+    let theirs = ffmpeg_convert(&raw, "gbrap", "rgba", "format=rgba");
+    let src = planar_frame(vec![
+        (W, g.clone()),
+        (W, b.clone()),
+        (W, r.clone()),
+        (W, a.clone()),
+    ]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrap8, W as u32, H as u32),
+        PixelFormat::Rgba,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    assert_eq!(ours.planes[0].data, theirs, "gbrap → rgba");
+
+    // Packed → planar direction.
+    let rgba = ramp(W * H * 4, 0, 255, 9, 2);
+    let theirs = ffmpeg_convert(&rgba, "rgba", "gbrap", "format=gbrap");
+    let src = planar_frame(vec![(W * 4, rgba.clone())]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Rgba, W as u32, H as u32),
+        PixelFormat::Gbrap8,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    let n = W * H;
+    assert_eq!(ours.planes[0].data, theirs[..n], "G plane");
+    assert_eq!(ours.planes[1].data, theirs[n..2 * n], "B plane");
+    assert_eq!(ours.planes[2].data, theirs[2 * n..3 * n], "R plane");
+    assert_eq!(ours.planes[3].data, theirs[3 * n..], "A plane");
+}
+
+/// `Ya16Le` → `Gray16Le` is pure plumbing (luma word verbatim, alpha
+/// dropped) — bit-exact against the validator.
+#[test]
+fn ya16le_to_gray16le_bit_exact_vs_validator() {
+    if !ffmpeg_available()
+        || !validator_supports_pix_fmt("ya16le")
+        || !validator_supports_pix_fmt("gray16le")
+    {
+        eprintln!("skipping: no ffmpeg binary / no ya16le support");
+        return;
+    }
+    // Interleaved LE16 (Y, A) word pairs — any byte pattern is legal.
+    let raw = ramp(W * H * 4, 0, 255, 7, 3);
+    let theirs = ffmpeg_convert(&raw, "ya16le", "gray16le", "format=gray16le");
+    let src = planar_frame(vec![(W * 4, raw.clone())]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Ya16Le, W as u32, H as u32),
+        PixelFormat::Gray16Le,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    assert_eq!(ours.planes[0].data, theirs, "ya16le → gray16le");
+}
