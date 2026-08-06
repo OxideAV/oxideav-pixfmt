@@ -608,11 +608,13 @@ fn from_rgba_alpha_widen_and_roundtrip() {
     }
 }
 
-/// Rgba64Le interop resolves (staged through the Rgba pivot: the colour
-/// math is the crate's 8-bit matrix, so the deep packed side carries
-/// the ×257-widened 8-bit result) and preserves the alpha top byte.
+/// Rgba64Le interop keeps deep alpha end to end: the 16-bit members
+/// hop directly (alpha word verbatim) and the 10/12-bit members stage
+/// through the exact widen to the 16-bit tier before the deep matrix,
+/// so the packed alpha word is the full MSB-replicating widen of the
+/// source alpha — no 8-bit truncation anywhere on the route.
 #[test]
-fn rgba64_interop_via_rgba_pivot() {
+fn rgba64_interop_keeps_deep_alpha() {
     let opts = ConvertOptions::default();
     let (w, h) = (8usize, 8usize);
     for &(deep_fmt, bits, wsub, hsub) in DEEP {
@@ -628,10 +630,11 @@ fn rgba64_interop_via_rgba_pivot() {
         .expect("deep yuva → rgba64");
         assert_eq!(out.planes[0].data.len(), w * h * 8);
         for p in 0..w * h {
-            let a8 = rd16(&src.planes[3].data, p) >> (bits - 8);
+            let a = rd16(&src.planes[3].data, p);
+            let want = if bits == 16 { a } else { widen(a, bits, 16) };
             let got =
                 u16::from_le_bytes([out.planes[0].data[p * 8 + 6], out.planes[0].data[p * 8 + 7]]);
-            assert_eq!(got, a8 * 257, "{deep_fmt:?} alpha word at {p}");
+            assert_eq!(got, want, "{deep_fmt:?} alpha word at {p}");
         }
     }
 }

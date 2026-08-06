@@ -757,6 +757,205 @@ pub fn chroma_411_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 // duplicate samples (nearest). Buffers are byte slices holding
 // `samples * 2` bytes; the caller sizes them from the chroma grid.
 
+// ---------------------------------------------------------------------
+// Full-precision deep matrix: 16-bit samples, Q30 fixed point.
+//
+// The 8-bit converters above quantise the matrix into Q15 over byte
+// samples; these run the same k-coefficient construction over 16-bit
+// samples in Q30/i64 so a deep RGB ↔ deep YUV move never narrows to 8
+// bits. Range convention (limited): per the n-bit digital
+// representation of the BT-series signal formats
+// (`docs/video/signal-metadata/R-REC-BT.2020-2-201510-I.pdf` Table 5,
+// which the 601/709 quantisation rules mirror), the 8-bit offsets and
+// spans scale by 2^(n-8) — at n = 16 the luma range is
+// 4096 + [0, 56064] and chroma is centred on the exact achromatic code
+// 2^15 = 32768 with span 57344 (matching the crate's deep
+// neutral-chroma precedent). The packed `Rgb48Le` / `Rgba64Le` side is
+// a full-range 16-bit space (0..=65535). Full-range YUV keeps the
+// 8-bit convention at depth: unit luma scale, chroma centred on 32768.
+//
+// Q30 rounding keeps every coefficient within 2^-30 of its real value,
+// so the fixed-point results sit within ±1 LSB of the f64 model at
+// 16-bit precision (pinned in the test suite).
+
+const FP16_SHIFT: i64 = 30;
+const FP16_ONE: i64 = 1 << FP16_SHIFT;
+const FP16_HALF: i64 = 1 << (FP16_SHIFT - 1);
+
+/// Q30 rounding: `round(f * 2^30)` as i64.
+fn q30(f: f64) -> i64 {
+    (f * FP16_ONE as f64).round() as i64
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EncodeParams16 {
+    pub cy_r: i64,
+    pub cy_g: i64,
+    pub cy_b: i64,
+    pub y_bias: i64,
+    pub cb_r: i64,
+    pub cb_g: i64,
+    pub cb_b: i64,
+    pub cr_r: i64,
+    pub cr_g: i64,
+    pub cr_b: i64,
+    pub c_bias: i64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DecodeParams16 {
+    pub y_scale: i64,
+    pub y_off: i64,
+    pub cr_r: i64,
+    pub cb_b: i64,
+    pub cg_cr: i64,
+    pub cg_cb: i64,
+}
+
+impl YuvMatrix {
+    pub(crate) fn encode_params16(&self) -> EncodeParams16 {
+        let kr = self.kr as f64;
+        let kb = self.kb as f64;
+        let kg = 1.0 - kr - kb;
+        // Limited: Y16 = 4096 + 56064 · y_full / 65535,
+        //          C16 = 32768 + 57344 · (C - y_full) / (2(1-k) · 65535).
+        let (ys, cs, y_off) = if self.limited {
+            (56064.0 / 65535.0, 57344.0 / 65535.0, 4096.0)
+        } else {
+            (1.0, 1.0, 0.0)
+        };
+        let cb_scale = cs / (2.0 * (1.0 - kb));
+        let cr_scale = cs / (2.0 * (1.0 - kr));
+        EncodeParams16 {
+            cy_r: q30(kr * ys),
+            cy_g: q30(kg * ys),
+            cy_b: q30(kb * ys),
+            y_bias: (y_off as i64) * FP16_ONE + FP16_HALF,
+            cb_r: q30(cb_scale * -kr),
+            cb_g: q30(cb_scale * -kg),
+            cb_b: q30(cb_scale * (1.0 - kb)),
+            cr_r: q30(cr_scale * (1.0 - kr)),
+            cr_g: q30(cr_scale * -kg),
+            cr_b: q30(cr_scale * -kb),
+            c_bias: 32768 * FP16_ONE + FP16_HALF,
+        }
+    }
+
+    pub(crate) fn decode_params16(&self) -> DecodeParams16 {
+        let kr = self.kr as f64;
+        let kb = self.kb as f64;
+        let kg = 1.0 - kr - kb;
+        let (ys, cs, y_off) = if self.limited {
+            (65535.0 / 56064.0, 65535.0 / 57344.0, 4096)
+        } else {
+            (1.0, 1.0, 0)
+        };
+        DecodeParams16 {
+            y_scale: q30(ys),
+            y_off,
+            cr_r: q30(2.0 * (1.0 - kr) * cs),
+            cb_b: q30(2.0 * (1.0 - kb) * cs),
+            cg_cr: q30((2.0 * kr * (1.0 - kr) / kg) * cs),
+            cg_cb: q30((2.0 * kb * (1.0 - kb) / kg) * cs),
+        }
+    }
+}
+
+#[inline]
+fn clamp_u16_i64(v: i64) -> u16 {
+    if v < 0 {
+        0
+    } else if v > 65535 {
+        65535
+    } else {
+        v as u16
+    }
+}
+
+/// Encode a single 16-bit (R, G, B) pixel into 16-bit (Y, Cb, Cr) at
+/// full precision per `matrix`.
+pub fn rgb48_pixel_to_yuv16(r: u16, g: u16, b: u16, matrix: YuvMatrix) -> (u16, u16, u16) {
+    rgb48_to_yuv16_fp(r, g, b, &matrix.encode_params16())
+}
+
+#[inline]
+pub(crate) fn rgb48_to_yuv16_fp(r: u16, g: u16, b: u16, p: &EncodeParams16) -> (u16, u16, u16) {
+    let ri = r as i64;
+    let gi = g as i64;
+    let bi = b as i64;
+    let y = (p.cy_r * ri + p.cy_g * gi + p.cy_b * bi + p.y_bias) >> FP16_SHIFT;
+    let cb = (p.cb_r * ri + p.cb_g * gi + p.cb_b * bi + p.c_bias) >> FP16_SHIFT;
+    let cr = (p.cr_r * ri + p.cr_g * gi + p.cr_b * bi + p.c_bias) >> FP16_SHIFT;
+    (clamp_u16_i64(y), clamp_u16_i64(cb), clamp_u16_i64(cr))
+}
+
+/// Decode a single 16-bit (Y, Cb, Cr) pixel into 16-bit (R, G, B) at
+/// full precision per `matrix`.
+pub fn yuv16_pixel_to_rgb48(y: u16, cb: u16, cr: u16, matrix: YuvMatrix) -> (u16, u16, u16) {
+    yuv16_to_rgb48_fp(y, cb, cr, &matrix.decode_params16())
+}
+
+#[inline]
+pub(crate) fn yuv16_to_rgb48_fp(y: u16, cb: u16, cr: u16, d: &DecodeParams16) -> (u16, u16, u16) {
+    let yv = (y as i64 - d.y_off) * d.y_scale;
+    let cbv = cb as i64 - 32768;
+    let crv = cr as i64 - 32768;
+    let r = (yv + d.cr_r * crv + FP16_HALF) >> FP16_SHIFT;
+    let b = (yv + d.cb_b * cbv + FP16_HALF) >> FP16_SHIFT;
+    let g = (yv - d.cg_cr * crv - d.cg_cb * cbv + FP16_HALF) >> FP16_SHIFT;
+    (clamp_u16_i64(r), clamp_u16_i64(g), clamp_u16_i64(b))
+}
+
+/// `Yuv444P16Le` planes → packed `Rgb48Le`, full 16-bit precision.
+/// `yp` / `up` / `vp` are tight `w × h` planes of LE16 words; `dst`
+/// receives `w × h` packed (R, G, B) LE16 triples.
+pub fn yuv444p16_to_rgb48(
+    yp: &[u8],
+    up: &[u8],
+    vp: &[u8],
+    dst: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    let d = matrix.decode_params16();
+    for i in 0..w * h {
+        let (r, g, b) = yuv16_to_rgb48_fp(
+            c16_get(yp, i) as u16,
+            c16_get(up, i) as u16,
+            c16_get(vp, i) as u16,
+            &d,
+        );
+        c16_put(dst, i * 3, r as u32);
+        c16_put(dst, i * 3 + 1, g as u32);
+        c16_put(dst, i * 3 + 2, b as u32);
+    }
+}
+
+/// Packed `Rgb48Le` → `Yuv444P16Le` planes, full 16-bit precision.
+pub fn rgb48_to_yuv444p16(
+    src: &[u8],
+    yp: &mut [u8],
+    up: &mut [u8],
+    vp: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    let p = matrix.encode_params16();
+    for i in 0..w * h {
+        let (y, cb, cr) = rgb48_to_yuv16_fp(
+            c16_get(src, i * 3) as u16,
+            c16_get(src, i * 3 + 1) as u16,
+            c16_get(src, i * 3 + 2) as u16,
+            &p,
+        );
+        c16_put(yp, i, y as u32);
+        c16_put(up, i, cb as u32);
+        c16_put(vp, i, cr as u32);
+    }
+}
+
 /// Read the little-endian 16-bit sample at index `i` of `buf`.
 #[inline]
 fn c16_get(buf: &[u8], i: usize) -> u32 {

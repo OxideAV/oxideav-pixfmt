@@ -229,7 +229,8 @@ fn coverage_matrix_matches_supports() {
         }
     }
     // Coverage after the round-438 matrix closure (core 0.1.34 formats
-    // + the Gray8-hub rows + the direct Rgb48Le ↔ Rgba64Le pair): 964
+    // + the Gray8-hub rows + the direct Rgb48Le ↔ Rgba64Le pair + the
+    // full-precision deep-matrix tier): 976
     // direct and — for the first time — ALL 61 × 60 = 3660 ordered
     // pairs reachable. The direct floor may only go UP; the total is
     // pinned exact (any regression means a route was dropped). The
@@ -241,7 +242,7 @@ fn coverage_matrix_matches_supports() {
             ALL_FORMATS.len() * (ALL_FORMATS.len() - 1)
         );
         assert!(
-            direct_pairs >= 964,
+            direct_pairs >= 976,
             "direct coverage regressed: {direct_pairs}"
         );
         assert_eq!(

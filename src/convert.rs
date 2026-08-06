@@ -277,8 +277,16 @@ const YUV_PIVOTS: &[PixelFormat] = &[
 /// significant bits: the 16-bit planar tier comes first so a deep
 /// YUV → YUV staged route (e.g. `Yuv420P16Le → Yuv422P`) resamples
 /// chroma at full 16-bit precision and only quantises at the final leg,
-/// instead of truncating to 8 bits before the resample.
+/// instead of truncating to 8 bits before the resample. The
+/// alpha-carrying 16-bit members lead the list: they are the only
+/// pivots whose second leg reaches `Rgba64Le` through the deep matrix
+/// with the alpha plane intact, so e.g. `Yuva420P10Le → Rgba64Le`
+/// stages through `Yuva444P16Le` (exact alpha widen + full-precision
+/// colour) rather than quantising alpha through an 8-bit `Rgba` hop.
 const YUV_PIVOTS_DEEP: &[PixelFormat] = &[
+    PixelFormat::Yuva444P16Le,
+    PixelFormat::Yuva422P16Le,
+    PixelFormat::Yuva420P16Le,
     PixelFormat::Yuv444P16Le,
     PixelFormat::Yuv422P16Le,
     PixelFormat::Yuv420P16Le,
@@ -489,7 +497,14 @@ fn lookup_staged(
         || crate::format_info::FormatInfo::of(dst).bit_depth > 8;
     let rgb_pivots = if deep { RGB_PIVOTS_DEEP } else { RGB_PIVOTS };
     let yuv_pivots = if deep { YUV_PIVOTS_DEEP } else { YUV_PIVOTS };
-    let (a, b) = if yuv_first {
+    // Deep moves with a YUV endpoint also try the YUV pivots first:
+    // the 16-bit planar tier now has direct full-precision hops to the
+    // packed deep RGB formats, so e.g. `Yuv444P10Le → Rgb48Le` should
+    // stage through the exact widen to `Yuv444P16Le` and the deep
+    // matrix rather than quantise through an 8-bit RGB pivot. Pairs
+    // with no YUV-pivot route fall through to the RGB list exactly as
+    // before.
+    let (a, b) = if yuv_first || (deep && (is_yuv_carriage(src) || is_yuv_carriage(dst))) {
         (yuv_pivots, rgb_pivots)
     } else {
         (rgb_pivots, yuv_pivots)
@@ -1032,6 +1047,33 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Yuv422P16Le, P::Yuv422P12Le, DepthRescaleYuv { wsub: 2, hsub: 1, src_bits: 16, dst_bits: 12 }),
         (P::Yuv444P16Le, P::Yuv444P12Le, DepthRescaleYuv { wsub: 1, hsub: 1, src_bits: 16, dst_bits: 12 }),
 
+        // Full-precision deep matrix (round 438): the 16-bit planar
+        // tier ↔ the packed deep RGB formats without EVER narrowing to
+        // 8 bits. The colour math runs the same k-coefficient
+        // construction as the 8-bit rows in Q30/i64 over 16-bit
+        // samples (limited-range offsets scale by 2^(n-8) per the
+        // BT-series n-bit digital representation; chroma is centred on
+        // the exact achromatic code 32768). Subsampled layouts
+        // resample chroma at 16-bit precision through the proven
+        // `chroma16le_*` helpers before/after the matrix. The Yuva
+        // rows carry the full-resolution 16-bit alpha plane verbatim
+        // into/out of the packed alpha word. The 10/12-bit family
+        // reaches these rows losslessly through the exact
+        // `DepthRescaleYuv` widen, so e.g. Yuv444P10Le → Rgb48Le now
+        // stages at full precision instead of through an 8-bit pivot.
+        (P::Yuv444P16Le, P::Rgb48Le, DeepYuvToRgb48 { wsub: 1, hsub: 1, alpha: false }),
+        (P::Yuv422P16Le, P::Rgb48Le, DeepYuvToRgb48 { wsub: 2, hsub: 1, alpha: false }),
+        (P::Yuv420P16Le, P::Rgb48Le, DeepYuvToRgb48 { wsub: 2, hsub: 2, alpha: false }),
+        (P::Rgb48Le, P::Yuv444P16Le, Rgb48ToDeepYuv { wsub: 1, hsub: 1, alpha: false }),
+        (P::Rgb48Le, P::Yuv422P16Le, Rgb48ToDeepYuv { wsub: 2, hsub: 1, alpha: false }),
+        (P::Rgb48Le, P::Yuv420P16Le, Rgb48ToDeepYuv { wsub: 2, hsub: 2, alpha: false }),
+        (P::Yuva444P16Le, P::Rgba64Le, DeepYuvToRgb48 { wsub: 1, hsub: 1, alpha: true }),
+        (P::Yuva422P16Le, P::Rgba64Le, DeepYuvToRgb48 { wsub: 2, hsub: 1, alpha: true }),
+        (P::Yuva420P16Le, P::Rgba64Le, DeepYuvToRgb48 { wsub: 2, hsub: 2, alpha: true }),
+        (P::Rgba64Le, P::Yuva444P16Le, Rgb48ToDeepYuv { wsub: 1, hsub: 1, alpha: true }),
+        (P::Rgba64Le, P::Yuva422P16Le, Rgb48ToDeepYuv { wsub: 2, hsub: 1, alpha: true }),
+        (P::Rgba64Le, P::Yuva420P16Le, Rgb48ToDeepYuv { wsub: 2, hsub: 2, alpha: true }),
+
         // Direct 16-bit chroma resample — the six ordered pairs over
         // (4:2:0, 4:2:2, 4:4:4) on the 16-bit family, mirroring the
         // 8-bit `ChromaResample` rows. Luma is copied word-for-word;
@@ -1499,6 +1541,26 @@ enum ConvertOp {
         src_bits: u32,
         dst_bits: u32,
     },
+    /// 16-bit planar YUV(A) → packed deep RGB at full precision: the
+    /// Q30/i64 deep matrix decodes 16-bit samples directly (no 8-bit
+    /// narrowing anywhere on the path). Subsampled chroma is upsampled
+    /// to 4:4:4 at 16-bit precision first; with `alpha` the source's
+    /// full-resolution 16-bit alpha plane is carried verbatim into the
+    /// `Rgba64Le` alpha word.
+    DeepYuvToRgb48 {
+        wsub: usize,
+        hsub: usize,
+        alpha: bool,
+    },
+    /// Packed deep RGB → 16-bit planar YUV(A) at full precision: the
+    /// inverse of [`Self::DeepYuvToRgb48`] — encode at 4:4:4, then
+    /// downsample chroma at 16-bit precision; with `alpha` the packed
+    /// alpha word becomes the full-resolution alpha plane verbatim.
+    Rgb48ToDeepYuv {
+        wsub: usize,
+        hsub: usize,
+        alpha: bool,
+    },
     /// `Rgb48Le` → `Rgba64Le`: colour words verbatim + opaque 65535
     /// alpha word (exact; inverse of [`Self::Rgba64ToRgb48`]).
     Rgb48ToRgba64,
@@ -1806,6 +1868,12 @@ impl ConvertOp {
             Self::GrayDepthUp8 { bits } => do_gray_depth_up8(src, src_info, bits),
             Self::GrayDepthRescale { src_bits, dst_bits } => {
                 do_gray_depth_rescale(src, src_info, src_bits, dst_bits)
+            }
+            Self::DeepYuvToRgb48 { wsub, hsub, alpha } => {
+                do_deep_yuv_to_rgb48(src, src_info, matrix, wsub, hsub, alpha)
+            }
+            Self::Rgb48ToDeepYuv { wsub, hsub, alpha } => {
+                do_rgb48_to_deep_yuv(src, src_info, matrix, wsub, hsub, alpha)
             }
             Self::Rgb48ToRgba64 => packed_map(src, src_info, 6, 8, rgb::rgb48_to_rgba64),
             Self::Rgba64ToRgb48 => packed_map(src, src_info, 8, 6, rgb::rgba64_to_rgb48),
@@ -2288,6 +2356,170 @@ fn do_rgb_to_gray(
             data: gray,
         }],
     ))
+}
+
+/// 16-bit planar YUV(A) → packed deep RGB at full precision (Q30 deep
+/// matrix; see [`crate::yuv::yuv444p16_to_rgb48`]). Chroma is
+/// upsampled to 4:4:4 at 16-bit precision first; the alpha plane (when
+/// carried) lands verbatim in the packed alpha word.
+fn do_deep_yuv_to_rgb48(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    wsub: usize,
+    hsub: usize,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    let need = if alpha { 4 } else { 3 };
+    if src.planes.len() < need {
+        return Err(Error::invalid(
+            "pixfmt: deep YUV source needs Y, U, V(, A) planes",
+        ));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % wsub != 0 || h % hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: YUV → RGB requires dimensions divisible by chroma subsampling",
+        ));
+    }
+    let cw = w / wsub;
+    let ch = h / hsub;
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
+    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch);
+    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch);
+    // Upsample chroma to 4:4:4 at 16-bit precision when subsampled.
+    let (u444, v444) = match (wsub, hsub) {
+        (1, 1) => (up, vp),
+        (2, 1) => {
+            let mut u = vec![0u8; w * h * 2];
+            let mut v = vec![0u8; w * h * 2];
+            yuv::chroma16le_422_to_444(&up, &mut u, w, h);
+            yuv::chroma16le_422_to_444(&vp, &mut v, w, h);
+            (u, v)
+        }
+        (2, 2) => {
+            let mut u = vec![0u8; w * h * 2];
+            let mut v = vec![0u8; w * h * 2];
+            yuv::chroma16le_420_to_444(&up, &mut u, w, h);
+            yuv::chroma16le_420_to_444(&vp, &mut v, w, h);
+            (u, v)
+        }
+        _ => {
+            return Err(Error::unsupported(
+                "pixfmt: unsupported deep YUV subsampling",
+            ))
+        }
+    };
+    let mut rgb = vec![0u8; w * h * 6];
+    yuv::yuv444p16_to_rgb48(&yp, &u444, &v444, &mut rgb, w, h, matrix);
+    if !alpha {
+        return Ok(make_frame(
+            src,
+            vec![VideoPlane {
+                stride: w * 6,
+                data: rgb,
+            }],
+        ));
+    }
+    let ap = gather_tight(&src.planes[3].data, src.planes[3].stride, w * 2, h);
+    let mut rgba = vec![0u8; w * h * 8];
+    for i in 0..w * h {
+        rgba[i * 8..i * 8 + 6].copy_from_slice(&rgb[i * 6..i * 6 + 6]);
+        rgba[i * 8 + 6..i * 8 + 8].copy_from_slice(&ap[i * 2..i * 2 + 2]);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 8,
+            data: rgba,
+        }],
+    ))
+}
+
+/// Packed deep RGB → 16-bit planar YUV(A) at full precision: encode at
+/// 4:4:4 through the Q30 deep matrix, then downsample chroma at 16-bit
+/// precision; the packed alpha word (when present on both sides)
+/// becomes the full-resolution alpha plane verbatim.
+fn do_rgb48_to_deep_yuv(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    wsub: usize,
+    hsub: usize,
+    alpha: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % wsub != 0 || h % hsub != 0 {
+        return Err(Error::invalid(
+            "pixfmt: RGB → YUV requires dimensions divisible by chroma subsampling",
+        ));
+    }
+    let cw = w / wsub;
+    let ch = h / hsub;
+    let comps = if alpha { 4 } else { 3 };
+    let in_plane = &src.planes[0];
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h);
+    // Split out a tight 3-word RGB stream (and the alpha plane).
+    let (rgb, ap) = if alpha {
+        let mut rgb = vec![0u8; w * h * 6];
+        let mut ap = vec![0u8; w * h * 2];
+        for i in 0..w * h {
+            rgb[i * 6..i * 6 + 6].copy_from_slice(&packed[i * 8..i * 8 + 6]);
+            ap[i * 2..i * 2 + 2].copy_from_slice(&packed[i * 8 + 6..i * 8 + 8]);
+        }
+        (rgb, Some(ap))
+    } else {
+        (packed, None)
+    };
+    let mut yp = vec![0u8; w * h * 2];
+    let mut u444 = vec![0u8; w * h * 2];
+    let mut v444 = vec![0u8; w * h * 2];
+    yuv::rgb48_to_yuv444p16(&rgb, &mut yp, &mut u444, &mut v444, w, h, matrix);
+    let (up, vp) = match (wsub, hsub) {
+        (1, 1) => (u444, v444),
+        (2, 1) => {
+            let mut u = vec![0u8; cw * h * 2];
+            let mut v = vec![0u8; cw * h * 2];
+            yuv::chroma16le_444_to_422(&u444, &mut u, w, h);
+            yuv::chroma16le_444_to_422(&v444, &mut v, w, h);
+            (u, v)
+        }
+        (2, 2) => {
+            let mut u = vec![0u8; cw * ch * 2];
+            let mut v = vec![0u8; cw * ch * 2];
+            yuv::chroma16le_444_to_420(&u444, &mut u, w, h);
+            yuv::chroma16le_444_to_420(&v444, &mut v, w, h);
+            (u, v)
+        }
+        _ => {
+            return Err(Error::unsupported(
+                "pixfmt: unsupported deep YUV subsampling",
+            ))
+        }
+    };
+    let mut planes = vec![
+        VideoPlane {
+            stride: w * 2,
+            data: yp,
+        },
+        VideoPlane {
+            stride: cw * 2,
+            data: up,
+        },
+        VideoPlane {
+            stride: cw * 2,
+            data: vp,
+        },
+    ];
+    if let Some(ap) = ap {
+        planes.push(VideoPlane {
+            stride: w * 2,
+            data: ap,
+        });
+    }
+    Ok(make_frame(src, planes))
 }
 
 /// Any 8-bit packed RGB order → `Gray8`: gather each pixel's R, G, B
