@@ -228,26 +228,26 @@ fn coverage_matrix_matches_supports() {
             }
         }
     }
-    // Coverage floor after the core 0.1.34 formats landed (Gbrap8 +
-    // Ya16Le + CmykInverted, round 438): 944 direct and 3568 reachable
-    // of the full 61 × 60 = 3660 ordered pairs. Every pair involving
-    // Gbrap8 and Ya16Le resolves; CmykInverted inherits the same
-    // routes-that-need-two-pivots remainder as Cmyk (Mono / deep
-    // grayscale partners), which with the legacy 82 leaves 92
-    // unreachable. These may only go UP. The floors only hold for the
-    // full native sweep — the miri run covers a source subset.
+    // Coverage after the round-438 matrix closure (core 0.1.34 formats
+    // + the Gray8-hub rows + the direct Rgb48Le ↔ Rgba64Le pair): 964
+    // direct and — for the first time — ALL 61 × 60 = 3660 ordered
+    // pairs reachable. The direct floor may only go UP; the total is
+    // pinned exact (any regression means a route was dropped). The
+    // floors only hold for the full native sweep — the miri run covers
+    // a source subset.
     if src_stride == 1 {
         eprintln!(
             "coverage: direct={direct_pairs} total={ok_pairs} of {}",
             ALL_FORMATS.len() * (ALL_FORMATS.len() - 1)
         );
         assert!(
-            direct_pairs >= 944,
+            direct_pairs >= 964,
             "direct coverage regressed: {direct_pairs}"
         );
-        assert!(
-            ok_pairs >= 3568,
-            "total coverage regressed: {ok_pairs} (unsupported sample: {:?})",
+        assert_eq!(
+            ok_pairs,
+            ALL_FORMATS.len() * (ALL_FORMATS.len() - 1),
+            "matrix no longer fully closed (unsupported sample: {:?})",
             &unsupported[..unsupported.len().min(8)]
         );
     }
@@ -464,4 +464,146 @@ fn supports_contract() {
     // Bgra → Yuv420P is staged, not direct.
     assert!(supports(PixelFormat::Bgra, PixelFormat::Yuv420P));
     assert!(!supports_direct(PixelFormat::Bgra, PixelFormat::Yuv420P));
+}
+
+/// Every round-438 closure row must be byte-identical to the manual
+/// two-step route it replaced (where one existed) — the rows are
+/// compositions of the same kernels, so any drift is a bug.
+#[test]
+fn closure_rows_match_manual_two_step() {
+    let opts = test_opts();
+    let dim = 8u32;
+    // (src, dst, pivot) triples: direct result == src → pivot → dst.
+    let cases = [
+        (PixelFormat::Bgra, PixelFormat::Gray8, PixelFormat::Rgba),
+        (PixelFormat::Bgr24, PixelFormat::Gray8, PixelFormat::Rgb24),
+        (PixelFormat::Argb, PixelFormat::Gray8, PixelFormat::Rgba),
+        (PixelFormat::Abgr, PixelFormat::Gray8, PixelFormat::Rgba),
+        (PixelFormat::Rgb48Le, PixelFormat::Gray8, PixelFormat::Rgb24),
+        (PixelFormat::Rgba64Le, PixelFormat::Gray8, PixelFormat::Rgba),
+        (PixelFormat::Cmyk, PixelFormat::Gray8, PixelFormat::Rgb24),
+        (
+            PixelFormat::CmykInverted,
+            PixelFormat::Gray8,
+            PixelFormat::Rgb24,
+        ),
+        (PixelFormat::Pal8, PixelFormat::Gray8, PixelFormat::Rgb24),
+        (
+            PixelFormat::Yuyv422,
+            PixelFormat::Gray8,
+            PixelFormat::Yuv422P,
+        ),
+        (
+            PixelFormat::Uyvy422,
+            PixelFormat::Gray8,
+            PixelFormat::Yuv422P,
+        ),
+        (PixelFormat::Gray8, PixelFormat::Cmyk, PixelFormat::Rgb24),
+        (
+            PixelFormat::Gray8,
+            PixelFormat::CmykInverted,
+            PixelFormat::Rgb24,
+        ),
+        (PixelFormat::Gray8, PixelFormat::Pal8, PixelFormat::Rgb24),
+        (
+            PixelFormat::Gray8,
+            PixelFormat::Yuyv422,
+            PixelFormat::Yuv422P,
+        ),
+        (
+            PixelFormat::Gray8,
+            PixelFormat::Uyvy422,
+            PixelFormat::Yuv422P,
+        ),
+        (PixelFormat::Gray8, PixelFormat::Rgb48Le, PixelFormat::Rgb24),
+        (PixelFormat::Gray8, PixelFormat::Rgba64Le, PixelFormat::Rgba),
+    ];
+    for (src_fmt, dst_fmt, pivot) in cases {
+        assert!(
+            supports_direct(src_fmt, dst_fmt),
+            "{src_fmt:?} → {dst_fmt:?}"
+        );
+        let frame = build_frame(src_fmt, dim as usize, dim as usize);
+        let info = FrameInfo::new(src_fmt, dim, dim);
+        let direct = convert(&frame, info, dst_fmt, &opts).expect("direct");
+        let mid = convert(&frame, info, pivot, &opts).expect("leg 1");
+        let manual = convert(&mid, FrameInfo::new(pivot, dim, dim), dst_fmt, &opts).expect("leg 2");
+        assert_eq!(
+            direct.planes.len(),
+            manual.planes.len(),
+            "{src_fmt:?} → {dst_fmt:?}"
+        );
+        for p in 0..direct.planes.len() {
+            assert_eq!(
+                direct.planes[p].data, manual.planes[p].data,
+                "{src_fmt:?} → {dst_fmt:?} plane {p}"
+            );
+        }
+    }
+}
+
+/// The deep-packed pair converts directly and exactly: colour words
+/// verbatim both ways, opaque 65535 alpha synthesised on the way up.
+#[test]
+fn rgb48_rgba64_direct_exact() {
+    let opts = test_opts();
+    let src = build_frame(PixelFormat::Rgb48Le, 8, 8);
+    let info = FrameInfo::new(PixelFormat::Rgb48Le, 8, 8);
+    assert!(supports_direct(PixelFormat::Rgb48Le, PixelFormat::Rgba64Le));
+    assert!(supports_direct(PixelFormat::Rgba64Le, PixelFormat::Rgb48Le));
+    let up = convert(&src, info, PixelFormat::Rgba64Le, &opts).expect("up");
+    for i in 0..64usize {
+        assert_eq!(
+            &up.planes[0].data[i * 8..i * 8 + 6],
+            &src.planes[0].data[i * 6..i * 6 + 6],
+            "colour words {i}"
+        );
+        assert_eq!(&up.planes[0].data[i * 8 + 6..i * 8 + 8], &[0xFF, 0xFF]);
+    }
+    let back = convert(
+        &up,
+        FrameInfo::new(PixelFormat::Rgba64Le, 8, 8),
+        PixelFormat::Rgb48Le,
+        &opts,
+    )
+    .expect("down");
+    assert_eq!(back.planes[0].data, src.planes[0].data);
+}
+
+/// The previously-unreachable island pairs now convert end to end.
+#[test]
+fn closed_island_pairs_convert() {
+    let opts = test_opts();
+    for (src_fmt, dst_fmt) in [
+        (PixelFormat::Cmyk, PixelFormat::MonoBlack),
+        (PixelFormat::CmykInverted, PixelFormat::Gray16Le),
+        (PixelFormat::MonoWhite, PixelFormat::Rgba64Le),
+        (PixelFormat::MonoBlack, PixelFormat::Pal8),
+        (PixelFormat::Gray12Le, PixelFormat::Yuyv422),
+        (PixelFormat::Uyvy422, PixelFormat::Gray10Le),
+        (PixelFormat::Rgb48Le, PixelFormat::MonoWhite),
+        (PixelFormat::Bgra, PixelFormat::Gray12Le),
+        (PixelFormat::Pal8, PixelFormat::Gray16Le),
+        (PixelFormat::Gray16Le, PixelFormat::CmykInverted),
+    ] {
+        let frame = build_frame(src_fmt, 8, 8);
+        let info = FrameInfo::new(src_fmt, 8, 8);
+        let out = convert(&frame, info, dst_fmt, &opts);
+        assert!(out.is_ok(), "{src_fmt:?} → {dst_fmt:?}: {:?}", out.err());
+    }
+}
+
+/// Gray content survives the new deep-packed broadcast exactly: the
+/// ×257 widen projects back to the original byte.
+#[test]
+fn gray_deep_packed_roundtrip_identity() {
+    let opts = test_opts();
+    let gray = build_frame(PixelFormat::Gray8, 8, 8);
+    let info = FrameInfo::new(PixelFormat::Gray8, 8, 8);
+    for deep in [PixelFormat::Rgb48Le, PixelFormat::Rgba64Le] {
+        let up = convert(&gray, info, deep, &opts).expect("up");
+        let back =
+            convert(&up, FrameInfo::new(deep, 8, 8), PixelFormat::Gray8, &opts).expect("down");
+        assert_eq!(back.planes[0].data, gray.planes[0].data, "{deep:?}");
+    }
 }

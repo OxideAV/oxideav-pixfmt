@@ -199,6 +199,32 @@ pub fn rgba_to_cmyk_inverted(src: &[u8], dst: &mut [u8], pixels: usize) {
     }
 }
 
+/// Gray8 → regular CMYK: the device separation of `r = g = b = v` is
+/// pure black ink — `(0, 0, 0, 255 − v)` — including the degenerate
+/// `v = 0` branch, so this equals broadcasting the grey byte to RGB and
+/// running [`rgb24_to_cmyk`] byte-for-byte.
+pub fn gray8_to_cmyk(src: &[u8], dst: &mut [u8], pixels: usize) {
+    debug_assert!(src.len() >= pixels && dst.len() >= pixels * 4);
+    for (i, &v) in src.iter().enumerate().take(pixels) {
+        dst[i * 4] = 0;
+        dst[i * 4 + 1] = 0;
+        dst[i * 4 + 2] = 0;
+        dst[i * 4 + 3] = 255 - v;
+    }
+}
+
+/// Gray8 → inverted CMYK: the per-byte complement of
+/// [`gray8_to_cmyk`] — `(255, 255, 255, v)`.
+pub fn gray8_to_cmyk_inverted(src: &[u8], dst: &mut [u8], pixels: usize) {
+    debug_assert!(src.len() >= pixels && dst.len() >= pixels * 4);
+    for (i, &v) in src.iter().enumerate().take(pixels) {
+        dst[i * 4] = 255;
+        dst[i * 4 + 1] = 255;
+        dst[i * 4 + 2] = 255;
+        dst[i * 4 + 3] = v;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -332,6 +332,31 @@ pub fn rgb24_to_ya16le(src: &[u8], dst: &mut [u8], pixels: usize) {
     }
 }
 
+/// Gray8 → Rgb48Le: broadcast the exact ×257 widen of the grey byte
+/// into the R, G and B words (zero maps to zero, 255 to 65535), the
+/// deep analogue of [`gray8_to_rgb24`].
+pub fn gray8_to_rgb48le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for (i, &v) in src.iter().enumerate().take(pixels) {
+        let word = (v as u16 * 257).to_le_bytes();
+        for c in 0..3 {
+            dst[i * 6 + c * 2..i * 6 + c * 2 + 2].copy_from_slice(&word);
+        }
+    }
+}
+
+/// Gray8 → Rgba64Le: the [`gray8_to_rgb48le`] broadcast plus an opaque
+/// 65535 alpha word.
+pub fn gray8_to_rgba64le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for (i, &v) in src.iter().enumerate().take(pixels) {
+        let word = (v as u16 * 257).to_le_bytes();
+        for c in 0..3 {
+            dst[i * 8 + c * 2..i * 8 + c * 2 + 2].copy_from_slice(&word);
+        }
+        dst[i * 8 + 6] = 0xFF;
+        dst[i * 8 + 7] = 0xFF;
+    }
+}
+
 /// Gray8 → 1 bpp (MSB-first). A threshold of 128 decides bit value.
 pub fn gray8_to_mono(src: &[u8], dst: &mut [u8], w: usize, h: usize, black_is_zero: bool) {
     let stride = w.div_ceil(8);

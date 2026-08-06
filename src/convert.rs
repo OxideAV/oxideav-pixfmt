@@ -1051,6 +1051,36 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         // zero coverage). Same per-plane primitives as the YUV depth
         // ladder: 8-bit endpoints round-trip exactly through any deeper
         // width, and 16-bit storage acts as the common widest rung.
+        // Matrix-closure rows (round 438): the Gray8 hub. Before these,
+        // 92 ordered pairs were unreachable because one endpoint only
+        // connects through Gray8 (Mono, deep grayscale) while the other
+        // had no direct Gray8 hop. Each row below is the composition of
+        // two proven kernels, byte-identical to the previously-staged
+        // route where one existed, and together they make EVERY ordered
+        // pair in the 61-format universe resolve. The deep-packed pair
+        // also gets its exact direct hop so it never routes through a
+        // luminance projection.
+        (P::Rgb48Le,  P::Rgba64Le, Rgb48ToRgba64),
+        (P::Rgba64Le, P::Rgb48Le,  Rgba64ToRgb48),
+        (P::Bgr24, P::Gray8, PackedPosToGray { comps: 3, r: 2, g: 1, b: 0 }),
+        (P::Bgra,  P::Gray8, PackedPosToGray { comps: 4, r: 2, g: 1, b: 0 }),
+        (P::Argb,  P::Gray8, PackedPosToGray { comps: 4, r: 1, g: 2, b: 3 }),
+        (P::Abgr,  P::Gray8, PackedPosToGray { comps: 4, r: 3, g: 2, b: 1 }),
+        (P::Rgb48Le,  P::Gray8, DeepPackedToGray { alpha_in: false }),
+        (P::Rgba64Le, P::Gray8, DeepPackedToGray { alpha_in: true }),
+        (P::Gray8, P::Rgb48Le,  GrayToPackedDeep { alpha_out: false }),
+        (P::Gray8, P::Rgba64Le, GrayToPackedDeep { alpha_out: true }),
+        (P::Cmyk,         P::Gray8, CmykToGray { inverted: false }),
+        (P::CmykInverted, P::Gray8, CmykToGray { inverted: true }),
+        (P::Gray8, P::Cmyk,         GrayToCmyk { inverted: false }),
+        (P::Gray8, P::CmykInverted, GrayToCmyk { inverted: true }),
+        (P::Pal8,  P::Gray8, Pal8ToGray),
+        (P::Gray8, P::Pal8,  GrayToPal8),
+        (P::Yuyv422, P::Gray8, Packed422ToGray { is_yuyv: true }),
+        (P::Uyvy422, P::Gray8, Packed422ToGray { is_yuyv: false }),
+        (P::Gray8, P::Yuyv422, GrayToPacked422 { is_yuyv: true }),
+        (P::Gray8, P::Uyvy422, GrayToPacked422 { is_yuyv: false }),
+
         (P::Gray10Le, P::Gray8, GrayDepthDown8 { bits: 10 }),
         (P::Gray12Le, P::Gray8, GrayDepthDown8 { bits: 12 }),
         (P::Gray8, P::Gray10Le, GrayDepthUp8 { bits: 10 }),
@@ -1469,6 +1499,63 @@ enum ConvertOp {
         src_bits: u32,
         dst_bits: u32,
     },
+    /// `Rgb48Le` → `Rgba64Le`: colour words verbatim + opaque 65535
+    /// alpha word (exact; inverse of [`Self::Rgba64ToRgb48`]).
+    Rgb48ToRgba64,
+    /// `Rgba64Le` → `Rgb48Le`: colour words verbatim, alpha dropped.
+    Rgba64ToRgb48,
+    /// Any 8-bit packed RGB order → `Gray8`: gather the pixel through
+    /// the `(comps, r, g, b)` byte positions into canonical R, G, B
+    /// order and run the same full-range luminance projection as
+    /// [`Self::RgbToGray`] — byte-identical to the previously-staged
+    /// swizzle + project route.
+    PackedPosToGray {
+        comps: usize,
+        r: usize,
+        g: usize,
+        b: usize,
+    },
+    /// `Rgb48Le` / `Rgba64Le` → `Gray8`: keep the top byte of each
+    /// colour word (crate depth policy), then project. Alpha dropped.
+    DeepPackedToGray {
+        alpha_in: bool,
+    },
+    /// `Gray8` → `Rgb48Le` / `Rgba64Le`: exact ×257 broadcast (peak
+    /// maps to peak; the projection recovers the original exactly),
+    /// with an opaque 65535 alpha word when the target carries one.
+    GrayToPackedDeep {
+        alpha_out: bool,
+    },
+    /// `Cmyk` / `CmykInverted` → `Gray8`: device decode to RGB, then
+    /// the full-range luminance projection.
+    CmykToGray {
+        inverted: bool,
+    },
+    /// `Gray8` → `Cmyk` / `CmykInverted`: the separation of
+    /// `r = g = b = v` is pure black ink `(0, 0, 0, 255 − v)` (or its
+    /// complement) — byte-identical to broadcast + separation.
+    GrayToCmyk {
+        inverted: bool,
+    },
+    /// `Pal8` → `Gray8`: palette expansion (side-channel or
+    /// `ConvertOptions` table, as for [`Self::Pal8ToRgb`]) followed by
+    /// the luminance projection.
+    Pal8ToGray,
+    /// `Gray8` → `Pal8`: grey broadcast followed by the quantiser —
+    /// same palette/dither handling as [`Self::RgbToPal8`].
+    GrayToPal8,
+    /// Packed 4:2:2 → `Gray8`: extract the luma bytes and rescale
+    /// limited → full range (chroma never read). Mirrors
+    /// [`Self::YuvLumaToGray`] for the packed carriers.
+    Packed422ToGray {
+        is_yuyv: bool,
+    },
+    /// `Gray8` → packed 4:2:2: full → limited luma plus neutral 128
+    /// chroma, interleaved in the requested byte order. Mirrors
+    /// [`Self::GrayToYuvPlanar`] for the packed carriers.
+    GrayToPacked422 {
+        is_yuyv: bool,
+    },
     /// Computed tier (see [`lookup_computed`]): any ordered pair inside
     /// the uniform planar YUV(A) family. Fuses the depth move, the
     /// chroma resample (performed at the deeper of the two depths) and
@@ -1720,6 +1807,51 @@ impl ConvertOp {
             Self::GrayDepthRescale { src_bits, dst_bits } => {
                 do_gray_depth_rescale(src, src_info, src_bits, dst_bits)
             }
+            Self::Rgb48ToRgba64 => packed_map(src, src_info, 6, 8, rgb::rgb48_to_rgba64),
+            Self::Rgba64ToRgb48 => packed_map(src, src_info, 8, 6, rgb::rgba64_to_rgb48),
+            Self::PackedPosToGray { comps, r, g, b } => {
+                do_packed_pos_to_gray(src, src_info, matrix.with_range(false), comps, r, g, b)
+            }
+            Self::DeepPackedToGray { alpha_in } => {
+                do_deep_packed_to_gray(src, src_info, matrix.with_range(false), alpha_in)
+            }
+            Self::GrayToPackedDeep { alpha_out } => {
+                if alpha_out {
+                    packed_map(src, src_info, 1, 8, gray::gray8_to_rgba64le)
+                } else {
+                    packed_map(src, src_info, 1, 6, gray::gray8_to_rgb48le)
+                }
+            }
+            Self::CmykToGray { inverted } => {
+                let f = if inverted {
+                    cmyk::cmyk_inverted_to_rgb24
+                } else {
+                    cmyk::cmyk_to_rgb24
+                };
+                let rgb = packed_map(src, src_info, 4, 3, f)?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                do_rgb_to_gray(&rgb, rgb_info, matrix.with_range(false), false)
+            }
+            Self::GrayToCmyk { inverted } => {
+                let f = if inverted {
+                    cmyk::gray8_to_cmyk_inverted
+                } else {
+                    cmyk::gray8_to_cmyk
+                };
+                packed_map(src, src_info, 1, 4, f)
+            }
+            Self::Pal8ToGray => {
+                let rgb = pal8_to_rgb(src, src_info, opts, false)?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                do_rgb_to_gray(&rgb, rgb_info, matrix.with_range(false), false)
+            }
+            Self::GrayToPal8 => {
+                let rgb = gray_to_packed3(src, src_info)?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                rgb_to_pal8(&rgb, rgb_info, opts, false)
+            }
+            Self::Packed422ToGray { is_yuyv } => do_packed422_to_gray(src, src_info, is_yuyv),
+            Self::GrayToPacked422 { is_yuyv } => do_gray_to_packed422(src, src_info, is_yuyv),
             Self::PlanarFamily { src: s, dst: d } => planar_family(src, src_info, s, d),
             Self::PlanarFamilyToRgb { src: s, alpha } => {
                 planar_family_to_rgb(src, src_info, matrix, s, alpha)
@@ -2154,6 +2286,134 @@ fn do_rgb_to_gray(
         vec![VideoPlane {
             stride: w,
             data: gray,
+        }],
+    ))
+}
+
+/// Any 8-bit packed RGB order → `Gray8`: gather each pixel's R, G, B
+/// bytes from their `(comps, r, g, b)` positions into a canonical
+/// Rgb24 scratch row and run the shared full-range projection kernel —
+/// byte-identical to swizzling to Rgb24 first.
+fn do_packed_pos_to_gray(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    comps: usize,
+    r: usize,
+    g: usize,
+    b: usize,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let mut rgb24 = Vec::with_capacity(w * h * 3);
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * comps);
+        for i in 0..w {
+            rgb24.push(sr[i * comps + r]);
+            rgb24.push(sr[i * comps + g]);
+            rgb24.push(sr[i * comps + b]);
+        }
+    }
+    let mut gray = vec![0u8; w * h];
+    yuv::rgb24_to_gray8(&rgb24, &mut gray, w * h, matrix);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w,
+            data: gray,
+        }],
+    ))
+}
+
+/// `Rgb48Le` / `Rgba64Le` → `Gray8`: keep the top byte of each colour
+/// word (truncation, the crate depth policy) and project. The alpha
+/// word (when present) is dropped.
+fn do_deep_packed_to_gray(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    alpha_in: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let comps = if alpha_in { 4 } else { 3 };
+    let in_plane = &src.planes[0];
+    let mut rgb24 = Vec::with_capacity(w * h * 3);
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * comps * 2);
+        for i in 0..w {
+            // LE words: the high byte sits at offset 1 of each pair.
+            rgb24.push(sr[i * comps * 2 + 1]);
+            rgb24.push(sr[i * comps * 2 + 3]);
+            rgb24.push(sr[i * comps * 2 + 5]);
+        }
+    }
+    let mut gray = vec![0u8; w * h];
+    yuv::rgb24_to_gray8(&rgb24, &mut gray, w * h, matrix);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w,
+            data: gray,
+        }],
+    ))
+}
+
+/// Packed 4:2:2 → `Gray8`: extract the luma bytes (even offsets for
+/// YUYV, odd for UYVY) and rescale limited → full range. Chroma is
+/// never read; like the planar luma extraction this accepts any even
+/// width the packed layout itself can represent.
+fn do_packed422_to_gray(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    is_yuyv: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 {
+        return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
+    }
+    let in_plane = &src.planes[0];
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let luma_off = if is_yuyv { 0 } else { 1 };
+    let mut yp: Vec<u8> = (0..w * h).map(|i| packed[i * 2 + luma_off]).collect();
+    yuv::limited_to_full_luma(&mut yp);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w,
+            data: yp,
+        }],
+    ))
+}
+
+/// `Gray8` → packed 4:2:2: rescale the grey plane full → limited range
+/// for the luma slots and interleave with the neutral chroma code 128
+/// in the requested byte order.
+fn do_gray_to_packed422(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    is_yuyv: bool,
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if w % 2 != 0 {
+        return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
+    }
+    let in_plane = &src.planes[0];
+    let mut yp = gather_tight(&in_plane.data, in_plane.stride, w, h);
+    yuv::full_to_limited_luma(&mut yp);
+    let mut out = vec![128u8; w * h * 2];
+    let luma_off = if is_yuyv { 0 } else { 1 };
+    for (i, &y) in yp.iter().enumerate() {
+        out[i * 2 + luma_off] = y;
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: out,
         }],
     ))
 }

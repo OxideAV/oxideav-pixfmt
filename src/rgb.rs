@@ -230,6 +230,25 @@ pub fn rgba_to_rgba64(src: &[u8], dst: &mut [u8], pixels: usize) {
     }
 }
 
+/// Rgb48Le → Rgba64Le: copy the three colour words verbatim and append
+/// an opaque 65535 alpha word — bit-exact on colour, and
+/// [`rgba64_to_rgb48`] is its exact inverse.
+pub fn rgb48_to_rgba64(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        dst[i * 8..i * 8 + 6].copy_from_slice(&src[i * 6..i * 6 + 6]);
+        dst[i * 8 + 6] = 0xFF;
+        dst[i * 8 + 7] = 0xFF;
+    }
+}
+
+/// Rgba64Le → Rgb48Le: copy the three colour words verbatim, dropping
+/// the alpha word.
+pub fn rgba64_to_rgb48(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        dst[i * 6..i * 6 + 6].copy_from_slice(&src[i * 8..i * 8 + 6]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
