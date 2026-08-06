@@ -755,10 +755,21 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
 
         // CMYK ↔ RGB. Uncalibrated device-CMYK approximation; pure
         // bit-manipulation (no matrix / ColorSpace knob applies).
-        (P::Cmyk,  P::Rgb24, CmykToRgb { alpha: false }),
-        (P::Cmyk,  P::Rgba,  CmykToRgb { alpha: true }),
-        (P::Rgb24, P::Cmyk,  RgbToCmyk { alpha_in: false }),
-        (P::Rgba,  P::Cmyk,  RgbToCmyk { alpha_in: true }),
+        (P::Cmyk,  P::Rgb24, CmykToRgb { alpha: false, inverted: false }),
+        (P::Cmyk,  P::Rgba,  CmykToRgb { alpha: true, inverted: false }),
+        (P::Rgb24, P::Cmyk,  RgbToCmyk { alpha_in: false, inverted: false }),
+        (P::Rgba,  P::Cmyk,  RgbToCmyk { alpha_in: true, inverted: false }),
+        // CmykInverted (core 0.1.34): the inverted-ink convention
+        // (stored byte = 255 − ink). RGB interop folds the complement
+        // into the formula — byte-identical to complement-then-regular;
+        // the Cmyk ↔ CmykInverted pair is the exact self-inverse
+        // per-byte complement (lossless both ways).
+        (P::CmykInverted, P::Rgb24, CmykToRgb { alpha: false, inverted: true }),
+        (P::CmykInverted, P::Rgba,  CmykToRgb { alpha: true, inverted: true }),
+        (P::Rgb24, P::CmykInverted, RgbToCmyk { alpha_in: false, inverted: true }),
+        (P::Rgba,  P::CmykInverted, RgbToCmyk { alpha_in: true, inverted: true }),
+        (P::Cmyk,  P::CmykInverted, CmykComplement),
+        (P::CmykInverted, P::Cmyk,  CmykComplement),
 
         // Yuv411P (4:1:1 planar — luma full res, chroma horizontally
         // subsampled by 4). Native NTSC DV-25 layout and a legal JPEG
@@ -1243,11 +1254,20 @@ enum ConvertOp {
     CmykToRgb {
         /// When true, output is RGBA (opaque alpha). When false, Rgb24.
         alpha: bool,
+        /// When true, the source is the inverted-ink convention
+        /// (`CmykInverted`, stored byte = 255 − ink).
+        inverted: bool,
     },
     RgbToCmyk {
         /// When true, source is RGBA (alpha ignored). When false, Rgb24.
         alpha_in: bool,
+        /// When true, the destination is `CmykInverted` (regular
+        /// separation followed by the per-byte complement).
+        inverted: bool,
     },
+    /// `Cmyk` ↔ `CmykInverted`: complement every byte — an exact,
+    /// self-inverse bijection serving both directions.
+    CmykComplement,
     /// Alpha-less planar YUV (3 planes) → the `Yuva*` sibling with the
     /// same chroma grid (4 planes) by appending an opaque
     /// full-resolution alpha plane. `wsub` / `hsub` are the shared
@@ -1606,8 +1626,25 @@ impl ConvertOp {
             }
             Self::Pal8ToRgb { alpha } => pal8_to_rgb(src, src_info, opts, alpha),
             Self::RgbToPal8 { alpha_in } => rgb_to_pal8(src, src_info, opts, alpha_in),
-            Self::CmykToRgb { alpha } => do_cmyk_to_rgb(src, src_info, alpha),
-            Self::RgbToCmyk { alpha_in } => do_rgb_to_cmyk(src, src_info, alpha_in),
+            Self::CmykToRgb { alpha, inverted } => {
+                let f = match (alpha, inverted) {
+                    (false, false) => cmyk::cmyk_to_rgb24,
+                    (true, false) => cmyk::cmyk_to_rgba,
+                    (false, true) => cmyk::cmyk_inverted_to_rgb24,
+                    (true, true) => cmyk::cmyk_inverted_to_rgba,
+                };
+                packed_map(src, src_info, 4, if alpha { 4 } else { 3 }, f)
+            }
+            Self::RgbToCmyk { alpha_in, inverted } => {
+                let f = match (alpha_in, inverted) {
+                    (false, false) => cmyk::rgb24_to_cmyk,
+                    (true, false) => cmyk::rgba_to_cmyk,
+                    (false, true) => cmyk::rgb24_to_cmyk_inverted,
+                    (true, true) => cmyk::rgba_to_cmyk_inverted,
+                };
+                packed_map(src, src_info, if alpha_in { 4 } else { 3 }, 4, f)
+            }
+            Self::CmykComplement => packed_map(src, src_info, 4, 4, cmyk::cmyk_complement),
             Self::YuvToYuva { wsub, hsub } => do_yuv_to_yuva(src, src_info, wsub, hsub),
             Self::YuvaToYuv { wsub, hsub } => do_yuva_to_yuv(src, src_info, wsub, hsub),
             Self::YuvaToRgb { wsub, hsub, alpha } => {
@@ -4018,54 +4055,6 @@ fn rgb_to_pal8(
 
 // -------------------------------------------------------------------------
 // CMYK.
-
-fn do_cmyk_to_rgb(src: &VideoFrame, src_info: FrameInfo, alpha: bool) -> Result<VideoFrame> {
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    let in_plane = &src.planes[0];
-    let bpp_out = if alpha { 4 } else { 3 };
-    let mut out = vec![0u8; w * h * bpp_out];
-    for row in 0..h {
-        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
-        let dr = &mut out[row * w * bpp_out..row * w * bpp_out + w * bpp_out];
-        if alpha {
-            cmyk::cmyk_to_rgba(sr, dr, w);
-        } else {
-            cmyk::cmyk_to_rgb24(sr, dr, w);
-        }
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * bpp_out,
-            data: out,
-        }],
-    ))
-}
-
-fn do_rgb_to_cmyk(src: &VideoFrame, src_info: FrameInfo, alpha_in: bool) -> Result<VideoFrame> {
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    let in_plane = &src.planes[0];
-    let bpp_in = if alpha_in { 4 } else { 3 };
-    let mut out = vec![0u8; w * h * 4];
-    for row in 0..h {
-        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * bpp_in);
-        let dr = &mut out[row * w * 4..row * w * 4 + w * 4];
-        if alpha_in {
-            cmyk::rgba_to_cmyk(sr, dr, w);
-        } else {
-            cmyk::rgb24_to_cmyk(sr, dr, w);
-        }
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * 4,
-            data: out,
-        }],
-    ))
-}
 
 // -------------------------------------------------------------------------
 // Yuva420P / Yuva422P / Yuva444P — planar YUV with an additional

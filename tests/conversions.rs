@@ -2228,3 +2228,116 @@ fn ya16_reachability() {
         assert!(supports(b, a), "{b:?} → {a:?}");
     }
 }
+
+// -------- CmykInverted (inverted-ink CMYK, core 0.1.34) --------
+
+/// `Cmyk` ↔ `CmykInverted` is the per-byte complement: exact,
+/// self-inverse, and a direct row in both directions.
+#[test]
+fn cmyk_inverted_complement_roundtrip() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (6u32, 3u32);
+    let n = (w * h) as usize;
+    let src = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: (w * 4) as usize,
+            data: (0..n * 4).map(|i| ((i * 29 + 7) & 0xFF) as u8).collect(),
+        }],
+    };
+    assert!(oxideav_pixfmt::supports_direct(
+        PixelFormat::Cmyk,
+        PixelFormat::CmykInverted
+    ));
+    let inv = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Cmyk, w, h),
+        PixelFormat::CmykInverted,
+        &opts,
+    )
+    .expect("cmyk → inverted");
+    for (a, b) in src.planes[0].data.iter().zip(inv.planes[0].data.iter()) {
+        assert_eq!(*a, !*b);
+    }
+    let back = convert(
+        &inv,
+        FrameInfo::new(PixelFormat::CmykInverted, w, h),
+        PixelFormat::Cmyk,
+        &opts,
+    )
+    .expect("inverted → cmyk");
+    assert_eq!(back.planes[0].data, src.planes[0].data);
+}
+
+/// RGB round-trips losslessly through the inverted convention, and the
+/// direct RGB rows equal the hand-staged complement hop.
+#[test]
+fn cmyk_inverted_rgb_roundtrip_and_staging_parity() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (8u32, 4u32);
+    let (rgb, rgb_info) = synth_rgb24(w, h);
+    let inv = convert(&rgb, rgb_info, PixelFormat::CmykInverted, &opts).expect("rgb → inverted");
+    let back = convert(
+        &inv,
+        FrameInfo::new(PixelFormat::CmykInverted, w, h),
+        PixelFormat::Rgb24,
+        &opts,
+    )
+    .expect("inverted → rgb");
+    assert_eq!(back.planes[0].data, rgb.planes[0].data);
+    // Direct decode == complement then regular decode.
+    let mid = convert(
+        &inv,
+        FrameInfo::new(PixelFormat::CmykInverted, w, h),
+        PixelFormat::Cmyk,
+        &opts,
+    )
+    .expect("leg 1");
+    let staged = convert(
+        &mid,
+        FrameInfo::new(PixelFormat::Cmyk, w, h),
+        PixelFormat::Rgb24,
+        &opts,
+    )
+    .expect("leg 2");
+    assert_eq!(back.planes[0].data, staged.planes[0].data);
+    // Rgba interop: opaque out, alpha ignored in, separation matches
+    // the Rgb24 row.
+    let (rgba, rgba_info) = synth_rgba(w, h);
+    let a = convert(&rgba, rgba_info, PixelFormat::CmykInverted, &opts).expect("rgba → inverted");
+    let mut rgb_of_rgba = Vec::with_capacity((w * h * 3) as usize);
+    for px in rgba.planes[0].data.chunks(4) {
+        rgb_of_rgba.extend_from_slice(&px[..3]);
+    }
+    let rgb_frame = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: (w * 3) as usize,
+            data: rgb_of_rgba,
+        }],
+    };
+    let b = convert(
+        &rgb_frame,
+        FrameInfo::new(PixelFormat::Rgb24, w, h),
+        PixelFormat::CmykInverted,
+        &opts,
+    )
+    .expect("rgb → inverted");
+    assert_eq!(a.planes[0].data, b.planes[0].data);
+}
+
+/// CmykInverted reaches the wider ecosystem through the RGB pivots.
+#[test]
+fn cmyk_inverted_reachability() {
+    for (a, b) in [
+        (PixelFormat::CmykInverted, PixelFormat::Bgra),
+        (PixelFormat::CmykInverted, PixelFormat::Yuv420P),
+        (PixelFormat::CmykInverted, PixelFormat::Gray8),
+        (PixelFormat::CmykInverted, PixelFormat::Pal8),
+        (PixelFormat::CmykInverted, PixelFormat::Ya16Le),
+        (PixelFormat::CmykInverted, PixelFormat::Gbrap8),
+    ] {
+        assert!(supports(a, b), "{a:?} → {b:?}");
+        assert!(supports(b, a), "{b:?} → {a:?}");
+    }
+}
