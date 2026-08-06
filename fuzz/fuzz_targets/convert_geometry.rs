@@ -107,6 +107,9 @@ const FORMATS: &[PixelFormat] = &[
     PixelFormat::Yuva420P10Le,
     PixelFormat::Yuva420P12Le,
     PixelFormat::Yuva420P16Le,
+    PixelFormat::Gbrap8,
+    PixelFormat::Ya16Le,
+    PixelFormat::CmykInverted,
 ];
 
 /// Map a raw fuzzer byte to a small dimension, biased toward the values
@@ -173,7 +176,11 @@ fn build_frame(fmt: PixelFormat, w: u32, h: u32, pad: usize, fill: &[u8]) -> Opt
         | PixelFormat::Bgra
         | PixelFormat::Argb
         | PixelFormat::Abgr
-        | PixelFormat::Cmyk => vec![build_plane(hu, wu * 4, pad, fill, &mut seed)],
+        | PixelFormat::Cmyk
+        | PixelFormat::CmykInverted => vec![build_plane(hu, wu * 4, pad, fill, &mut seed)],
+        // Packed 16-bit grey + alpha — interleaved (Y, A) LE16 word
+        // pairs, 4 bytes per pixel; any byte pattern is a legal sample.
+        PixelFormat::Ya16Le => vec![build_plane(hu, wu * 4, pad, fill, &mut seed)],
         PixelFormat::Rgb48Le => vec![build_plane(hu, wu * 6, pad, fill, &mut seed)],
         PixelFormat::Rgba64Le => vec![build_plane(hu, wu * 8, pad, fill, &mut seed)],
         PixelFormat::Gray8 => vec![build_plane(hu, wu, pad, fill, &mut seed)],
@@ -209,6 +216,7 @@ fn build_frame(fmt: PixelFormat, w: u32, h: u32, pad: usize, fill: &[u8]) -> Opt
         // Planar GBR(A) — 3 or 4 planes at 4:4:4, either 16-bit LE words
         // (2 bytes per sample) or, for Gbrp8, plain bytes.
         PixelFormat::Gbrp8
+        | PixelFormat::Gbrap8
         | PixelFormat::Gbrp10Le
         | PixelFormat::Gbrp12Le
         | PixelFormat::Gbrp14Le
