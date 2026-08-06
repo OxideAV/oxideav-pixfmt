@@ -61,8 +61,16 @@
 //! - Ya8 ↔ Gray8/Rgb24/Rgba (luma broadcast; alpha is carried through to
 //!   Rgba, dropped on the way to Rgb24, and synthesised as opaque 255 on
 //!   the return paths from Gray8/Rgb24).
-//! - Rgb48Le ↔ Rgb24, Rgba64Le ↔ Rgba (bit-shift).
-//! - The full nine-member planar GBR(A) ladder — `Gbrp8` (byte planes)
+//! - Ya16Le (packed 16-bit grey + alpha, full-scale LE16 words) ↔ Ya8
+//!   (exact ×257 widen / high-byte narrow on both words), Gray16Le
+//!   (luma word verbatim), Gray8, Rgba64Le (bit-exact broadcast +
+//!   alpha carry out; rounded-mean luma derivation back, so
+//!   grey-on-alpha content round-trips exactly) and Rgb24 / Rgba.
+//! - Rgb48Le ↔ Rgb24, Rgba64Le ↔ Rgba (bit-shift), and
+//!   Rgb48Le ↔ Rgba64Le (colour words verbatim; opaque 65535 alpha
+//!   synthesised / dropped).
+//! - The full ten-member planar GBR(A) ladder — `Gbrp8` / `Gbrap8`
+//!   (byte planes)
 //!   through the 10/12/14-bit members to the full-width `Gbrp16Le` /
 //!   `Gbrap16Le` — ↔ **both** deep packed formats (Rgb48Le / Rgba64Le,
 //!   alpha synthesised opaque full-scale or dropped when the shapes
@@ -96,20 +104,31 @@
 //! - Rgb24/Rgba → Pal8 requires `opts.palette`; dithering per
 //!   `opts.dither`. The output frame carries the table it was quantised
 //!   against as its palette side-channel, so it is self-describing.
-//! - Cmyk ↔ Rgb24/Rgba — uncalibrated device-CMYK approximation (see
-//!   [`cmyk`] for the formula and the caveats around ICC profiles and
-//!   Adobe-inverted JPEGs).
+//! - Cmyk and CmykInverted ↔ Rgb24/Rgba — uncalibrated device-CMYK
+//!   approximation in both ink conventions (see [`cmyk`] for the
+//!   formulas and the ICC caveats), plus Cmyk ↔ CmykInverted as the
+//!   exact per-byte complement.
+//! - **Full-precision deep matrix**: the 16-bit planar tier
+//!   ({Yuv,Yuva} × {420,422,444} `P16Le`) ↔ Rgb48Le / Rgba64Le runs
+//!   the k-coefficient construction in Q30 over 16-bit samples — no
+//!   8-bit narrowing anywhere on the path; chroma is resampled at
+//!   16-bit precision and the Yuva alpha plane rides verbatim in the
+//!   packed alpha word. The 10/12-bit family reaches these rows
+//!   losslessly through the exact widen to the 16-bit tier.
 //!
 //! Pairs without a direct entry (table row or computed planar-family
 //! op) are resolved automatically through a
 //! **single-pivot staged conversion** (one intermediate format, chosen
 //! in a fidelity-aware order: YUV pivots for YUV → YUV moves so no
-//! colour matrix enters the path — with the 16-bit `Yuv*P16Le` tier
-//! preferred when either endpoint is deeper than 8 bits, so chroma is
-//! resampled at full precision — and alpha-capable / deep RGB pivots
+//! colour matrix enters the path — with the 16-bit `Yuv(a)*P16Le` tier
+//! preferred whenever a deep endpoint is YUV carriage, so chroma is
+//! resampled and the matrix applied at full precision — and
+//! alpha-capable / deep RGB pivots
 //! preferred where the endpoints call for them). [`supports`] /
-//! [`supports_direct`] report per-pair availability; anything neither
-//! direct nor stageable returns `Error::Unsupported`.
+//! [`supports_direct`] report per-pair availability. The matrix is
+//! fully closed: **every ordered pair** of the 61 `PixelFormat`
+//! variants resolves — directly (976 pairs) or through one staged
+//! pivot (all 3660).
 //!
 //! # Bit-depth precision policy
 //!

@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Conversion coverage for the three oxideav-core 0.1.34 pixel formats:
+  - `Gbrap8` completes the byte tier of the GBR(A) ladder: pure-reorder
+    hops to `Rgba` / `Rgb24`, exact ×257 hops to `Rgba64Le` / `Rgb48Le`
+    (alpha carried, synthesised opaque, or dropped per the family
+    convention), a direct `Gbrp8` ↔ `Gbrap8` alpha append/drop pair,
+    and `Gray8` interop;
+  - `Ya16Le` (packed 16-bit grey + alpha): twelve direct rows to
+    `Ya8`, `Gray16Le`, `Gray8`, `Rgba64Le` (bit-exact broadcast +
+    alpha carry; rounded-mean derivation back) and `Rgb24` / `Rgba`;
+  - `CmykInverted`: RGB interop with the complement folded into the
+    device formula (lossless RGB round-trip preserved) and
+    `Cmyk` ↔ `CmykInverted` as the exact self-inverse per-byte
+    complement.
+- **Matrix closure** — every ordered pair of the 61 `PixelFormat`
+  variants now converts (3660 of 3660; was 3224 of 3306). Twenty
+  Gray8-hub rows (every 8-bit packed RGB order, both CMYK conventions,
+  `Pal8`, packed 4:2:2 and the deep packed pair now have direct
+  `Gray8` hops) plus a direct `Rgb48Le` ↔ `Rgba64Le` pair dissolve the
+  old two-pivot islands; each new row is pinned byte-identical to the
+  previously-staged route where one existed.
+- **Full-precision deep matrix** — the 16-bit planar tier
+  ({`Yuv`,`Yuva`} × {420,422,444} `P16Le`) ↔ `Rgb48Le` / `Rgba64Le`
+  runs the k-coefficient construction in Q30/i64 directly over 16-bit
+  samples (no 8-bit narrowing anywhere): limited-range offsets per the
+  BT-series n-bit digital representation (2^(n−8) scaling, achromatic
+  32768), chroma resampled at 16-bit precision, Yuva alpha word
+  verbatim. The deep staged fallback now prefers the (new
+  alpha-carrying) 16-bit YUV pivots whenever a deep endpoint is YUV
+  carriage, so the 10/12-bit family reaches deep RGB losslessly —
+  e.g. `Yuva420P10Le → Rgba64Le` keeps alpha as the exact MSB widen
+  instead of an 8-bit truncation. Direct pairs: 976.
+- Validation: f64-model parity for the Q30 kernels (±1 LSB at 16-bit
+  scale, six matrix variants, both directions) with exact spec
+  anchors; closure-row two-step parity and island-crossing tests;
+  significant-bits side-channel pins on the three new surfaces; two
+  bit-exact black-box validator cross-checks; fuzz coverage of the
+  new formats (1.75 M bounded local executions, zero findings) and a
+  deep-matrix bench case (~2.3 GiB/s scalar).
+
 - Conversion coverage for the six oxideav-core 0.1.33 pixel formats:
   - the GBR(A) depth-ladder ends `Gbrp8` (byte planes), `Gbrp16Le` and
     `Gbrap16Le` (full-width LE16 words, all 16 bits significant) with
