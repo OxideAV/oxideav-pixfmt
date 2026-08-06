@@ -1775,3 +1775,252 @@ fn gbr_ladder_end_reachability() {
         assert!(supports(b, a), "{b:?} → {a:?}");
     }
 }
+
+// -------- Gbrap8 (byte-tier planar GBR + alpha, core 0.1.34) --------
+
+/// Build a `Gbrap8` frame (4 byte planes) with distinct per-plane ramps.
+fn synth_gbra8(w: u32, h: u32) -> VideoFrame {
+    let mut f = synth_gbr8(w, h);
+    let n = (w * h) as usize;
+    f.planes.push(VideoPlane {
+        stride: w as usize,
+        data: (0..n).map(|i| ((i * 13 + 5) & 0xFF) as u8).collect(),
+    });
+    f
+}
+
+/// `Gbrap8` ↔ `Rgba` is a zero-math plane reorder: known byte positions
+/// on the way out, all four planes bit-exact on the round-trip.
+#[test]
+fn gbrap8_rgba_pure_reorder_bit_exact() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (6u32, 4u32);
+    let src = synth_gbra8(w, h);
+    let packed = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrap8, w, h),
+        PixelFormat::Rgba,
+        &opts,
+    )
+    .expect("gbrap8 → rgba");
+    let (g, b, r, a) = (
+        &src.planes[0].data,
+        &src.planes[1].data,
+        &src.planes[2].data,
+        &src.planes[3].data,
+    );
+    for i in 0..(w * h) as usize {
+        let px = &packed.planes[0].data[i * 4..i * 4 + 4];
+        assert_eq!(px, [r[i], g[i], b[i], a[i]], "pixel {i}");
+    }
+    let back = convert(
+        &packed,
+        FrameInfo::new(PixelFormat::Rgba, w, h),
+        PixelFormat::Gbrap8,
+        &opts,
+    )
+    .expect("rgba → gbrap8");
+    assert_eq!(back.planes.len(), 4);
+    for p in 0..4 {
+        assert_eq!(back.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+}
+
+/// The Gbrap8 alpha-crossing rows: surplus alpha drops, missing alpha
+/// synthesises opaque (255 on byte surfaces, 65535 on packed-deep).
+#[test]
+fn gbrap8_alpha_crossing_rows() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (4u32, 2u32);
+    let n = (w * h) as usize;
+    let src = synth_gbra8(w, h);
+    let info = FrameInfo::new(PixelFormat::Gbrap8, w, h);
+    // Gbrap8 → Rgb24 drops alpha; colour bytes land verbatim.
+    let rgb = convert(&src, info, PixelFormat::Rgb24, &opts).expect("→ rgb24");
+    for i in 0..n {
+        assert_eq!(
+            &rgb.planes[0].data[i * 3..i * 3 + 3],
+            [
+                src.planes[2].data[i],
+                src.planes[0].data[i],
+                src.planes[1].data[i]
+            ],
+        );
+    }
+    // Rgb24 → Gbrap8 synthesises the opaque plane.
+    let (rgb24, rgb_info) = synth_rgb24(w, h);
+    let gbra = convert(&rgb24, rgb_info, PixelFormat::Gbrap8, &opts).expect("rgb24 → gbrap8");
+    assert_eq!(gbra.planes.len(), 4);
+    assert!(gbra.planes[3].data.iter().all(|&a| a == 255));
+    // Gbrp8 → Rgba synthesises opaque bytes; Rgba → Gbrp8 drops alpha.
+    let gbr = synth_gbr8(w, h);
+    let rgba = convert(
+        &gbr,
+        FrameInfo::new(PixelFormat::Gbrp8, w, h),
+        PixelFormat::Rgba,
+        &opts,
+    )
+    .expect("gbrp8 → rgba");
+    for i in 0..n {
+        assert_eq!(rgba.planes[0].data[i * 4 + 3], 255, "opaque {i}");
+    }
+    let (rgba_src, rgba_info) = synth_rgba(w, h);
+    let gbr_back = convert(&rgba_src, rgba_info, PixelFormat::Gbrp8, &opts).expect("rgba → gbrp8");
+    assert_eq!(gbr_back.planes.len(), 3);
+    // Gbrap8 ↔ Rgba64Le: exact ×257 widen / top-byte truncation on all
+    // four components — the round-trip is bit-exact.
+    let deep = convert(&src, info, PixelFormat::Rgba64Le, &opts).expect("→ rgba64");
+    for i in 0..n {
+        assert_eq!(
+            read16le(&deep.planes[0].data, i * 8 + 6),
+            src.planes[3].data[i] as u16 * 257,
+            "alpha word {i}"
+        );
+    }
+    let back = convert(
+        &deep,
+        FrameInfo::new(PixelFormat::Rgba64Le, w, h),
+        PixelFormat::Gbrap8,
+        &opts,
+    )
+    .expect("rgba64 → gbrap8");
+    for p in 0..4 {
+        assert_eq!(back.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+    // Gbrap8 → Rgb48Le drops alpha; Rgb48Le → Gbrap8 synthesises 255
+    // after truncation.
+    let rgb48 = convert(&src, info, PixelFormat::Rgb48Le, &opts).expect("→ rgb48");
+    assert_eq!(rgb48.planes[0].data.len(), n * 6);
+    let gbra = convert(
+        &rgb48,
+        FrameInfo::new(PixelFormat::Rgb48Le, w, h),
+        PixelFormat::Gbrap8,
+        &opts,
+    )
+    .expect("rgb48 → gbrap8");
+    assert!(gbra.planes[3].data.iter().all(|&a| a == 255));
+    for p in 0..3 {
+        assert_eq!(gbra.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+}
+
+/// `Gbrp8` ↔ `Gbrap8` alpha append / drop is a direct row: colour
+/// planes byte-for-byte, opaque synthesis on the way up.
+#[test]
+fn gbrp8_gbrap8_alpha_append_drop() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (5u32, 3u32);
+    let src = synth_gbra8(w, h);
+    let info = FrameInfo::new(PixelFormat::Gbrap8, w, h);
+    assert!(oxideav_pixfmt::supports_direct(
+        PixelFormat::Gbrp8,
+        PixelFormat::Gbrap8
+    ));
+    assert!(oxideav_pixfmt::supports_direct(
+        PixelFormat::Gbrap8,
+        PixelFormat::Gbrp8
+    ));
+    let dropped = convert(&src, info, PixelFormat::Gbrp8, &opts).expect("drop");
+    assert_eq!(dropped.planes.len(), 3);
+    for p in 0..3 {
+        assert_eq!(dropped.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+    let appended = convert(
+        &dropped,
+        FrameInfo::new(PixelFormat::Gbrp8, w, h),
+        PixelFormat::Gbrap8,
+        &opts,
+    )
+    .expect("append");
+    assert_eq!(appended.planes.len(), 4);
+    for p in 0..3 {
+        assert_eq!(appended.planes[p].data, src.planes[p].data, "plane {p}");
+    }
+    assert!(appended.planes[3].data.iter().all(|&a| a == 255));
+}
+
+/// Gray8 round-trips through Gbrap8 (broadcast out, projection back),
+/// and Gbrap8 → Gray8 matches the Gbrp8 projection of the same colour
+/// planes (alpha never enters the luminance kernel).
+#[test]
+fn gbrap8_gray8_roundtrip_and_alpha_ignored() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (8u32, 4u32);
+    let n = (w * h) as usize;
+    let gray = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: w as usize,
+            data: (0..n).map(|i| ((i * 37) & 0xFF) as u8).collect(),
+        }],
+    };
+    let gbra = convert(
+        &gray,
+        FrameInfo::new(PixelFormat::Gray8, w, h),
+        PixelFormat::Gbrap8,
+        &opts,
+    )
+    .expect("gray → gbrap8");
+    assert_eq!(gbra.planes.len(), 4);
+    for p in 0..3 {
+        assert_eq!(gbra.planes[p].data, gray.planes[0].data, "plane {p}");
+    }
+    assert!(gbra.planes[3].data.iter().all(|&a| a == 255));
+    let back = convert(
+        &gbra,
+        FrameInfo::new(PixelFormat::Gbrap8, w, h),
+        PixelFormat::Gray8,
+        &opts,
+    )
+    .expect("gbrap8 → gray");
+    assert_eq!(back.planes[0].data, gray.planes[0].data);
+    // Arbitrary content: Gbrap8 and Gbrp8 project identically.
+    let gbra = synth_gbra8(w, h);
+    let mut gbr = gbra.clone();
+    gbr.planes.truncate(3);
+    let a = convert(
+        &gbra,
+        FrameInfo::new(PixelFormat::Gbrap8, w, h),
+        PixelFormat::Gray8,
+        &opts,
+    )
+    .expect("gbrap8 → gray");
+    let b = convert(
+        &gbr,
+        FrameInfo::new(PixelFormat::Gbrp8, w, h),
+        PixelFormat::Gray8,
+        &opts,
+    )
+    .expect("gbrp8 → gray");
+    assert_eq!(a.planes[0].data, b.planes[0].data);
+}
+
+/// Gbrap8 reaches the wider ecosystem (YUV(A), deep GBR, Mono) through
+/// the staged fallback, and alpha survives when both endpoints carry it.
+#[test]
+fn gbrap8_reachability_and_staged_alpha() {
+    let opts = ConvertOptions::default();
+    for (a, b) in [
+        (PixelFormat::Gbrap8, PixelFormat::Yuva420P),
+        (PixelFormat::Gbrap8, PixelFormat::Gbrap16Le),
+        (PixelFormat::Gbrap8, PixelFormat::Gbrp10Le),
+        (PixelFormat::Gbrap8, PixelFormat::Bgra),
+        (PixelFormat::Gbrap8, PixelFormat::MonoBlack),
+        (PixelFormat::Gbrap8, PixelFormat::Ya8),
+    ] {
+        assert!(supports(a, b), "{a:?} → {b:?}");
+        assert!(supports(b, a), "{b:?} → {a:?}");
+    }
+    // Gbrap8 → Bgra stages through Rgba: alpha survives bit-exact.
+    let (w, h) = (4u32, 2u32);
+    let src = synth_gbra8(w, h);
+    let out = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gbrap8, w, h),
+        PixelFormat::Bgra,
+        &opts,
+    )
+    .expect("gbrap8 → bgra");
+    let alpha_out: Vec<u8> = out.planes[0].data.chunks(4).map(|c| c[3]).collect();
+    assert_eq!(alpha_out, src.planes[3].data);
+}
