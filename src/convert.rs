@@ -591,6 +591,27 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgb24, P::Ya8,   Rgb24ToYa8),
         (P::Rgba,  P::Ya8,   RgbaToYa8),
 
+        // Ya16Le (packed 16-bit grey + alpha, core 0.1.34) — the deep
+        // companion to Ya8. Both words are full-scale LE16 (the
+        // Gray16Le convention). Depth moves follow the ladder rules:
+        // high-byte truncation down, exact ×257 widen up (so the 8-bit
+        // round-trips are lossless); the Gray16Le pair is bit-exact in
+        // luma; the Rgba64Le pair is bit-exact out (broadcast + carry)
+        // and recovers grey-on-alpha content exactly on the way back
+        // (rounded-mean luma derivation, the Ya8 convention at depth).
+        (P::Ya16Le,   P::Ya8,      Ya16ToYa8),
+        (P::Ya8,      P::Ya16Le,   Ya8ToYa16),
+        (P::Ya16Le,   P::Gray16Le, Ya16ToGray16),
+        (P::Gray16Le, P::Ya16Le,   Gray16ToYa16),
+        (P::Ya16Le,   P::Gray8,    Ya16ToGray8),
+        (P::Gray8,    P::Ya16Le,   Gray8ToYa16),
+        (P::Ya16Le,   P::Rgba64Le, Ya16ToRgba64),
+        (P::Rgba64Le, P::Ya16Le,   Rgba64ToYa16),
+        (P::Ya16Le,   P::Rgba,     Ya16ToPacked8 { alpha: true }),
+        (P::Ya16Le,   P::Rgb24,    Ya16ToPacked8 { alpha: false }),
+        (P::Rgba,     P::Ya16Le,   Packed8ToYa16 { alpha_in: true }),
+        (P::Rgb24,    P::Ya16Le,   Packed8ToYa16 { alpha_in: false }),
+
         // YUV family → Gray8 (luma extraction) and Gray8 → YUV family
         // (neutral chroma synthesis). Both directions are pure luma-plane
         // operations: chroma is dropped on the way out and written as the
@@ -1092,6 +1113,39 @@ enum ConvertOp {
     Ya8ToRgba,
     Rgb24ToYa8,
     RgbaToYa8,
+    /// `Ya16Le` → `Ya8`: high-byte truncation of both words.
+    Ya16ToYa8,
+    /// `Ya8` → `Ya16Le`: exact ×257 widen of both components (the
+    /// inverse of [`Self::Ya16ToYa8`] on 8-bit content).
+    Ya8ToYa16,
+    /// `Ya16Le` → `Gray16Le`: luma word carried verbatim, alpha
+    /// dropped.
+    Ya16ToGray16,
+    /// `Gray16Le` → `Ya16Le`: luma word carried verbatim, alpha
+    /// synthesised opaque 65535.
+    Gray16ToYa16,
+    /// `Ya16Le` → `Gray8`: high byte of the luma word, alpha dropped.
+    Ya16ToGray8,
+    /// `Gray8` → `Ya16Le`: ×257 widen, alpha opaque 65535.
+    Gray8ToYa16,
+    /// `Ya16Le` → `Rgba64Le`: luma word broadcast into R, G, B; alpha
+    /// word carried verbatim (bit-exact).
+    Ya16ToRgba64,
+    /// `Rgba64Le` → `Ya16Le`: rounded-mean luma derivation over the R,
+    /// G, B words (the 16-bit analogue of the Ya8 rule); alpha word
+    /// carried verbatim.
+    Rgba64ToYa16,
+    /// `Ya16Le` → packed 8-bit RGB: high-byte broadcast; the alpha
+    /// high byte is carried (`Rgba`) or dropped (`Rgb24`).
+    Ya16ToPacked8 {
+        alpha: bool,
+    },
+    /// Packed 8-bit RGB → `Ya16Le`: rounded-mean luma then the exact
+    /// ×257 widen; alpha widened from the source (`Rgba`) or opaque
+    /// 65535 (`Rgb24`).
+    Packed8ToYa16 {
+        alpha_in: bool,
+    },
     /// Any YUV-family source (planar, semi-planar NV, or planar +
     /// alpha) → `Gray8` by extracting the full-resolution luma plane.
     /// Chroma (and alpha, for `Yuva420P`) is dropped. `full_range`
@@ -1477,6 +1531,28 @@ impl ConvertOp {
             Self::Ya8ToRgba => do_ya8_to_rgba(src, src_info),
             Self::Rgb24ToYa8 => do_rgb24_to_ya8(src, src_info),
             Self::RgbaToYa8 => do_rgba_to_ya8(src, src_info),
+            Self::Ya16ToYa8 => packed_map(src, src_info, 4, 2, gray::ya16le_to_ya8),
+            Self::Ya8ToYa16 => packed_map(src, src_info, 2, 4, gray::ya8_to_ya16le),
+            Self::Ya16ToGray16 => packed_map(src, src_info, 4, 2, gray::ya16le_to_gray16le),
+            Self::Gray16ToYa16 => packed_map(src, src_info, 2, 4, gray::gray16le_to_ya16le),
+            Self::Ya16ToGray8 => packed_map(src, src_info, 4, 1, gray::ya16le_to_gray8),
+            Self::Gray8ToYa16 => packed_map(src, src_info, 1, 4, gray::gray8_to_ya16le),
+            Self::Ya16ToRgba64 => packed_map(src, src_info, 4, 8, gray::ya16le_to_rgba64le),
+            Self::Rgba64ToYa16 => packed_map(src, src_info, 8, 4, gray::rgba64le_to_ya16le),
+            Self::Ya16ToPacked8 { alpha } => {
+                if alpha {
+                    packed_map(src, src_info, 4, 4, gray::ya16le_to_rgba)
+                } else {
+                    packed_map(src, src_info, 4, 3, gray::ya16le_to_rgb24)
+                }
+            }
+            Self::Packed8ToYa16 { alpha_in } => {
+                if alpha_in {
+                    packed_map(src, src_info, 4, 4, gray::rgba_to_ya16le)
+                } else {
+                    packed_map(src, src_info, 3, 4, gray::rgb24_to_ya16le)
+                }
+            }
             Self::YuvLumaToGray { full_range } => do_yuv_luma_to_gray(src, src_info, full_range),
             Self::GrayToYuvPlanar {
                 wsub,
@@ -1633,6 +1709,35 @@ fn make_frame(src: &VideoFrame, planes: Vec<VideoPlane>) -> VideoFrame {
 fn tight_row(src: &[u8], stride: usize, row: usize, row_bytes: usize) -> &[u8] {
     let off = row * stride;
     &src[off..off + row_bytes]
+}
+
+/// Row-wise map between two single-plane packed layouts: gather each
+/// tight source row (`src_bpp` bytes/pixel) and let `f` emit the
+/// corresponding destination row (`dst_bpp` bytes/pixel). The kernel
+/// signature matches the low-level `(src, dst, pixels)` helpers in
+/// [`crate::gray`] / [`crate::rgb`].
+fn packed_map(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    src_bpp: usize,
+    dst_bpp: usize,
+    f: fn(&[u8], &mut [u8], usize),
+) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let in_plane = &src.planes[0];
+    let mut out = vec![0u8; w * h * dst_bpp];
+    for row in 0..h {
+        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * src_bpp);
+        f(sr, &mut out[row * w * dst_bpp..(row + 1) * w * dst_bpp], w);
+    }
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * dst_bpp,
+            data: out,
+        }],
+    ))
 }
 
 fn gather_tight(src: &[u8], stride: usize, w_bytes: usize, h: usize) -> Vec<u8> {

@@ -2024,3 +2024,207 @@ fn gbrap8_reachability_and_staged_alpha() {
     let alpha_out: Vec<u8> = out.planes[0].data.chunks(4).map(|c| c[3]).collect();
     assert_eq!(alpha_out, src.planes[3].data);
 }
+
+// -------- Ya16Le (packed 16-bit grey + alpha, core 0.1.34) --------
+
+/// Build a `Ya16Le` frame with a full-word ramp on both components.
+fn synth_ya16(w: u32, h: u32) -> VideoFrame {
+    let n = (w * h) as usize;
+    let mut data = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        let y = ((i * 9973 + 11) & 0xFFFF) as u16;
+        let a = ((i * 6151 + 7) & 0xFFFF) as u16;
+        data.extend_from_slice(&y.to_le_bytes());
+        data.extend_from_slice(&a.to_le_bytes());
+    }
+    VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: (w * 4) as usize,
+            data,
+        }],
+    }
+}
+
+/// Ya8 → Ya16Le is the exact ×257 widen on both components, and the
+/// truncation back recovers the original bytes exactly.
+#[test]
+fn ya8_ya16_depth_ladder_roundtrip() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (6u32, 4u32);
+    let n = (w * h) as usize;
+    let ya8 = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: (w * 2) as usize,
+            data: (0..n * 2).map(|i| ((i * 41 + 3) & 0xFF) as u8).collect(),
+        }],
+    };
+    let deep = convert(
+        &ya8,
+        FrameInfo::new(PixelFormat::Ya8, w, h),
+        PixelFormat::Ya16Le,
+        &opts,
+    )
+    .expect("ya8 → ya16");
+    for i in 0..n {
+        let y = ya8.planes[0].data[i * 2] as u16 * 257;
+        let a = ya8.planes[0].data[i * 2 + 1] as u16 * 257;
+        assert_eq!(read16le(&deep.planes[0].data, i * 4), y, "luma {i}");
+        assert_eq!(read16le(&deep.planes[0].data, i * 4 + 2), a, "alpha {i}");
+    }
+    let back = convert(
+        &deep,
+        FrameInfo::new(PixelFormat::Ya16Le, w, h),
+        PixelFormat::Ya8,
+        &opts,
+    )
+    .expect("ya16 → ya8");
+    assert_eq!(back.planes[0].data, ya8.planes[0].data);
+}
+
+/// Ya16Le ↔ Gray16Le carries the luma word verbatim: dropping the
+/// alpha and re-synthesising it opaque round-trips the luma exactly.
+#[test]
+fn ya16_gray16_luma_bit_exact() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (5u32, 3u32);
+    let n = (w * h) as usize;
+    let src = synth_ya16(w, h);
+    let info = FrameInfo::new(PixelFormat::Ya16Le, w, h);
+    let gray = convert(&src, info, PixelFormat::Gray16Le, &opts).expect("→ gray16");
+    for i in 0..n {
+        assert_eq!(
+            read16le(&gray.planes[0].data, i * 2),
+            read16le(&src.planes[0].data, i * 4),
+            "luma {i}"
+        );
+    }
+    let back = convert(
+        &gray,
+        FrameInfo::new(PixelFormat::Gray16Le, w, h),
+        PixelFormat::Ya16Le,
+        &opts,
+    )
+    .expect("gray16 → ya16");
+    for i in 0..n {
+        assert_eq!(
+            read16le(&back.planes[0].data, i * 4),
+            read16le(&src.planes[0].data, i * 4),
+            "luma {i}"
+        );
+        assert_eq!(read16le(&back.planes[0].data, i * 4 + 2), 0xFFFF);
+    }
+}
+
+/// Ya16Le → Rgba64Le is a bit-exact broadcast + alpha carry, and the
+/// rounded-mean derivation back recovers the frame exactly (the mean
+/// of three equal words is the word).
+#[test]
+fn ya16_rgba64_roundtrip_exact() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (4u32, 4u32);
+    let n = (w * h) as usize;
+    let src = synth_ya16(w, h);
+    let info = FrameInfo::new(PixelFormat::Ya16Le, w, h);
+    let deep = convert(&src, info, PixelFormat::Rgba64Le, &opts).expect("→ rgba64");
+    for i in 0..n {
+        let y = read16le(&src.planes[0].data, i * 4);
+        let a = read16le(&src.planes[0].data, i * 4 + 2);
+        for c in 0..3 {
+            assert_eq!(read16le(&deep.planes[0].data, i * 8 + c * 2), y);
+        }
+        assert_eq!(read16le(&deep.planes[0].data, i * 8 + 6), a);
+    }
+    let back = convert(
+        &deep,
+        FrameInfo::new(PixelFormat::Rgba64Le, w, h),
+        PixelFormat::Ya16Le,
+        &opts,
+    )
+    .expect("rgba64 → ya16");
+    assert_eq!(back.planes[0].data, src.planes[0].data);
+}
+
+/// The 8-bit interop rows: Gray8 round-trips exactly (×257 up,
+/// high-byte down), the packed-8 emitters match the hand-staged
+/// Ya8 hop, and alpha follows the carry / synthesise convention.
+#[test]
+fn ya16_8bit_interop_rows() {
+    let opts = ConvertOptions::default();
+    let (w, h) = (6u32, 2u32);
+    let n = (w * h) as usize;
+    // Gray8 → Ya16Le → Gray8 identity.
+    let gray = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: w as usize,
+            data: (0..n).map(|i| ((i * 23) & 0xFF) as u8).collect(),
+        }],
+    };
+    let deep = convert(
+        &gray,
+        FrameInfo::new(PixelFormat::Gray8, w, h),
+        PixelFormat::Ya16Le,
+        &opts,
+    )
+    .expect("gray8 → ya16");
+    let back = convert(
+        &deep,
+        FrameInfo::new(PixelFormat::Ya16Le, w, h),
+        PixelFormat::Gray8,
+        &opts,
+    )
+    .expect("ya16 → gray8");
+    assert_eq!(back.planes[0].data, gray.planes[0].data);
+    // Ya16Le → Rgba equals the hand-staged Ya8 hop (truncate first,
+    // then the proven Ya8 → Rgba broadcast).
+    let src = synth_ya16(w, h);
+    let info = FrameInfo::new(PixelFormat::Ya16Le, w, h);
+    let direct = convert(&src, info, PixelFormat::Rgba, &opts).expect("direct");
+    let mid = convert(&src, info, PixelFormat::Ya8, &opts).expect("leg 1");
+    let staged = convert(
+        &mid,
+        FrameInfo::new(PixelFormat::Ya8, w, h),
+        PixelFormat::Rgba,
+        &opts,
+    )
+    .expect("leg 2");
+    assert_eq!(direct.planes[0].data, staged.planes[0].data);
+    // Rgb24 → Ya16Le synthesises opaque 65535.
+    let (rgb, rgb_info) = synth_rgb24(w, h);
+    let out = convert(&rgb, rgb_info, PixelFormat::Ya16Le, &opts).expect("rgb24 → ya16");
+    for i in 0..n {
+        assert_eq!(read16le(&out.planes[0].data, i * 4 + 2), 0xFFFF);
+    }
+    // Rgba → Ya16Le widens the source alpha exactly.
+    let (rgba, rgba_info) = synth_rgba(w, h);
+    let out = convert(&rgba, rgba_info, PixelFormat::Ya16Le, &opts).expect("rgba → ya16");
+    for i in 0..n {
+        assert_eq!(
+            read16le(&out.planes[0].data, i * 4 + 2),
+            rgba.planes[0].data[i * 4 + 3] as u16 * 257,
+            "alpha {i}"
+        );
+    }
+}
+
+/// Ya16Le reaches the wider ecosystem through the staged fallback with
+/// deep pivots first (the Rgba64Le hop keeps 16-bit luma until the
+/// final leg).
+#[test]
+fn ya16_reachability() {
+    for (a, b) in [
+        (PixelFormat::Ya16Le, PixelFormat::Gray10Le),
+        (PixelFormat::Ya16Le, PixelFormat::Gray12Le),
+        (PixelFormat::Ya16Le, PixelFormat::Yuv420P),
+        (PixelFormat::Ya16Le, PixelFormat::Yuva444P16Le),
+        (PixelFormat::Ya16Le, PixelFormat::Gbrap16Le),
+        (PixelFormat::Ya16Le, PixelFormat::Gbrap8),
+        (PixelFormat::Ya16Le, PixelFormat::Bgra),
+        (PixelFormat::Ya16Le, PixelFormat::MonoBlack),
+    ] {
+        assert!(supports(a, b), "{a:?} → {b:?}");
+        assert!(supports(b, a), "{b:?} → {a:?}");
+    }
+}

@@ -185,6 +185,153 @@ pub fn rgb24_to_ya8(src: &[u8], dst: &mut [u8], pixels: usize) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Ya16Le (packed 16-bit grey + alpha, little-endian, 4 bytes/pixel).
+//
+// Every sample — luma and alpha alike — is a LE 16-bit word with ALL 16
+// bits significant (full-scale 65535, the `Gray16Le` convention). Depth
+// moves follow the crate-wide ladder rules: narrowing keeps the high
+// byte (truncation), widening is the exact ×257 MSB replication (zero
+// maps to zero, 255 to 65535, and narrow ∘ widen is the identity).
+
+#[inline]
+fn ld16(src: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([src[off], src[off + 1]])
+}
+
+#[inline]
+fn st16(dst: &mut [u8], off: usize, v: u16) {
+    dst[off..off + 2].copy_from_slice(&v.to_le_bytes());
+}
+
+/// Ya16Le → Ya8: keep the high byte of both the luma and the alpha
+/// word (truncation).
+pub fn ya16le_to_ya8(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        dst[i * 2] = (ld16(src, i * 4) >> 8) as u8;
+        dst[i * 2 + 1] = (ld16(src, i * 4 + 2) >> 8) as u8;
+    }
+}
+
+/// Ya8 → Ya16Le: widen both components by the exact ×257 so
+/// [`ya16le_to_ya8`] recovers the original exactly.
+pub fn ya8_to_ya16le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        st16(dst, i * 4, src[i * 2] as u16 * 257);
+        st16(dst, i * 4 + 2, src[i * 2 + 1] as u16 * 257);
+    }
+}
+
+/// Ya16Le → Gray16Le: carry the luma word verbatim (bit-exact); the
+/// alpha word is dropped.
+pub fn ya16le_to_gray16le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        dst[i * 2..i * 2 + 2].copy_from_slice(&src[i * 4..i * 4 + 2]);
+    }
+}
+
+/// Gray16Le → Ya16Le: carry the luma word verbatim; alpha is
+/// synthesised opaque 65535.
+pub fn gray16le_to_ya16le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        dst[i * 4..i * 4 + 2].copy_from_slice(&src[i * 2..i * 2 + 2]);
+        st16(dst, i * 4 + 2, 0xFFFF);
+    }
+}
+
+/// Ya16Le → Gray8: high byte of the luma word; alpha dropped.
+pub fn ya16le_to_gray8(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for (i, d) in dst.iter_mut().enumerate().take(pixels) {
+        *d = (ld16(src, i * 4) >> 8) as u8;
+    }
+}
+
+/// Gray8 → Ya16Le: ×257 widen; alpha opaque 65535.
+pub fn gray8_to_ya16le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for (i, &s) in src.iter().enumerate().take(pixels) {
+        st16(dst, i * 4, s as u16 * 257);
+        st16(dst, i * 4 + 2, 0xFFFF);
+    }
+}
+
+/// Ya16Le → Rgba64Le: broadcast the luma word into the R, G and B
+/// words and carry the alpha word verbatim — bit-exact, and
+/// [`rgba64le_to_ya16le`] recovers the original exactly (the rounded
+/// mean of three equal words is the word).
+pub fn ya16le_to_rgba64le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let y = ld16(src, i * 4);
+        let a = ld16(src, i * 4 + 2);
+        st16(dst, i * 8, y);
+        st16(dst, i * 8 + 2, y);
+        st16(dst, i * 8 + 4, y);
+        st16(dst, i * 8 + 6, a);
+    }
+}
+
+/// Rgba64Le → Ya16Le. Luma is the rounded integer mean of the R, G
+/// and B words (the 16-bit analogue of [`rgba_to_ya8`]'s derivation);
+/// the alpha word is carried verbatim. As at 8 bits, the colour-aware
+/// path is a matrixed conversion — this is the cheap arithmetic
+/// shortcut for content that was already grey-on-alpha.
+pub fn rgba64le_to_ya16le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let r = ld16(src, i * 8) as u32;
+        let g = ld16(src, i * 8 + 2) as u32;
+        let b = ld16(src, i * 8 + 4) as u32;
+        let a = ld16(src, i * 8 + 6);
+        st16(dst, i * 4, ((r + g + b + 1) / 3) as u16);
+        st16(dst, i * 4 + 2, a);
+    }
+}
+
+/// Ya16Le → Rgba: high-byte broadcast into R, G, B plus the high byte
+/// of the alpha word.
+pub fn ya16le_to_rgba(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let y = (ld16(src, i * 4) >> 8) as u8;
+        dst[i * 4] = y;
+        dst[i * 4 + 1] = y;
+        dst[i * 4 + 2] = y;
+        dst[i * 4 + 3] = (ld16(src, i * 4 + 2) >> 8) as u8;
+    }
+}
+
+/// Ya16Le → Rgb24: high-byte broadcast; alpha dropped.
+pub fn ya16le_to_rgb24(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let y = (ld16(src, i * 4) >> 8) as u8;
+        dst[i * 3] = y;
+        dst[i * 3 + 1] = y;
+        dst[i * 3 + 2] = y;
+    }
+}
+
+/// Rgba → Ya16Le: the [`rgba_to_ya8`] luma derivation (rounded mean of
+/// R, G, B) followed by the exact ×257 widen of both components.
+pub fn rgba_to_ya16le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let r = src[i * 4] as u32;
+        let g = src[i * 4 + 1] as u32;
+        let b = src[i * 4 + 2] as u32;
+        let y = ((r + g + b + 1) / 3) as u16;
+        st16(dst, i * 4, y * 257);
+        st16(dst, i * 4 + 2, src[i * 4 + 3] as u16 * 257);
+    }
+}
+
+/// Rgb24 → Ya16Le: same luma derivation; alpha opaque 65535.
+pub fn rgb24_to_ya16le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let r = src[i * 3] as u32;
+        let g = src[i * 3 + 1] as u32;
+        let b = src[i * 3 + 2] as u32;
+        let y = ((r + g + b + 1) / 3) as u16;
+        st16(dst, i * 4, y * 257);
+        st16(dst, i * 4 + 2, 0xFFFF);
+    }
+}
+
 /// Gray8 → 1 bpp (MSB-first). A threshold of 128 decides bit value.
 pub fn gray8_to_mono(src: &[u8], dst: &mut [u8], w: usize, h: usize, black_is_zero: bool) {
     let stride = w.div_ceil(8);
