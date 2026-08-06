@@ -544,3 +544,133 @@ fn record_on_deep_420_yuva_alpha_plane() {
     }
     assert!(out.significant_bits().is_none());
 }
+
+/// `Ya16Le` (core 0.1.34) is a single interleaved plane, so one record
+/// byte covers BOTH the luma and alpha words: a 12-bit-marked frame
+/// converts exactly like the materialised 12 → 16 widen, and invalid
+/// records (0, above nominal) reject.
+#[test]
+fn record_on_ya16le_interleaved_plane() {
+    let (w, h) = (6usize, 2usize);
+    let n = w * h;
+    let mask12 = ((1u32 << 12) - 1) as u16;
+    let words: Vec<u16> = (0..n * 2)
+        .map(|i| (i as u16).wrapping_mul(2741).wrapping_add(9) & mask12)
+        .collect();
+    let raw = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: w * 4,
+            data: le16_plane(words.iter().copied()),
+        }],
+    };
+    let marked = raw.clone().with_significant_bits(vec![12]);
+    let materialised = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: w * 4,
+            data: le16_plane(words.iter().map(|&v| widen(v as u32, 12, 16) as u16)),
+        }],
+    };
+    let info = FrameInfo::new(PixelFormat::Ya16Le, w as u32, h as u32);
+    for dst in [
+        PixelFormat::Ya8,
+        PixelFormat::Gray16Le,
+        PixelFormat::Rgba64Le,
+        PixelFormat::Rgba,
+    ] {
+        let a = convert(&marked, info, dst, &ConvertOptions::default()).expect("marked");
+        let b =
+            convert(&materialised, info, dst, &ConvertOptions::default()).expect("materialised");
+        assert_eq!(a.planes.len(), b.planes.len(), "{dst:?}");
+        for p in 0..a.planes.len() {
+            assert_eq!(a.planes[p].data, b.planes[p].data, "{dst:?} plane {p}");
+        }
+        assert!(a.significant_bits().is_none());
+    }
+    // Invalid records reject.
+    for bad in [vec![0u8], vec![17u8]] {
+        let f = raw.clone().with_significant_bits(bad);
+        assert!(convert(&f, info, PixelFormat::Ya8, &ConvertOptions::default()).is_err());
+    }
+}
+
+/// `Gbrap8` (core 0.1.34): the record covers the byte alpha plane
+/// (index 3) — a 6-bit-marked alpha reaches `Rgba` as the 6 → 8 widen
+/// while the colour planes pass through untouched; above-nominal
+/// records reject.
+#[test]
+fn record_on_gbrap8_alpha_plane() {
+    let (w, h) = (4usize, 2usize);
+    let n = w * h;
+    let mk = |mul: usize, mask: usize| -> VideoPlane {
+        VideoPlane {
+            stride: w,
+            data: (0..n).map(|i| ((i * mul) & mask) as u8).collect(),
+        }
+    };
+    let frame = VideoFrame {
+        pts: None,
+        planes: vec![mk(7, 0xFF), mk(11, 0xFF), mk(5, 0xFF), mk(13, 0x3F)],
+    };
+    let marked = frame.clone().with_significant_bits(vec![8, 8, 8, 6]);
+    let info = FrameInfo::new(PixelFormat::Gbrap8, w as u32, h as u32);
+    let out = convert(&marked, info, PixelFormat::Rgba, &ConvertOptions::default())
+        .expect("gbrap8 + record → rgba");
+    for i in 0..n {
+        assert_eq!(out.planes[0].data[i * 4], frame.planes[2].data[i], "R {i}");
+        assert_eq!(
+            out.planes[0].data[i * 4 + 1],
+            frame.planes[0].data[i],
+            "G {i}"
+        );
+        assert_eq!(
+            out.planes[0].data[i * 4 + 2],
+            frame.planes[1].data[i],
+            "B {i}"
+        );
+        assert_eq!(
+            out.planes[0].data[i * 4 + 3],
+            widen(frame.planes[3].data[i] as u32, 6, 8) as u8,
+            "alpha byte {i} must be the 6 → 8 widen"
+        );
+    }
+    assert!(out.significant_bits().is_none());
+    let bad = frame.clone().with_significant_bits(vec![8, 8, 8, 9]);
+    assert!(convert(&bad, info, PixelFormat::Rgba, &ConvertOptions::default()).is_err());
+}
+
+/// `CmykInverted` (core 0.1.34): a sub-8 record on the packed plane
+/// widens every component byte before the decode — identical to the
+/// materialised frame — and the complement row sees nominal bytes.
+#[test]
+fn record_on_cmyk_inverted_packed_plane() {
+    let (w, h) = (4usize, 2usize);
+    let n = w * h;
+    let raw: Vec<u8> = (0..n * 4).map(|i| ((i * 19 + 2) & 0x0F) as u8).collect();
+    let frame = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: w * 4,
+            data: raw.clone(),
+        }],
+    };
+    let marked = frame.clone().with_significant_bits(vec![4]);
+    let materialised = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: w * 4,
+            data: raw.iter().map(|&v| widen(v as u32, 4, 8) as u8).collect(),
+        }],
+    };
+    let info = FrameInfo::new(PixelFormat::CmykInverted, w as u32, h as u32);
+    for dst in [PixelFormat::Rgb24, PixelFormat::Cmyk, PixelFormat::Gray8] {
+        let a = convert(&marked, info, dst, &ConvertOptions::default()).expect("marked");
+        let b =
+            convert(&materialised, info, dst, &ConvertOptions::default()).expect("materialised");
+        assert_eq!(a.planes[0].data, b.planes[0].data, "{dst:?}");
+        assert!(a.significant_bits().is_none());
+    }
+    let bad = frame.clone().with_significant_bits(vec![9]);
+    assert!(convert(&bad, info, PixelFormat::Rgb24, &ConvertOptions::default()).is_err());
+}
