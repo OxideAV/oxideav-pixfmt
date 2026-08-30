@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Conversion coverage for the nine oxideav-core 0.1.35 pixel formats:
+  - the 4:4:0 planar family `Yuv440P` / `Yuv440P10Le` / `Yuv440P12Le`
+    / `Yuv440P16Le` (full-width, half-height chroma) joins the
+    computed planar-family tier with a `(wsub 1, hsub 2)` descriptor:
+    every ordered pair against the 24 existing planar YUV(A) members
+    plus `Rgb24` / `Rgba` / `Gray8` is direct, `Yuv411P` ↔ `Yuv440P`
+    get explicit rows, and `Yuv440P16Le` ↔ `Rgb48Le` rides the Q30 deep
+    matrix. New `yuv::chroma_444_to_440` / `chroma_440_to_444` (and the
+    `chroma16le_*` pair) are the only new kernels — every other siting
+    move touching 4:4:0 composes them with the existing ones through a
+    4:4:4 intermediate, which is bit-identical to a fused kernel.
+    `FormatInfo` reports `ChromaSubsampling::C440`. Odd widths are
+    legal; odd heights are rejected with `Error::Invalid`.
+  - the scene-referred float family `GrayF32Le` / `RgbF32Le` /
+    `RgbaF32Le` / `GbrpF32Le` / `GbrapF32Le`: a computed tier makes
+    float ↔ float (never clamping — speculars, negative excursions and
+    NaN payloads survive; gray broadcast; linear-light luminance under
+    the selected primaries with neutral triples returned bit-exactly;
+    alpha carry / drop / `1.0`), float ↔ eighteen integer shapes
+    (`Gray8/10/12/16Le`, `Rgb24` / `Rgba` / `Rgb48Le` / `Rgba64Le`, the
+    ten-member `Gbrp*` / `Gbrap*` ladder — pure normalisation
+    `code / (2^bits − 1)` in, saturating round-to-nearest out with
+    NaN → 0, every integer code round-tripping exactly, no transfer
+    function applied) and float ↔ the 16-bit planar YUV(A) tier
+    (packed 16-bit intermediate + deep matrix, so 8/10/12-bit YUV
+    stages in through the exact widen) all direct. New `float` module
+    with the sample / plane helpers. A significant-bits record on a
+    float surface is ignored, like on `Pal8`.
+- **Matrix**: 1478 direct / 4830 of 4830 ordered pairs over 70 formats
+  (was 976 / 3660 over 61).
+- Validation: `tests/yuv440.rs` and `tests/float_family.rs` (exact
+  round trips, 4:4:4-composition pins, deep-matrix route pins, staged
+  precision pins, geometry / stride / hostile-value rules), two new
+  property sweeps, three black-box validator cross-checks, fuzz
+  coverage of all nine formats (bounded local run: 199k executions,
+  zero findings), and bench cases (444 → 440 34 GiB/s; float ↔ packed
+  16-bit RGBA 2.5–2.8 GiB/s scalar).
+
 - Conversion coverage for the three oxideav-core 0.1.34 pixel formats:
   - `Gbrap8` completes the byte tier of the GBR(A) ladder: pure-reorder
     hops to `Rgba` / `Rgb24`, exact ×257 hops to `Rgba64Le` / `Rgb48Le`

@@ -108,8 +108,30 @@
 //!   approximation in both ink conventions (see [`cmyk`] for the
 //!   formulas and the ICC caveats), plus Cmyk ↔ CmykInverted as the
 //!   exact per-byte complement.
+//! - **4:4:0 planar** (`Yuv440P` / `Yuv440P10Le` / `Yuv440P12Le` /
+//!   `Yuv440P16Le`, full-width half-height chroma): full members of
+//!   the computed planar family (direct to every planar YUV(A)
+//!   member at every siting and depth, `Rgb24` / `Rgba` / `Gray8`),
+//!   explicit `Yuv411P` rows, and `Yuv440P16Le` ↔ `Rgb48Le` on the
+//!   deep matrix. The only new arithmetic is a vertical pair-average
+//!   (4:4:4 → 4:4:0) and a row broadcast (4:4:0 → 4:4:4); every other
+//!   siting move composes those with the existing kernels through a
+//!   4:4:4 intermediate, bit-identical to a fused kernel. Odd widths
+//!   are legal; odd heights are rejected with `Error::Invalid`, the
+//!   same rule 4:2:2 applies to odd widths.
+//! - **Scene-referred float** (`GrayF32Le` / `RgbF32Le` / `RgbaF32Le`
+//!   / `GbrpF32Le` / `GbrapF32Le`): every ordered pair inside the
+//!   family is direct and never clamps (gray broadcast, linear-light
+//!   luminance projection under the selected primaries, alpha carry /
+//!   drop / synthesise `1.0`, packed ↔ planar reorder); direct hops to
+//!   and from eighteen integer shapes (`Gray8/10/12/16Le`, `Rgb24` /
+//!   `Rgba` / `Rgb48Le` / `Rgba64Le`, the ten-member GBR(A) ladder)
+//!   by pure normalisation in and saturating round-to-nearest
+//!   quantisation out; and direct hops to and from the 16-bit planar
+//!   YUV(A) tier through the deep matrix. See [`float`] for the exact
+//!   value rules.
 //! - **Full-precision deep matrix**: the 16-bit planar tier
-//!   ({Yuv,Yuva} × {420,422,444} `P16Le`) ↔ Rgb48Le / Rgba64Le runs
+//!   ({Yuv,Yuva} × {420,422,444,440} `P16Le`) ↔ Rgb48Le / Rgba64Le runs
 //!   the k-coefficient construction in Q30 over 16-bit samples — no
 //!   8-bit narrowing anywhere on the path; chroma is resampled at
 //!   16-bit precision and the Yuva alpha plane rides verbatim in the
@@ -126,9 +148,9 @@
 //! alpha-capable / deep RGB pivots
 //! preferred where the endpoints call for them). [`supports`] /
 //! [`supports_direct`] report per-pair availability. The matrix is
-//! fully closed: **every ordered pair** of the 61 `PixelFormat`
-//! variants resolves — directly (976 pairs) or through one staged
-//! pivot (all 3660).
+//! fully closed: **every ordered pair** of the 70 `PixelFormat`
+//! variants resolves — directly (1478 pairs) or through one staged
+//! pivot (all 4830).
 //!
 //! # Bit-depth precision policy
 //!
@@ -152,6 +174,17 @@
 //! deterministic, invertible mappings. `Dither` applies only to the
 //! palette quantisation path (`Rgb24`/`Rgba` → `Pal8`).
 //!
+//! # Integer ↔ float
+//!
+//! The integer formats state no transfer characteristic in the core
+//! format definitions, so the hop to and from the float family is a
+//! **pure normalisation**: `f = code / (2^bits − 1)` in, `code =
+//! round(clamp(f, 0, 1) · (2^bits − 1))` out (NaN → 0). No OETF / EOTF
+//! is applied in either direction — apply one from [`transfer`] on the
+//! float samples when the pipeline calls for it. Values outside
+//! `[0, 1]` are saturated on the way to an integer format (the only
+//! lossy step); float → float moves preserve them.
+//!
 //! # Per-plane significant bits
 //!
 //! Source frames may carry the per-plane **significant-bits
@@ -162,7 +195,8 @@
 //! honours the record (marked planes convert at their recorded depth),
 //! rejects invalid records (`0` or above the surface's nominal depth)
 //! with `Error::Invalid`, ignores records on `Pal8` (indices are not
-//! magnitudes), and always emits nominal-depth output with no record
+//! magnitudes) and on the float surfaces (binary32 samples are
+//! magnitudes already), and always emits nominal-depth output with no record
 //! attached — see the policy section on [`convert`] for the details.
 
 pub mod alpha;
