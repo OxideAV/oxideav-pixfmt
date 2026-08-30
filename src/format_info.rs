@@ -18,7 +18,7 @@ pub struct FormatInfo {
     /// 4:2:x, 1 for 4:4:4 / non-YUV.
     pub chroma_w_sub: u8,
     /// Chroma vertical subsampling factor (1 = no subsample). 2 for
-    /// 4:2:0, 1 for 4:2:2 / 4:4:4.
+    /// 4:2:0 / 4:4:0, 1 for 4:2:2 / 4:4:4.
     pub chroma_h_sub: u8,
     /// True for any planar YUV-style layout.
     pub is_planar: bool,
@@ -53,6 +53,14 @@ impl FormatInfo {
             P::Yuv420P16Le => Self::yuv(16, 2, 2),
             P::Yuv422P16Le => Self::yuv(16, 2, 1),
             P::Yuv444P16Le => Self::yuv(16, 1, 1),
+            // 4:4:0 (core 0.1.35) — full-width, half-height chroma: the
+            // transpose of 4:2:2. Same depth ladder as the other planar
+            // samplings (8-bit bytes; 10/12 significant low bits of a
+            // LE word; full-scale 16).
+            P::Yuv440P => Self::yuv(8, 1, 2),
+            P::Yuv440P10Le => Self::yuv(10, 1, 2),
+            P::Yuv440P12Le => Self::yuv(12, 1, 2),
+            P::Yuv440P16Le => Self::yuv(16, 1, 2),
             // Planar GBR / GBRA — 3-or-4 planes at 4:4:4 sampling, alpha
             // only on the `Gbrap*` variants. Each sample is stored as a
             // 16-bit LE word with the high bits zero; the bit-depth field
@@ -264,6 +272,8 @@ impl FormatInfo {
     ///   (`Yuv420P*`, `YuvJ420P`, `Nv12`, `Nv21`, `Yuva420P`).
     /// - [`ChromaSubsampling::C411`] for 4×1 chroma siting
     ///   (`Yuv411P` — native NTSC DV-25 layout).
+    /// - [`ChromaSubsampling::C440`] for 1×2 chroma siting
+    ///   (`Yuv440P*` — full-width, half-height chroma).
     /// - [`ChromaSubsampling::Other`] for any future YUV variant whose
     ///   `(w, h)` pair this method doesn't yet name. Lets callers
     ///   detect "subsampled but not one of the four common schemes"
@@ -298,12 +308,13 @@ impl FormatInfo {
             (2, 2) => ChromaSubsampling::C420,
             (2, 1) => ChromaSubsampling::C422,
             (4, 1) => ChromaSubsampling::C411,
+            (1, 2) => ChromaSubsampling::C440,
             _ => ChromaSubsampling::Other,
         }
     }
 
     /// True when the format carries chroma planes at less than full
-    /// luma resolution (`C422`, `C420`, `C411`, or `Other`). Sugar
+    /// luma resolution (`C422`, `C420`, `C411`, `C440`, or `Other`). Sugar
     /// over [`Self::chroma_subsampling`] for the common
     /// "is this losing chroma detail relative to 4:4:4?" predicate.
     pub const fn is_chroma_subsampled(&self) -> bool {
@@ -312,6 +323,7 @@ impl FormatInfo {
             ChromaSubsampling::C422
                 | ChromaSubsampling::C420
                 | ChromaSubsampling::C411
+                | ChromaSubsampling::C440
                 | ChromaSubsampling::Other,
         )
     }
@@ -338,6 +350,11 @@ pub enum ChromaSubsampling {
     /// 4:1:1 chroma siting (horizontal subsample by 4, vertical full).
     /// Used by NTSC DV-25 and as a legal JPEG sampling layout.
     C411,
+    /// 4:4:0 chroma siting (horizontal full, vertical subsample by 2) —
+    /// the transpose of 4:2:2. A legal JPEG sampling layout (luma
+    /// H=1, V=2) and a coded sampling mode of bitstreams with
+    /// independent horizontal / vertical chroma decimation flags.
+    C440,
     /// Any other `(chroma_w_sub, chroma_h_sub)` pair on a YUV carrier
     /// that this enum doesn't yet name. Callers that need the exact
     /// factors should read [`FormatInfo::chroma_w_sub`] and
@@ -640,6 +657,7 @@ mod tests {
         assert!(FormatInfo::of(P::Yuv420P).is_chroma_subsampled());
         assert!(FormatInfo::of(P::Yuv422P).is_chroma_subsampled());
         assert!(FormatInfo::of(P::Yuv411P).is_chroma_subsampled());
+        assert!(FormatInfo::of(P::Yuv440P).is_chroma_subsampled());
         assert!(!FormatInfo::of(P::Yuv444P).is_chroma_subsampled());
         assert!(!FormatInfo::of(P::Gbrp10Le).is_chroma_subsampled());
     }
@@ -655,6 +673,10 @@ mod tests {
             (P::Yuv422P, C::C422),
             (P::Yuv444P, C::C444),
             (P::Yuv411P, C::C411),
+            (P::Yuv440P, C::C440),
+            (P::Yuv440P10Le, C::C440),
+            (P::Yuv440P12Le, C::C440),
+            (P::Yuv440P16Le, C::C440),
             (P::Nv12, C::C420),
             (P::Yuva420P, C::C420),
             (P::Rgb24, C::None),
@@ -677,6 +699,11 @@ mod tests {
                 C::C411 => {
                     assert_eq!(info.chroma_w_sub, 4);
                     assert_eq!(info.chroma_h_sub, 1);
+                }
+                C::C440 => {
+                    assert_eq!(info.chroma_w_sub, 1);
+                    assert_eq!(info.chroma_h_sub, 2);
+                    assert!(info.is_chroma_subsampled());
                 }
                 C::C444 => {
                     assert_eq!(info.chroma_w_sub, 1);

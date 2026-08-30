@@ -255,6 +255,80 @@ fn yuv420_flat_chroma_to_rgb24_matches_validator() {
     }
 }
 
+/// Limited-range 4:4:0 (full-width, half-height chroma) → RGB24 with
+/// flat chroma planes — the same design as the 4:2:0 check: a constant
+/// chroma plane is reproduced exactly by any vertical upsampler, so the
+/// comparison isolates the matrix and the 4:4:0 plane geometry (a
+/// wrong chroma stride or row pairing would scramble the colours).
+#[test]
+fn yuv440_flat_chroma_to_rgb24_matches_validator() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: no ffmpeg binary on PATH");
+        return;
+    }
+    let ch = H / 2;
+    let y = ramp(W * H, 16, 235, 3, 9);
+    for (uc, vc) in [(128u8, 128u8), (90, 170), (200, 40)] {
+        let u = vec![uc; W * ch];
+        let v = vec![vc; W * ch];
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&y);
+        raw.extend_from_slice(&u);
+        raw.extend_from_slice(&v);
+        let theirs = ffmpeg_convert(
+            &raw,
+            "yuv440p",
+            "rgb24",
+            "scale=in_color_matrix=bt601:in_range=tv:flags=accurate_rnd+full_chroma_int+full_chroma_inp",
+        );
+        let src = planar_frame(vec![(W, y.clone()), (W, u), (W, v)]);
+        let ours = convert(
+            &src,
+            FrameInfo::new(PixelFormat::Yuv440P, W as u32, H as u32),
+            PixelFormat::Rgb24,
+            &ConvertOptions::default(),
+        )
+        .expect("convert");
+        let diff = max_abs_diff(&ours.planes[0].data, &theirs);
+        assert!(diff <= 2, "chroma ({uc},{vc}): max diff {diff}");
+    }
+}
+
+/// 4:4:4 → 4:4:0 with flat chroma planes: any vertical downsampling
+/// filter reproduces a constant plane exactly, so ours and the
+/// validator's output must agree bit-for-bit on every plane — which
+/// pins the 4:4:0 output geometry (full-width, half-height chroma,
+/// luma copied verbatim) independently of resampling policy.
+#[test]
+fn yuv444_to_yuv440_flat_chroma_bit_exact_vs_validator() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: no ffmpeg binary on PATH");
+        return;
+    }
+    let y = ramp(W * H, 16, 235, 7, 3);
+    for (uc, vc) in [(128u8, 128u8), (90, 170)] {
+        let u = vec![uc; W * H];
+        let v = vec![vc; W * H];
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&y);
+        raw.extend_from_slice(&u);
+        raw.extend_from_slice(&v);
+        let theirs = ffmpeg_convert(&raw, "yuv444p", "yuv440p", "null");
+        assert_eq!(theirs.len(), W * H + 2 * W * (H / 2));
+        let src = planar_frame(vec![(W, y.clone()), (W, u), (W, v)]);
+        let ours = convert(
+            &src,
+            FrameInfo::new(PixelFormat::Yuv444P, W as u32, H as u32),
+            PixelFormat::Yuv440P,
+            &ConvertOptions::default(),
+        )
+        .expect("convert");
+        assert_eq!(ours.planes[0].data, theirs[..W * H]);
+        assert_eq!(ours.planes[1].data, theirs[W * H..W * H + W * (H / 2)]);
+        assert_eq!(ours.planes[2].data, theirs[W * H + W * (H / 2)..]);
+    }
+}
+
 /// Limited-range YUVA 4:4:4 → RGBA: the colour channels agree with the
 /// validator within ±2 (pure matrix, no chroma resampling at 4:4:4) and
 /// the full-resolution alpha plane is carried bit-exactly by both

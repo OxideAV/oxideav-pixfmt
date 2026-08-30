@@ -352,12 +352,16 @@ fn is_yuv_carriage(f: PixelFormat) -> bool {
             | P::Yuva420P16Le
             | P::Yuyv422
             | P::Uyvy422
+            | P::Yuv440P
+            | P::Yuv440P10Le
+            | P::Yuv440P12Le
+            | P::Yuv440P16Le
     )
 }
 
 /// Layout descriptor for the *uniform planar YUV(A) family*: 3 planes
 /// (Y, U, V) — or 4 with a full-resolution alpha plane — at 4:2:0 /
-/// 4:2:2 / 4:4:4 chroma siting, every sample either one byte
+/// 4:2:2 / 4:4:4 / 4:4:0 chroma siting, every sample either one byte
 /// (`bits == 8`) or a 16-bit LE word carrying `bits` significant low
 /// bits (10 / 12 / 16), limited-range carriage.
 ///
@@ -374,7 +378,8 @@ fn is_yuv_carriage(f: PixelFormat) -> bool {
 struct PlanarYuv {
     /// Chroma horizontal subsample factor (1 or 2).
     wsub: usize,
-    /// Chroma vertical subsample factor (1 or 2).
+    /// Chroma vertical subsample factor (1 or 2). `(wsub, hsub) ==
+    /// (1, 2)` is the 4:4:0 siting — full-width, half-height chroma.
     hsub: usize,
     /// Significant bits per sample: 8 (byte storage) or 10 / 12 / 16
     /// (16-bit LE word storage).
@@ -424,6 +429,12 @@ fn planar_yuv_desc(f: PixelFormat) -> Option<PlanarYuv> {
         P::Yuva420P10Le => (2, 2, 10, true),
         P::Yuva420P12Le => (2, 2, 12, true),
         P::Yuva420P16Le => (2, 2, 16, true),
+        // 4:4:0 (core 0.1.35): full-width, half-height chroma — the
+        // transpose of 4:2:2. No alpha-carrying member exists.
+        P::Yuv440P => (1, 2, 8, false),
+        P::Yuv440P10Le => (1, 2, 10, false),
+        P::Yuv440P12Le => (1, 2, 12, false),
+        P::Yuv440P16Le => (1, 2, 16, false),
         _ => return None,
     };
     Some(PlanarYuv {
@@ -798,6 +809,10 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Yuv444P, P::Yuv411P, ChromaResample { src_wsub: 1, src_hsub: 1, dst_wsub: 4, dst_hsub: 1 }),
         (P::Yuv422P, P::Yuv411P, ChromaResample { src_wsub: 2, src_hsub: 1, dst_wsub: 4, dst_hsub: 1 }),
         (P::Yuv420P, P::Yuv411P, ChromaResample { src_wsub: 2, src_hsub: 2, dst_wsub: 4, dst_hsub: 1 }),
+        // Yuv411P ↔ Yuv440P (core 0.1.35): the two "one axis only"
+        // sitings, composed through 4:4:4 inside the resampler.
+        (P::Yuv411P, P::Yuv440P, ChromaResample { src_wsub: 4, src_hsub: 1, dst_wsub: 1, dst_hsub: 2 }),
+        (P::Yuv440P, P::Yuv411P, ChromaResample { src_wsub: 1, src_hsub: 2, dst_wsub: 4, dst_hsub: 1 }),
         // Yuv411P ↔ RGB. The 4:1:1 ↔ 4:4:4 chroma step stages through
         // a transient full-resolution chroma pair before calling the
         // proven scalar 4:4:4 ↔ RGB matrix; no new colour math.
@@ -1073,6 +1088,10 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Rgba64Le, P::Yuva444P16Le, Rgb48ToDeepYuv { wsub: 1, hsub: 1, alpha: true }),
         (P::Rgba64Le, P::Yuva422P16Le, Rgb48ToDeepYuv { wsub: 2, hsub: 1, alpha: true }),
         (P::Rgba64Le, P::Yuva420P16Le, Rgb48ToDeepYuv { wsub: 2, hsub: 2, alpha: true }),
+        // 4:4:0 member of the 16-bit tier (core 0.1.35): same deep
+        // matrix, chroma upsampled / downsampled vertically at 16 bits.
+        (P::Yuv440P16Le, P::Rgb48Le, DeepYuvToRgb48 { wsub: 1, hsub: 2, alpha: false }),
+        (P::Rgb48Le, P::Yuv440P16Le, Rgb48ToDeepYuv { wsub: 1, hsub: 2, alpha: false }),
 
         // Direct 16-bit chroma resample — the six ordered pairs over
         // (4:2:0, 4:2:2, 4:4:4) on the 16-bit family, mirroring the
@@ -2405,6 +2424,13 @@ fn do_deep_yuv_to_rgb48(
             yuv::chroma16le_420_to_444(&vp, &mut v, w, h);
             (u, v)
         }
+        (1, 2) => {
+            let mut u = vec![0u8; w * h * 2];
+            let mut v = vec![0u8; w * h * 2];
+            yuv::chroma16le_440_to_444(&up, &mut u, w, h);
+            yuv::chroma16le_440_to_444(&vp, &mut v, w, h);
+            (u, v)
+        }
         _ => {
             return Err(Error::unsupported(
                 "pixfmt: unsupported deep YUV subsampling",
@@ -2491,6 +2517,13 @@ fn do_rgb48_to_deep_yuv(
             let mut v = vec![0u8; cw * ch * 2];
             yuv::chroma16le_444_to_420(&u444, &mut u, w, h);
             yuv::chroma16le_444_to_420(&v444, &mut v, w, h);
+            (u, v)
+        }
+        (1, 2) => {
+            let mut u = vec![0u8; cw * ch * 2];
+            let mut v = vec![0u8; cw * ch * 2];
+            yuv::chroma16le_444_to_440(&u444, &mut u, w, h);
+            yuv::chroma16le_444_to_440(&v444, &mut v, w, h);
             (u, v)
         }
         _ => {
@@ -3163,6 +3196,35 @@ fn resample_chroma_pair(
     let mut u_dst = vec![0u8; dst_cw * dst_ch];
     let mut v_dst = vec![0u8; dst_cw * dst_ch];
 
+    // 4:4:0 on either side: compose through a 4:4:4 intermediate at
+    // the same depth. Vertical duplicate-then-average (and the
+    // horizontal mirror) is arithmetically the identity on the
+    // duplicated axis, so the composition produces exactly the bytes a
+    // fused kernel would — one rounded pair-average per subsampled
+    // axis — while reusing the existing kernels for the other siting.
+    if (src_wsub, src_hsub) == (1, 2) || (dst_wsub, dst_hsub) == (1, 2) {
+        let (u444, v444) = if (src_wsub, src_hsub) == (1, 2) {
+            let mut u = vec![0u8; w * h];
+            let mut v = vec![0u8; w * h];
+            yuv::chroma_440_to_444(u_src, &mut u, w, h);
+            yuv::chroma_440_to_444(v_src, &mut v, w, h);
+            (u, v)
+        } else if (src_wsub, src_hsub) == (1, 1) {
+            (u_src[..w * h].to_vec(), v_src[..w * h].to_vec())
+        } else {
+            resample_chroma_pair(u_src, v_src, w, h, src_wsub, src_hsub, 1, 1)?
+        };
+        if (dst_wsub, dst_hsub) == (1, 2) {
+            yuv::chroma_444_to_440(&u444, &mut u_dst, w, h);
+            yuv::chroma_444_to_440(&v444, &mut v_dst, w, h);
+            return Ok((u_dst, v_dst));
+        }
+        if (dst_wsub, dst_hsub) == (1, 1) {
+            return Ok((u444, v444));
+        }
+        return resample_chroma_pair(&u444, &v444, w, h, 1, 1, dst_wsub, dst_hsub);
+    }
+
     // The dispatch table registers ordered pairs over `(4:2:0, 4:2:2,
     // 4:4:4, 4:1:1)` — every combination not equal to the identity.
     // Anything else is a registry bug so we route through
@@ -3385,6 +3447,31 @@ fn resample_chroma16_pair(
     let dst_ch = h / dst_hsub;
     let mut u_dst = vec![0u8; dst_cw * dst_ch * 2];
     let mut v_dst = vec![0u8; dst_cw * dst_ch * 2];
+
+    // 4:4:0 on either side composes through 4:4:4 exactly as the 8-bit
+    // pair above (same rounding, one pair-average per subsampled axis).
+    if (src_wsub, src_hsub) == (1, 2) || (dst_wsub, dst_hsub) == (1, 2) {
+        let (u444, v444) = if (src_wsub, src_hsub) == (1, 2) {
+            let mut u = vec![0u8; w * h * 2];
+            let mut v = vec![0u8; w * h * 2];
+            yuv::chroma16le_440_to_444(u_src, &mut u, w, h);
+            yuv::chroma16le_440_to_444(v_src, &mut v, w, h);
+            (u, v)
+        } else if (src_wsub, src_hsub) == (1, 1) {
+            (u_src[..w * h * 2].to_vec(), v_src[..w * h * 2].to_vec())
+        } else {
+            resample_chroma16_pair(u_src, v_src, w, h, src_wsub, src_hsub, 1, 1)?
+        };
+        if (dst_wsub, dst_hsub) == (1, 2) {
+            yuv::chroma16le_444_to_440(&u444, &mut u_dst, w, h);
+            yuv::chroma16le_444_to_440(&v444, &mut v_dst, w, h);
+            return Ok((u_dst, v_dst));
+        }
+        if (dst_wsub, dst_hsub) == (1, 1) {
+            return Ok((u444, v444));
+        }
+        return resample_chroma16_pair(&u444, &v444, w, h, 1, 1, dst_wsub, dst_hsub);
+    }
 
     match (src_wsub, src_hsub, dst_wsub, dst_hsub) {
         (1, 1, 2, 1) => {
@@ -3638,6 +3725,16 @@ fn planar_family_to_rgb(
         (1, 1) => yuv::yuv444_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
         (2, 1) => yuv::yuv422_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
         (2, 2) => yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
+        // 4:4:0: broadcast each chroma row to its two luma rows, then
+        // decode as 4:4:4 (the same nearest-neighbour policy the 4:2:0
+        // kernel applies vertically).
+        (1, 2) => {
+            let mut u444 = vec![0u8; w * h];
+            let mut v444 = vec![0u8; w * h];
+            yuv::chroma_440_to_444(&up, &mut u444, w, h);
+            yuv::chroma_440_to_444(&vp, &mut v444, w, h);
+            yuv::yuv444_to_rgb24(&yp, &u444, &v444, &mut rgb_buf, w, h, matrix)
+        }
         _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
     }
 
@@ -3721,6 +3818,15 @@ fn rgb_to_planar_family(
         (1, 1) => yuv::rgb24_to_yuv444(&rgb24, &mut yp8, &mut up8, &mut vp8, w, h, matrix),
         (2, 1) => yuv::rgb24_to_yuv422(&rgb24, &mut yp8, &mut up8, &mut vp8, w, h, matrix),
         (2, 2) => yuv::rgb24_to_yuv420(&rgb24, &mut yp8, &mut up8, &mut vp8, w, h, matrix),
+        // 4:4:0: encode at 4:4:4, then vertical pair-average the chroma
+        // (rounded to nearest, like the 4:2:2 → 4:2:0 step).
+        (1, 2) => {
+            let mut u444 = vec![0u8; w * h];
+            let mut v444 = vec![0u8; w * h];
+            yuv::rgb24_to_yuv444(&rgb24, &mut yp8, &mut u444, &mut v444, w, h, matrix);
+            yuv::chroma_444_to_440(&u444, &mut up8, w, h);
+            yuv::chroma_444_to_440(&v444, &mut vp8, w, h);
+        }
         _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
     }
 

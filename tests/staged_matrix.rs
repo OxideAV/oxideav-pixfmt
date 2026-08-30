@@ -77,6 +77,10 @@ const ALL_FORMATS: &[PixelFormat] = &[
     PixelFormat::Gbrap8,
     PixelFormat::Ya16Le,
     PixelFormat::CmykInverted,
+    PixelFormat::Yuv440P,
+    PixelFormat::Yuv440P10Le,
+    PixelFormat::Yuv440P12Le,
+    PixelFormat::Yuv440P16Le,
 ];
 
 fn plane(rows: usize, row_bytes: usize, seed: &mut u32) -> VideoPlane {
@@ -190,7 +194,7 @@ fn test_opts() -> ConvertOptions {
 /// is pinned so a regression that silently drops routes fails loudly.
 #[test]
 fn coverage_matrix_matches_supports() {
-    // The full 61 × 60 sweep converts every reachable pair; under the
+    // The full 65 × 64 sweep converts every reachable pair; under the
     // miri interpreter that is many minutes of work, so shrink twice:
     // 4 × 4 frames (the smallest size every subsampling grid accepts —
     // 4:1:1 needs width divisible by 4) and a deterministic subset of
@@ -228,11 +232,10 @@ fn coverage_matrix_matches_supports() {
             }
         }
     }
-    // Coverage after the round-438 matrix closure (core 0.1.34 formats
-    // + the Gray8-hub rows + the direct Rgb48Le ↔ Rgba64Le pair + the
-    // full-precision deep-matrix tier): 976
-    // direct and — for the first time — ALL 61 × 60 = 3660 ordered
-    // pairs reachable. The direct floor may only go UP; the total is
+    // Coverage after the core 0.1.35 4:4:0 family joined the computed
+    // planar tier (plus its deep-matrix and 4:1:1 rows): 1208 direct
+    // and ALL 65 × 64 = 4160 ordered pairs reachable (the round-438
+    // closure was 976 / 3660 over 61 formats). The direct floor may only go UP; the total is
     // pinned exact (any regression means a route was dropped). The
     // floors only hold for the full native sweep — the miri run covers
     // a source subset.
@@ -242,7 +245,7 @@ fn coverage_matrix_matches_supports() {
             ALL_FORMATS.len() * (ALL_FORMATS.len() - 1)
         );
         assert!(
-            direct_pairs >= 976,
+            direct_pairs >= 1208,
             "direct coverage regressed: {direct_pairs}"
         );
         assert_eq!(

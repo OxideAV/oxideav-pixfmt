@@ -619,6 +619,45 @@ pub fn chroma_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 }
 
 // ---------------------------------------------------------------------
+// 4:4:0 chroma resamplers — full-width chroma, vertically subsampled by
+// 2 (one chroma row per two luma rows). The transpose of the 4:2:2
+// geometry: `Yuv440P` is a legal JPEG sampling (luma H=1, V=2) and a
+// coded chroma-sampling mode of bitstreams whose horizontal and
+// vertical decimation flags are independent. Every other siting pair
+// that involves 4:4:0 (4:2:0 / 4:2:2 / 4:1:1 ↔ 4:4:0) composes these
+// two kernels with the existing ones through a 4:4:4 intermediate —
+// the composition is arithmetically identical to a fused kernel
+// because duplicate-then-average of a duplicated axis is the identity
+// and the pair-average rounding is applied exactly once per axis.
+
+/// 4:4:4 chroma → 4:4:0 chroma (vertical pair-average, round to
+/// nearest; chroma width unchanged). Source plane is `w × h`;
+/// destination is `w × (h / 2)`. `h` must be even.
+pub fn chroma_444_to_440(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let ch = h / 2;
+    debug_assert_eq!(h, ch * 2, "chroma_444_to_440: height must be even");
+    for cr in 0..ch {
+        for cc in 0..w {
+            let a = src[(cr * 2) * w + cc] as u16;
+            let b = src[(cr * 2 + 1) * w + cc] as u16;
+            dst[cr * w + cc] = (a + b).div_ceil(2) as u8;
+        }
+    }
+}
+
+/// 4:4:0 chroma → 4:4:4 chroma (vertical nearest — each chroma row is
+/// broadcast to two luma rows; width unchanged). Source plane is
+/// `w × (h / 2)`; destination is `w × h`. `h` must be even.
+pub fn chroma_440_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let ch = h / 2;
+    debug_assert_eq!(h, ch * 2, "chroma_440_to_444: height must be even");
+    for row in 0..h {
+        let cr = row / 2;
+        dst[row * w..row * w + w].copy_from_slice(&src[cr * w..cr * w + w]);
+    }
+}
+
+// ---------------------------------------------------------------------
 // 4:1:1 chroma resamplers — horizontal subsample by 4 (one chroma sample
 // per 4 luma samples on the same row). `Yuv411P` is the native NTSC
 // DV-25 layout and a legal JPEG sampling pattern (luma h_samp=4,
@@ -1053,6 +1092,29 @@ pub fn chroma16le_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
             let v = c16_get(src, cr * cw + cc);
             c16_put(dst, row * cw + cc, v);
         }
+    }
+}
+
+/// 4:4:4 → 4:4:0 on 16-bit LE chroma (vertical pair-average, round to
+/// nearest; width unchanged). Source is `w × h`; destination is
+/// `w × (h / 2)`.
+pub fn chroma16le_444_to_440(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    let ch = h / 2;
+    for cr in 0..ch {
+        for cc in 0..w {
+            let a = c16_get(src, (cr * 2) * w + cc);
+            let b = c16_get(src, (cr * 2 + 1) * w + cc);
+            c16_put(dst, cr * w + cc, (a + b).div_ceil(2));
+        }
+    }
+}
+
+/// 4:4:0 → 4:4:4 on 16-bit LE chroma (vertical duplicate; width
+/// unchanged). Source is `w × (h / 2)`; destination is `w × h`.
+pub fn chroma16le_440_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
+    for row in 0..h {
+        let cr = row / 2;
+        dst[row * w * 2..(row + 1) * w * 2].copy_from_slice(&src[cr * w * 2..(cr + 1) * w * 2]);
     }
 }
 
