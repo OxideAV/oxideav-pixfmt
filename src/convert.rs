@@ -14,6 +14,7 @@
 use oxideav_core::{Error, PixelFormat, Result, VideoFrame, VideoPlane};
 
 use crate::cmyk;
+use crate::float;
 use crate::gray;
 use crate::pal8;
 use crate::palette::Palette;
@@ -445,6 +446,131 @@ fn planar_yuv_desc(f: PixelFormat) -> Option<PlanarYuv> {
     })
 }
 
+/// Component layout of a scene-referred float family member (core
+/// 0.1.35). Every sample is a binary32 LE word; see [`crate::float`]
+/// for the value semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FloatLayout {
+    /// `GrayF32Le`: one packed plane, one word per pixel.
+    Gray,
+    /// `RgbF32Le`: one packed plane, R, G, B words per pixel.
+    Rgb,
+    /// `RgbaF32Le`: one packed plane, R, G, B, A words per pixel.
+    Rgba,
+    /// `GbrpF32Le`: three planes ordered G, B, R.
+    Gbrp,
+    /// `GbrapF32Le`: four planes ordered G, B, R, A.
+    Gbrap,
+}
+
+impl FloatLayout {
+    const fn has_alpha(self) -> bool {
+        matches!(self, Self::Rgba | Self::Gbrap)
+    }
+    const fn is_planar(self) -> bool {
+        matches!(self, Self::Gbrp | Self::Gbrap)
+    }
+    /// Words per pixel of the packed plane (planar layouts: per plane).
+    const fn packed_words(self) -> usize {
+        match self {
+            Self::Gray => 1,
+            Self::Rgb => 3,
+            Self::Rgba => 4,
+            Self::Gbrp | Self::Gbrap => 1,
+        }
+    }
+    const fn plane_count(self) -> usize {
+        match self {
+            Self::Gbrp => 3,
+            Self::Gbrap => 4,
+            _ => 1,
+        }
+    }
+}
+
+fn float_layout(f: PixelFormat) -> Option<FloatLayout> {
+    use PixelFormat as P;
+    Some(match f {
+        P::GrayF32Le => FloatLayout::Gray,
+        P::RgbF32Le => FloatLayout::Rgb,
+        P::RgbaF32Le => FloatLayout::Rgba,
+        P::GbrpF32Le => FloatLayout::Gbrp,
+        P::GbrapF32Le => FloatLayout::Gbrap,
+        _ => return None,
+    })
+}
+
+/// Shape of an integer format the float family converts to and from
+/// directly: packed gray, packed RGB(A) in canonical R, G, B(, A)
+/// order, or planar GBR(A).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntShape {
+    Gray,
+    PackedRgb,
+    PlanarGbr,
+}
+
+/// Integer-side descriptor for the float ↔ integer computed rows:
+/// `bits` significant bits per sample (byte storage at 8, LE-16 words
+/// otherwise), with or without alpha.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IntLayout {
+    shape: IntShape,
+    bits: u32,
+    alpha: bool,
+}
+
+impl IntLayout {
+    const fn sample_bytes(&self) -> usize {
+        if self.bits > 8 {
+            2
+        } else {
+            1
+        }
+    }
+    const fn comps(&self) -> usize {
+        match (self.shape, self.alpha) {
+            (IntShape::Gray, _) => 1,
+            (IntShape::PackedRgb, false) => 3,
+            (IntShape::PackedRgb, true) => 4,
+            (IntShape::PlanarGbr, _) => 1,
+        }
+    }
+    const fn plane_count(&self) -> usize {
+        match (self.shape, self.alpha) {
+            (IntShape::PlanarGbr, false) => 3,
+            (IntShape::PlanarGbr, true) => 4,
+            _ => 1,
+        }
+    }
+}
+
+fn int_layout(f: PixelFormat) -> Option<IntLayout> {
+    use PixelFormat as P;
+    let (shape, bits, alpha) = match f {
+        P::Gray8 => (IntShape::Gray, 8, false),
+        P::Gray10Le => (IntShape::Gray, 10, false),
+        P::Gray12Le => (IntShape::Gray, 12, false),
+        P::Gray16Le => (IntShape::Gray, 16, false),
+        P::Rgb24 => (IntShape::PackedRgb, 8, false),
+        P::Rgba => (IntShape::PackedRgb, 8, true),
+        P::Rgb48Le => (IntShape::PackedRgb, 16, false),
+        P::Rgba64Le => (IntShape::PackedRgb, 16, true),
+        P::Gbrp8 => (IntShape::PlanarGbr, 8, false),
+        P::Gbrap8 => (IntShape::PlanarGbr, 8, true),
+        P::Gbrp10Le => (IntShape::PlanarGbr, 10, false),
+        P::Gbrap10Le => (IntShape::PlanarGbr, 10, true),
+        P::Gbrp12Le => (IntShape::PlanarGbr, 12, false),
+        P::Gbrap12Le => (IntShape::PlanarGbr, 12, true),
+        P::Gbrp14Le => (IntShape::PlanarGbr, 14, false),
+        P::Gbrap14Le => (IntShape::PlanarGbr, 14, true),
+        P::Gbrp16Le => (IntShape::PlanarGbr, 16, false),
+        P::Gbrap16Le => (IntShape::PlanarGbr, 16, true),
+        _ => return None,
+    };
+    Some(IntLayout { shape, bits, alpha })
+}
+
 /// Computed dispatch tier: conversions derived from the [`PlanarYuv`]
 /// family descriptors rather than enumerated as table rows. Consulted
 /// only when [`lookup`] has no explicit entry, so every pair the table
@@ -452,6 +578,30 @@ fn planar_yuv_desc(f: PixelFormat) -> Option<PlanarYuv> {
 /// *direct* (single-step) conversion for [`supports_direct`] purposes.
 fn lookup_computed(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
     use PixelFormat as P;
+    // Scene-referred float family (core 0.1.35): float ↔ float, float ↔
+    // the integer gray / packed RGB / planar GBR(A) shapes, and float ↔
+    // the 16-bit planar YUV(A) tier (full-precision deep matrix).
+    if let Some(fs) = float_layout(src) {
+        if let Some(fd) = float_layout(dst) {
+            return Some(ConvertOp::FloatToFloat { src: fs, dst: fd });
+        }
+        if let Some(il) = int_layout(dst) {
+            return Some(ConvertOp::FloatToInt { src: fs, dst: il });
+        }
+        return match planar_yuv_desc(dst) {
+            Some(d) if d.bits == 16 => Some(ConvertOp::FloatToDeepYuv { src: fs, dst: d }),
+            _ => None,
+        };
+    }
+    if let Some(fd) = float_layout(dst) {
+        if let Some(il) = int_layout(src) {
+            return Some(ConvertOp::IntToFloat { src: il, dst: fd });
+        }
+        return match planar_yuv_desc(src) {
+            Some(s) if s.bits == 16 => Some(ConvertOp::DeepYuvToFloat { src: s, dst: fd }),
+            _ => None,
+        };
+    }
     match (planar_yuv_desc(src), planar_yuv_desc(dst)) {
         // Anywhere-to-anywhere inside the planar family: depth move,
         // chroma resample and alpha handling fused into one step (the
@@ -1679,6 +1829,43 @@ enum ConvertOp {
     GrayToPlanarFamily {
         dst: PlanarYuv,
     },
+    /// Computed tier: any ordered pair inside the scene-referred float
+    /// family. Gray broadcasts to colour, colour projects to gray
+    /// through the linear-light luminance row of the selected
+    /// primaries, alpha is carried / dropped / synthesised `1.0`, and
+    /// packed ↔ planar is a pure reorder. Sample values are never
+    /// clamped — out-of-range light survives.
+    FloatToFloat {
+        src: FloatLayout,
+        dst: FloatLayout,
+    },
+    /// Computed tier: float family member → integer gray / packed RGB
+    /// / planar GBR(A) format (see [`crate::float`] for the saturating
+    /// quantisation rule).
+    FloatToInt {
+        src: FloatLayout,
+        dst: IntLayout,
+    },
+    /// Computed tier: integer gray / packed RGB / planar GBR(A) format
+    /// → float family member (exact normalisation, no transfer).
+    IntToFloat {
+        src: IntLayout,
+        dst: FloatLayout,
+    },
+    /// Computed tier: float family member → 16-bit planar YUV(A)
+    /// tier: quantise to a packed 16-bit RGB(A) intermediate, then the
+    /// Q30 deep matrix + 16-bit chroma resample — no 8-bit stage.
+    FloatToDeepYuv {
+        src: FloatLayout,
+        dst: PlanarYuv,
+    },
+    /// Computed tier: 16-bit planar YUV(A) tier → float family member
+    /// through the Q30 deep matrix at 16 bits, then the exact
+    /// normalisation.
+    DeepYuvToFloat {
+        src: PlanarYuv,
+        dst: FloatLayout,
+    },
 }
 
 impl ConvertOp {
@@ -1948,6 +2135,21 @@ impl ConvertOp {
             }
             Self::PlanarFamilyToGray { src: s } => planar_family_to_gray(src, src_info, s),
             Self::GrayToPlanarFamily { dst: d } => gray_to_planar_family(src, src_info, d),
+            Self::FloatToFloat { src: s, dst: d } => {
+                float_to_float(src, src_info, matrix.with_range(false), s, d)
+            }
+            Self::FloatToInt { src: s, dst: d } => {
+                float_to_int(src, src_info, matrix.with_range(false), s, d)
+            }
+            Self::IntToFloat { src: s, dst: d } => {
+                int_to_float(src, src_info, matrix.with_range(false), s, d)
+            }
+            Self::FloatToDeepYuv { src: s, dst: d } => {
+                float_to_deep_yuv(src, src_info, matrix, s, d)
+            }
+            Self::DeepYuvToFloat { src: s, dst: d } => {
+                deep_yuv_to_float(src, src_info, matrix, s, d)
+            }
         }
     }
 }
@@ -5493,4 +5695,387 @@ fn do_packed_deep_to_gbr(
         });
     }
     Ok(make_frame(src, planes))
+}
+
+// -------------------------------------------------------------------------
+// Scene-referred float family (computed tier; see `FloatLayout`).
+
+/// Canonical float intermediate: `w × h` pixels of straight R, G, B, A
+/// (`A = 1.0` when the source carries none; gray sources broadcast).
+struct FloatPixels {
+    w: usize,
+    h: usize,
+    rgba: Vec<f32>,
+}
+
+/// Gather a float-family source frame into the canonical intermediate.
+fn gather_float(src: &VideoFrame, src_info: FrameInfo, s: FloatLayout) -> Result<FloatPixels> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if src.planes.len() < s.plane_count() {
+        return Err(Error::invalid("pixfmt: float source is missing planes"));
+    }
+    let n = w * h;
+    let mut rgba = vec![1.0f32; n * 4];
+    if s.is_planar() {
+        let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 4, h);
+        let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 4, h);
+        let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 4, h);
+        let a = if s.has_alpha() {
+            Some(gather_tight(
+                &src.planes[3].data,
+                src.planes[3].stride,
+                w * 4,
+                h,
+            ))
+        } else {
+            None
+        };
+        for i in 0..n {
+            rgba[i * 4] = float::read_f32le(&r, i);
+            rgba[i * 4 + 1] = float::read_f32le(&g, i);
+            rgba[i * 4 + 2] = float::read_f32le(&b, i);
+            if let Some(a) = &a {
+                rgba[i * 4 + 3] = float::read_f32le(a, i);
+            }
+        }
+    } else {
+        let words = s.packed_words();
+        let packed = gather_tight(&src.planes[0].data, src.planes[0].stride, w * words * 4, h);
+        for i in 0..n {
+            match s {
+                FloatLayout::Gray => {
+                    let v = float::read_f32le(&packed, i);
+                    rgba[i * 4] = v;
+                    rgba[i * 4 + 1] = v;
+                    rgba[i * 4 + 2] = v;
+                }
+                _ => {
+                    for c in 0..words {
+                        rgba[i * 4 + c] = float::read_f32le(&packed, i * words + c);
+                    }
+                }
+            }
+        }
+    }
+    Ok(FloatPixels { w, h, rgba })
+}
+
+/// Gather an integer gray / packed RGB(A) / planar GBR(A) source into
+/// the canonical float intermediate (exact normalisation).
+fn gather_int(src: &VideoFrame, src_info: FrameInfo, s: IntLayout) -> Result<FloatPixels> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    if src.planes.len() < s.plane_count() {
+        return Err(Error::invalid("pixfmt: integer source is missing planes"));
+    }
+    let n = w * h;
+    let sb = s.sample_bytes();
+    let bits = s.bits;
+    let mask = ((1u32 << bits) - 1) as u16;
+    let read = |buf: &[u8], i: usize| -> f32 {
+        let code = if sb == 2 {
+            (u16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]]) & mask) as u32
+        } else {
+            buf[i] as u32
+        };
+        float::unorm_to_f32(code, bits)
+    };
+    let mut rgba = vec![1.0f32; n * 4];
+    match s.shape {
+        IntShape::PlanarGbr => {
+            let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
+            let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * sb, h);
+            let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * sb, h);
+            let a = if s.alpha {
+                Some(gather_tight(
+                    &src.planes[3].data,
+                    src.planes[3].stride,
+                    w * sb,
+                    h,
+                ))
+            } else {
+                None
+            };
+            for i in 0..n {
+                rgba[i * 4] = read(&r, i);
+                rgba[i * 4 + 1] = read(&g, i);
+                rgba[i * 4 + 2] = read(&b, i);
+                if let Some(a) = &a {
+                    rgba[i * 4 + 3] = read(a, i);
+                }
+            }
+        }
+        IntShape::Gray => {
+            let packed = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
+            for i in 0..n {
+                let v = read(&packed, i);
+                rgba[i * 4] = v;
+                rgba[i * 4 + 1] = v;
+                rgba[i * 4 + 2] = v;
+            }
+        }
+        IntShape::PackedRgb => {
+            let comps = s.comps();
+            let packed = gather_tight(&src.planes[0].data, src.planes[0].stride, w * comps * sb, h);
+            for i in 0..n {
+                for c in 0..comps {
+                    rgba[i * 4 + c] = read(&packed, i * comps + c);
+                }
+            }
+        }
+    }
+    Ok(FloatPixels { w, h, rgba })
+}
+
+/// Emit the canonical intermediate as a float-family frame.
+fn emit_float(src: &VideoFrame, px: &FloatPixels, d: FloatLayout, matrix: YuvMatrix) -> VideoFrame {
+    let (w, h) = (px.w, px.h);
+    let n = w * h;
+    let planes = if d.is_planar() {
+        let mut g = vec![0u8; n * 4];
+        let mut b = vec![0u8; n * 4];
+        let mut r = vec![0u8; n * 4];
+        let mut a = if d.has_alpha() {
+            Some(vec![0u8; n * 4])
+        } else {
+            None
+        };
+        for i in 0..n {
+            let p = &px.rgba[i * 4..i * 4 + 4];
+            float::write_f32le(&mut r, i, p[0]);
+            float::write_f32le(&mut g, i, p[1]);
+            float::write_f32le(&mut b, i, p[2]);
+            if let Some(a) = a.as_mut() {
+                float::write_f32le(a, i, p[3]);
+            }
+        }
+        let mut planes = vec![
+            VideoPlane {
+                stride: w * 4,
+                data: g,
+            },
+            VideoPlane {
+                stride: w * 4,
+                data: b,
+            },
+            VideoPlane {
+                stride: w * 4,
+                data: r,
+            },
+        ];
+        if let Some(a) = a {
+            planes.push(VideoPlane {
+                stride: w * 4,
+                data: a,
+            });
+        }
+        planes
+    } else {
+        let words = d.packed_words();
+        let mut out = vec![0u8; n * words * 4];
+        for i in 0..n {
+            let p = &px.rgba[i * 4..i * 4 + 4];
+            match d {
+                FloatLayout::Gray => {
+                    let y = float::luminance_linear(p[0], p[1], p[2], matrix);
+                    float::write_f32le(&mut out, i, y);
+                }
+                _ => {
+                    for (c, &v) in p.iter().enumerate().take(words) {
+                        float::write_f32le(&mut out, i * words + c, v);
+                    }
+                }
+            }
+        }
+        vec![VideoPlane {
+            stride: w * words * 4,
+            data: out,
+        }]
+    };
+    make_frame(src, planes)
+}
+
+/// Emit the canonical intermediate as an integer gray / packed RGB(A) /
+/// planar GBR(A) frame (saturating quantisation; gray targets take the
+/// linear-light luminance first; alpha synthesised opaque when the
+/// source carried none).
+fn emit_int(src: &VideoFrame, px: &FloatPixels, d: IntLayout, matrix: YuvMatrix) -> VideoFrame {
+    let (w, h) = (px.w, px.h);
+    let n = w * h;
+    let sb = d.sample_bytes();
+    let bits = d.bits;
+    let put = |buf: &mut [u8], i: usize, v: f32| {
+        let code = float::f32_to_unorm(v, bits);
+        if sb == 2 {
+            buf[i * 2..i * 2 + 2].copy_from_slice(&(code as u16).to_le_bytes());
+        } else {
+            buf[i] = code as u8;
+        }
+    };
+    let planes = match d.shape {
+        IntShape::PlanarGbr => {
+            let mut g = vec![0u8; n * sb];
+            let mut b = vec![0u8; n * sb];
+            let mut r = vec![0u8; n * sb];
+            let mut a = if d.alpha {
+                Some(vec![0u8; n * sb])
+            } else {
+                None
+            };
+            for i in 0..n {
+                let p = &px.rgba[i * 4..i * 4 + 4];
+                put(&mut r, i, p[0]);
+                put(&mut g, i, p[1]);
+                put(&mut b, i, p[2]);
+                if let Some(a) = a.as_mut() {
+                    put(a, i, p[3]);
+                }
+            }
+            let mut planes = vec![
+                VideoPlane {
+                    stride: w * sb,
+                    data: g,
+                },
+                VideoPlane {
+                    stride: w * sb,
+                    data: b,
+                },
+                VideoPlane {
+                    stride: w * sb,
+                    data: r,
+                },
+            ];
+            if let Some(a) = a {
+                planes.push(VideoPlane {
+                    stride: w * sb,
+                    data: a,
+                });
+            }
+            planes
+        }
+        IntShape::Gray => {
+            let mut out = vec![0u8; n * sb];
+            for i in 0..n {
+                let p = &px.rgba[i * 4..i * 4 + 4];
+                put(
+                    &mut out,
+                    i,
+                    float::luminance_linear(p[0], p[1], p[2], matrix),
+                );
+            }
+            vec![VideoPlane {
+                stride: w * sb,
+                data: out,
+            }]
+        }
+        IntShape::PackedRgb => {
+            let comps = d.comps();
+            let mut out = vec![0u8; n * comps * sb];
+            for i in 0..n {
+                let p = &px.rgba[i * 4..i * 4 + 4];
+                for (c, &v) in p.iter().enumerate().take(comps) {
+                    put(&mut out, i * comps + c, v);
+                }
+            }
+            vec![VideoPlane {
+                stride: w * comps * sb,
+                data: out,
+            }]
+        }
+    };
+    make_frame(src, planes)
+}
+
+fn float_to_float(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    s: FloatLayout,
+    d: FloatLayout,
+) -> Result<VideoFrame> {
+    let px = gather_float(src, src_info, s)?;
+    Ok(emit_float(src, &px, d, matrix))
+}
+
+fn float_to_int(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    s: FloatLayout,
+    d: IntLayout,
+) -> Result<VideoFrame> {
+    let px = gather_float(src, src_info, s)?;
+    Ok(emit_int(src, &px, d, matrix))
+}
+
+fn int_to_float(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    s: IntLayout,
+    d: FloatLayout,
+) -> Result<VideoFrame> {
+    let px = gather_int(src, src_info, s)?;
+    Ok(emit_float(src, &px, d, matrix))
+}
+
+/// Float → 16-bit planar YUV(A): quantise to a packed 16-bit RGB(A)
+/// intermediate (`Rgba64Le` when the destination carries alpha, else
+/// `Rgb48Le`), then the full-precision deep matrix.
+fn float_to_deep_yuv(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    s: FloatLayout,
+    d: PlanarYuv,
+) -> Result<VideoFrame> {
+    let px = gather_float(src, src_info, s)?;
+    let packed = emit_int(
+        src,
+        &px,
+        IntLayout {
+            shape: IntShape::PackedRgb,
+            bits: 16,
+            alpha: d.alpha,
+        },
+        matrix,
+    );
+    let mid = if d.alpha {
+        PixelFormat::Rgba64Le
+    } else {
+        PixelFormat::Rgb48Le
+    };
+    let mid_info = FrameInfo::new(mid, src_info.width, src_info.height);
+    do_rgb48_to_deep_yuv(&packed, mid_info, matrix, d.wsub, d.hsub, d.alpha)
+}
+
+/// 16-bit planar YUV(A) → float: the full-precision deep matrix into a
+/// packed 16-bit RGB(A) intermediate, then the exact normalisation.
+/// Float alpha comes from the source alpha plane when it has one, else
+/// `1.0`.
+fn deep_yuv_to_float(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    s: PlanarYuv,
+    d: FloatLayout,
+) -> Result<VideoFrame> {
+    let packed = do_deep_yuv_to_rgb48(src, src_info, matrix, s.wsub, s.hsub, s.alpha)?;
+    let mid = if s.alpha {
+        PixelFormat::Rgba64Le
+    } else {
+        PixelFormat::Rgb48Le
+    };
+    let mid_info = FrameInfo::new(mid, src_info.width, src_info.height);
+    let px = gather_int(
+        &packed,
+        mid_info,
+        IntLayout {
+            shape: IntShape::PackedRgb,
+            bits: 16,
+            alpha: s.alpha,
+        },
+    )?;
+    Ok(emit_float(src, &px, d, matrix.with_range(false)))
 }

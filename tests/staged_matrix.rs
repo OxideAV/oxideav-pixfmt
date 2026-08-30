@@ -81,6 +81,11 @@ const ALL_FORMATS: &[PixelFormat] = &[
     PixelFormat::Yuv440P10Le,
     PixelFormat::Yuv440P12Le,
     PixelFormat::Yuv440P16Le,
+    PixelFormat::GrayF32Le,
+    PixelFormat::RgbF32Le,
+    PixelFormat::RgbaF32Le,
+    PixelFormat::GbrpF32Le,
+    PixelFormat::GbrapF32Le,
 ];
 
 fn plane(rows: usize, row_bytes: usize, seed: &mut u32) -> VideoPlane {
@@ -112,6 +117,14 @@ fn build_frame(fmt: PixelFormat, w: usize, h: usize) -> VideoFrame {
         // Packed 16-bit grey + alpha: one interleaved plane of LE16
         // word pairs, all 16 bits significant (no masking needed).
         PixelFormat::Ya16Le => vec![plane(h, w * 4, &mut seed)],
+        // Scene-referred float: binary32 LE words. Pseudo-random bytes
+        // decode to arbitrary floats (NaN / ±∞ included), which every
+        // converter must accept without panicking.
+        PixelFormat::GrayF32Le => vec![plane(h, w * 4, &mut seed)],
+        PixelFormat::RgbF32Le => vec![plane(h, w * 12, &mut seed)],
+        PixelFormat::RgbaF32Le => vec![plane(h, w * 16, &mut seed)],
+        PixelFormat::GbrpF32Le => (0..3).map(|_| plane(h, w * 4, &mut seed)).collect(),
+        PixelFormat::GbrapF32Le => (0..4).map(|_| plane(h, w * 4, &mut seed)).collect(),
         PixelFormat::Rgb48Le => vec![plane(h, w * 6, &mut seed)],
         PixelFormat::Rgba64Le => vec![plane(h, w * 8, &mut seed)],
         PixelFormat::Gray8 | PixelFormat::Pal8 => vec![plane(h, w, &mut seed)],
@@ -194,7 +207,7 @@ fn test_opts() -> ConvertOptions {
 /// is pinned so a regression that silently drops routes fails loudly.
 #[test]
 fn coverage_matrix_matches_supports() {
-    // The full 65 × 64 sweep converts every reachable pair; under the
+    // The full 70 × 69 sweep converts every reachable pair; under the
     // miri interpreter that is many minutes of work, so shrink twice:
     // 4 × 4 frames (the smallest size every subsampling grid accepts —
     // 4:1:1 needs width divisible by 4) and a deterministic subset of
@@ -232,10 +245,12 @@ fn coverage_matrix_matches_supports() {
             }
         }
     }
-    // Coverage after the core 0.1.35 4:4:0 family joined the computed
-    // planar tier (plus its deep-matrix and 4:1:1 rows): 1208 direct
-    // and ALL 65 × 64 = 4160 ordered pairs reachable (the round-438
-    // closure was 976 / 3660 over 61 formats). The direct floor may only go UP; the total is
+    // Coverage after the core 0.1.35 consumer wave — the 4:4:0 family
+    // in the computed planar tier (plus its deep-matrix and 4:1:1
+    // rows) and the scene-referred float family (float ↔ float, ↔ 18
+    // integer RGB / gray / GBR shapes, ↔ the 16-bit planar YUV(A)
+    // tier): 1478 direct and ALL 70 × 69 = 4830 ordered pairs
+    // reachable (the round-438 closure was 976 / 3660 over 61 formats). The direct floor may only go UP; the total is
     // pinned exact (any regression means a route was dropped). The
     // floors only hold for the full native sweep — the miri run covers
     // a source subset.
@@ -245,7 +260,7 @@ fn coverage_matrix_matches_supports() {
             ALL_FORMATS.len() * (ALL_FORMATS.len() - 1)
         );
         assert!(
-            direct_pairs >= 1208,
+            direct_pairs >= 1478,
             "direct coverage regressed: {direct_pairs}"
         );
         assert_eq!(

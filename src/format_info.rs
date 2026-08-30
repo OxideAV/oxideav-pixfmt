@@ -149,6 +149,16 @@ impl FormatInfo {
             // significant (full-scale 65535, the `Gray16Le`
             // convention).
             P::Ya16Le => Self::packed(16, true),
+            // Scene-referred 32-bit float (core 0.1.35): binary32 LE
+            // words, one per sample, linear light with no integer
+            // full-scale. `bit_depth` reports the 32-bit word width so
+            // the "deeper than 8" pivot policies treat the family as
+            // deep carriage.
+            P::GrayF32Le => Self::packed(32, false),
+            P::RgbF32Le => Self::packed(32, false),
+            P::RgbaF32Le => Self::packed(32, true),
+            P::GbrpF32Le => Self::gbr(32, false),
+            P::GbrapF32Le => Self::gbr(32, true),
             P::MonoBlack | P::MonoWhite => Self {
                 bit_depth: 1,
                 planes: 1,

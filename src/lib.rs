@@ -169,6 +169,7 @@ pub mod alpha;
 pub mod cmyk;
 pub mod convert;
 pub mod dither;
+pub mod float;
 pub mod format_info;
 pub mod gray;
 pub mod pal8;

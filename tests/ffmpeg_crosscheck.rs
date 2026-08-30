@@ -329,6 +329,50 @@ fn yuv444_to_yuv440_flat_chroma_bit_exact_vs_validator() {
     }
 }
 
+/// Integer → float normalisation against the validator: a 16-bit gray
+/// ramp becomes `grayf32le` with every sample equal to `code / 65535`,
+/// and both implementations agree to within a hundredth of a 16-bit
+/// code (bit-exact in practice). This pins the "no transfer function
+/// on the hop" rule as a shared convention rather than a private
+/// choice — a gamma curve would differ by orders of magnitude more.
+/// (The validator's planar-GBR float route is a few 16-bit codes off a
+/// plain normalisation, so only the gray hop is compared exactly.)
+#[test]
+fn gray16_to_grayf32_normalisation_matches_validator() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: no ffmpeg binary on PATH");
+        return;
+    }
+    if !validator_supports_pix_fmt("grayf32le") {
+        eprintln!("skipping: validator lacks grayf32le");
+        return;
+    }
+    let as_f32 = |buf: &[u8]| -> Vec<f32> {
+        buf.chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    };
+    let codes: Vec<u16> = (0..W * H).map(|i| ((i * 977) % 65536) as u16).collect();
+    let raw: Vec<u8> = codes.iter().flat_map(|c| c.to_le_bytes()).collect();
+    let theirs = as_f32(&ffmpeg_convert(&raw, "gray16le", "grayf32le", "null"));
+    let src = planar_frame(vec![(W * 2, raw.clone())]);
+    let ours = convert(
+        &src,
+        FrameInfo::new(PixelFormat::Gray16Le, W as u32, H as u32),
+        PixelFormat::GrayF32Le,
+        &ConvertOptions::default(),
+    )
+    .expect("convert");
+    let ours = as_f32(&ours.planes[0].data);
+    assert_eq!(ours.len(), theirs.len());
+    for (i, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+        assert!(
+            (a - b).abs() <= 1.0 / 65535.0 * 0.01,
+            "gray {i}: {a} vs {b}"
+        );
+    }
+}
+
 /// Limited-range YUVA 4:4:4 → RGBA: the colour channels agree with the
 /// validator within ±2 (pure matrix, no chroma resampling at 4:4:4) and
 /// the full-resolution alpha plane is carried bit-exactly by both
