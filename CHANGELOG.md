@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.7...v0.1.8) - 2026-08-30
+
+### Added
+
+- *(float)* scene-referred F32 family — float <-> float, integer RGB/gray/GBR, and the 16-bit YUV tier
+- *(yuv440)* 4:4:0 planar family joins the computed planar tier
+- *(yuv)* full-precision deep matrix — 16-bit tier <-> deep packed RGB
+- *(convert)* matrix closure — all 3660 ordered pairs now resolve
+- *(convert)* CmykInverted rows — the inverted-ink convention
+- *(convert)* Ya16Le rows — the deep grey+alpha companion
+- *(convert)* Gbrap8 joins the byte-tier GBR(A) rows
+- *(format_info)* descriptors for the three core 0.1.34 formats
+- *(convert)* GBR alpha-crossing + Gray8 rows — every new-format pair reachable
+- *(convert)* GBR(A) depth-ladder ends — Gbrp8 / Gbrp16Le / Gbrap16Le rows
+- *(convert)* deep 4:2:0 Yuva trio joins the computed planar family
+- *(format_info)* descriptors for the six core 0.1.33 formats
+
+### Other
+
+- *(matrix)* FormatInfo agrees with the core 0.1.35 plane-geometry helpers on every variant
+- README + crate docs + CHANGELOG for the core 0.1.35 consumer wave
+- *(pixel_ops)* 4:4:0 chroma resample + float-family cases
+- fuzz + property coverage for the core 0.1.35 families; float surfaces ignore significant-bits records
+- crate-doc + README + CHANGELOG for the round-438 work
+- *(pixel_ops)* full-precision deep-matrix case
+- *(convert_geometry)* cover the core 0.1.34 formats
+- *(xcheck)* black-box validator coverage for the core 0.1.34 formats
+- *(significant_bits)* side-channel coverage on the core 0.1.34 surfaces
+- *(staged_matrix)* 61-format universe — floors up to 944 direct / 3568 total
+- crate-doc + README + CHANGELOG for the core 0.1.33 conversion work
+- *(pixel_ops)* deep 4:2:0 Yuva fused-convert case
+- *(convert_geometry)* cover the core 0.1.33 formats
+- *(xcheck)* black-box validator coverage for the core 0.1.33 formats
+- *(significant_bits)* side-channel coverage on the core 0.1.33 surfaces
+
 ### Added
 
 - Conversion coverage for the nine oxideav-core 0.1.35 pixel formats:
