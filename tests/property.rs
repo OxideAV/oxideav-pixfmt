@@ -558,3 +558,207 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
     let mse = sq / a.len() as f64;
     10.0 * (255.0 * 255.0 / mse).log10()
 }
+
+/// Compare a (tight) converter output plane against a possibly padded
+/// source plane row by row.
+fn plane_tight_eq(got: &VideoPlane, src: &VideoPlane, row_bytes: usize, rows: usize, msg: &str) {
+    assert_eq!(got.stride, row_bytes, "{msg}: output stride");
+    for row in 0..rows {
+        let s = &src.data[row * src.stride..row * src.stride + row_bytes];
+        let g = &got.data[row * row_bytes..(row + 1) * row_bytes];
+        assert_eq!(g, s, "{msg}: row {row}");
+    }
+}
+
+/// 4:4:0 siting moves: for random frames whose chroma is constant over
+/// each luma row pair, 4:4:4 → 4:4:0 → 4:4:4 is exactly lossless (the
+/// pair-average of equal rows is the row; the broadcast restores it),
+/// 4:2:2 → 4:4:0 → 4:2:2 likewise when the chroma is constant over
+/// each 2×2 block, and luma is never touched — at 8 and 16 bits, over
+/// many seeds, dimensions and non-tight strides.
+#[test]
+fn prop_yuv440_row_paired_chroma_roundtrips_exactly() {
+    let opts = ConvertOptions::default();
+    for seed in 0..cases(200, 4) as u64 {
+        let mut rng = Rng::new(seed);
+        let w = rng.range(2, 24) & !1;
+        let h = rng.range(2, 20) & !1;
+        let deep = seed % 2 == 1;
+        let (f440, f444, f422) = if deep {
+            (
+                PixelFormat::Yuv440P16Le,
+                PixelFormat::Yuv444P16Le,
+                PixelFormat::Yuv422P16Le,
+            )
+        } else {
+            (
+                PixelFormat::Yuv440P,
+                PixelFormat::Yuv444P,
+                PixelFormat::Yuv422P,
+            )
+        };
+        let sb = if deep { 2 } else { 1 };
+        let pad = (rng.byte() % 5) as usize;
+        let (wu, hu) = (w as usize, h as usize);
+        // 4:4:4 frame with 2×2-block-constant chroma (so both the 4:4:0
+        // and the 4:2:2 legs are exact).
+        let mut y = vec![0u8; wu * sb * hu];
+        for b in y.iter_mut() {
+            *b = rng.byte();
+        }
+        let mk_chroma = |rng: &mut Rng| {
+            let bw = wu / 2;
+            let bh = hu / 2;
+            let mut blocks = vec![0u8; bw * bh * sb];
+            for b in blocks.iter_mut() {
+                *b = rng.byte();
+            }
+            let stride = wu * sb + pad;
+            let mut data = vec![0u8; stride * hu];
+            for row in 0..hu {
+                for col in 0..wu {
+                    let src = ((row / 2) * bw + col / 2) * sb;
+                    let dst = row * stride + col * sb;
+                    data[dst..dst + sb].copy_from_slice(&blocks[src..src + sb]);
+                }
+            }
+            VideoPlane { stride, data }
+        };
+        let u = mk_chroma(&mut rng);
+        let v = mk_chroma(&mut rng);
+        let src = VideoFrame {
+            pts: None,
+            planes: vec![
+                VideoPlane {
+                    stride: wu * sb,
+                    data: y.clone(),
+                },
+                u,
+                v,
+            ],
+        };
+        let info = FrameInfo::new(f444, w, h);
+        let to440 = convert(&src, info, f440, &opts).expect("444 → 440");
+        assert_eq!(to440.planes[0].data, y, "seed {seed}: luma touched");
+        assert_eq!(to440.planes[1].data.len(), wu * sb * (hu / 2));
+        let back = convert(&to440, FrameInfo::new(f440, w, h), f444, &opts).expect("440 → 444");
+        for p in 1..3 {
+            plane_tight_eq(
+                &back.planes[p],
+                &src.planes[p],
+                wu * sb,
+                hu,
+                &format!("seed {seed} 444↔440 plane {p}"),
+            );
+        }
+        // 4:4:0 → 4:2:2 → 4:4:0 on the same content.
+        let to422 = convert(&to440, FrameInfo::new(f440, w, h), f422, &opts).expect("440 → 422");
+        let back440 = convert(&to422, FrameInfo::new(f422, w, h), f440, &opts).expect("422 → 440");
+        for p in 0..3 {
+            assert_eq!(
+                back440.planes[p].data, to440.planes[p].data,
+                "seed {seed} 440↔422 plane {p}"
+            );
+        }
+    }
+}
+
+/// Float family: random integer frames of every direct integer shape
+/// survive integer → float → integer exactly at every depth and
+/// dimension (including padded strides); random float bytes — which
+/// decode to NaN / ±∞ / denormals as often as not — never panic on
+/// the way to any integer, float or deep-YUV destination, and the
+/// quantised output is always inside the destination's code range.
+#[test]
+fn prop_float_family_roundtrips_and_saturates() {
+    let opts = ConvertOptions::default();
+    let ints = [
+        (PixelFormat::Gray8, 1usize, 8u32, 1usize),
+        (PixelFormat::Gray12Le, 1, 12, 1),
+        (PixelFormat::Gray16Le, 1, 16, 1),
+        (PixelFormat::Rgb24, 3, 8, 1),
+        (PixelFormat::Rgba, 4, 8, 1),
+        (PixelFormat::Rgb48Le, 3, 16, 1),
+        (PixelFormat::Rgba64Le, 4, 16, 1),
+        (PixelFormat::Gbrp8, 1, 8, 3),
+        (PixelFormat::Gbrap10Le, 1, 10, 4),
+        (PixelFormat::Gbrp14Le, 1, 14, 3),
+        (PixelFormat::Gbrap16Le, 1, 16, 4),
+    ];
+    for seed in 0..cases(150, 3) as u64 {
+        let mut rng = Rng::new(seed ^ 0xF10A7);
+        let w = rng.range(1, 13);
+        let h = rng.range(1, 9);
+        let (wu, hu) = (w as usize, h as usize);
+        let pad = (rng.byte() % 5) as usize;
+        let (fmt, comps, bits, planes) = ints[(seed as usize) % ints.len()];
+        let sb = if bits > 8 { 2 } else { 1 };
+        let stride = wu * comps * sb + pad;
+        let mut frame_planes = Vec::new();
+        for _ in 0..planes {
+            let mut data = vec![0u8; stride * hu];
+            for row in 0..hu {
+                for k in 0..wu * comps {
+                    let code = rng.range(0, (1u32 << bits) - 1);
+                    let off = row * stride + k * sb;
+                    if sb == 2 {
+                        data[off..off + 2].copy_from_slice(&(code as u16).to_le_bytes());
+                    } else {
+                        data[off] = code as u8;
+                    }
+                }
+            }
+            frame_planes.push(VideoPlane { stride, data });
+        }
+        let src = VideoFrame {
+            pts: None,
+            planes: frame_planes,
+        };
+        let carrier = if planes == 4 || comps == 4 {
+            PixelFormat::GbrapF32Le
+        } else if seed % 2 == 0 {
+            PixelFormat::RgbaF32Le
+        } else {
+            PixelFormat::GbrpF32Le
+        };
+        let up = convert(&src, FrameInfo::new(fmt, w, h), carrier, &opts).expect("int → float");
+        let back = convert(&up, FrameInfo::new(carrier, w, h), fmt, &opts).expect("float → int");
+        for p in 0..planes {
+            plane_tight_eq(
+                &back.planes[p],
+                &src.planes[p],
+                wu * comps * sb,
+                hu,
+                &format!("seed {seed} {fmt:?} via {carrier:?} plane {p}"),
+            );
+        }
+        // Hostile float bytes → every destination: no panic, in-range codes.
+        let hostile = rand_packed(&mut rng, w, h, 16, pad);
+        let hinfo = FrameInfo::new(PixelFormat::RgbaF32Le, w, h);
+        for dst in [
+            fmt,
+            PixelFormat::GrayF32Le,
+            PixelFormat::GbrapF32Le,
+            PixelFormat::Yuv444P16Le,
+            PixelFormat::Yuva420P16Le,
+        ] {
+            let got = convert(&hostile, hinfo, dst, &opts);
+            if dst == PixelFormat::Yuva420P16Le && (w % 2 != 0 || h % 2 != 0) {
+                assert!(got.is_err(), "seed {seed}: odd dims must be rejected");
+                continue;
+            }
+            let got = got.unwrap_or_else(|e| panic!("seed {seed} → {dst:?}: {e:?}"));
+            if dst == fmt && bits > 8 && bits < 16 {
+                for plane in &got.planes {
+                    for word in plane.data.chunks_exact(2) {
+                        let v = u16::from_le_bytes([word[0], word[1]]) as u32;
+                        assert!(
+                            v < (1u32 << bits),
+                            "seed {seed}: code {v} exceeds {bits} bits"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

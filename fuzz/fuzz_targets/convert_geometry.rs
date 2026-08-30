@@ -110,6 +110,15 @@ const FORMATS: &[PixelFormat] = &[
     PixelFormat::Gbrap8,
     PixelFormat::Ya16Le,
     PixelFormat::CmykInverted,
+    PixelFormat::Yuv440P,
+    PixelFormat::Yuv440P10Le,
+    PixelFormat::Yuv440P12Le,
+    PixelFormat::Yuv440P16Le,
+    PixelFormat::GrayF32Le,
+    PixelFormat::RgbF32Le,
+    PixelFormat::RgbaF32Le,
+    PixelFormat::GbrpF32Le,
+    PixelFormat::GbrapF32Le,
 ];
 
 /// Map a raw fuzzer byte to a small dimension, biased toward the values
@@ -181,6 +190,18 @@ fn build_frame(fmt: PixelFormat, w: u32, h: u32, pad: usize, fill: &[u8]) -> Opt
         // Packed 16-bit grey + alpha — interleaved (Y, A) LE16 word
         // pairs, 4 bytes per pixel; any byte pattern is a legal sample.
         PixelFormat::Ya16Le => vec![build_plane(hu, wu * 4, pad, fill, &mut seed)],
+        // Scene-referred float — binary32 LE words; arbitrary fuzz bytes
+        // decode to arbitrary floats (NaN, ±∞, denormals), all of which
+        // every converter must accept without panicking.
+        PixelFormat::GrayF32Le => vec![build_plane(hu, wu * 4, pad, fill, &mut seed)],
+        PixelFormat::RgbF32Le => vec![build_plane(hu, wu * 12, pad, fill, &mut seed)],
+        PixelFormat::RgbaF32Le => vec![build_plane(hu, wu * 16, pad, fill, &mut seed)],
+        PixelFormat::GbrpF32Le | PixelFormat::GbrapF32Le => {
+            let n = if info.has_alpha { 4 } else { 3 };
+            (0..n)
+                .map(|_| build_plane(hu, wu * 4, pad, fill, &mut seed))
+                .collect()
+        }
         PixelFormat::Rgb48Le => vec![build_plane(hu, wu * 6, pad, fill, &mut seed)],
         PixelFormat::Rgba64Le => vec![build_plane(hu, wu * 8, pad, fill, &mut seed)],
         PixelFormat::Gray8 => vec![build_plane(hu, wu, pad, fill, &mut seed)],

@@ -194,6 +194,12 @@ fn normalize_significant_bits(src: &VideoFrame, src_info: FrameInfo) -> Result<O
     if fmt == PixelFormat::Pal8 {
         return Ok(None);
     }
+    // Float surfaces have no integer depth for a record to refine —
+    // binary32 samples are magnitudes already — so a record there is
+    // likewise ignored rather than interpreted as a word width.
+    if fmt.is_float() {
+        return Ok(None);
+    }
     let nominal = crate::format_info::FormatInfo::of(fmt).bit_depth as u32;
     let plane_count = src.image_plane_count();
     // Validate the covered planes; bytes beyond the image-plane count

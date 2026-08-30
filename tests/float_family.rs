@@ -591,3 +591,35 @@ fn low_level_plane_helpers() {
     float::plane_f32le_to_le16(&f, &mut back, 4096, 12);
     assert_eq!(back, words);
 }
+
+/// A significant-bits record on a float surface is meaningless (the
+/// samples are magnitudes already) and is ignored — never applied as a
+/// word width, never rejected.
+#[test]
+fn significant_bits_record_is_ignored_on_float_surfaces() {
+    let (w, h) = (4, 2);
+    let plain = rgba_f32(w, h, 0, smooth);
+    let mut tagged = plain.clone();
+    tagged.set_significant_bits(vec![10]);
+    for dst in [
+        PixelFormat::Rgba64Le,
+        PixelFormat::GbrpF32Le,
+        PixelFormat::Yuv444P16Le,
+    ] {
+        let a = conv(&plain, PixelFormat::RgbaF32Le, dst, w, h);
+        let b = conv(&tagged, PixelFormat::RgbaF32Le, dst, w, h);
+        for p in 0..a.planes.len() {
+            assert_eq!(a.planes[p].data, b.planes[p].data, "{dst:?} plane {p}");
+        }
+        assert!(b.significant_bits().is_none());
+    }
+    let mut hostile = plain.clone();
+    hostile.set_significant_bits(vec![0, 200]);
+    assert!(convert(
+        &hostile,
+        FrameInfo::new(PixelFormat::RgbaF32Le, w as u32, h as u32),
+        PixelFormat::Rgb24,
+        &opts()
+    )
+    .is_ok());
+}
