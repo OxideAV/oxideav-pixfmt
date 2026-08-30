@@ -234,6 +234,17 @@ fn bench_chroma_resample(c: &mut Criterion) {
     g.bench_function("420_to_444_1920x1080", |b| {
         b.iter(|| yuv::chroma_420_to_444(&src420, &mut dst_444, w, h));
     });
+    // 4:4:0 (core 0.1.35): vertical pair-average / row broadcast.
+    let src440 = synth(w, h / 2, 1);
+    let mut dst_440 = vec![0u8; w * (h / 2)];
+    g.throughput(Throughput::Bytes((w * (h / 2)) as u64));
+    g.bench_function("444_to_440_1920x1080", |b| {
+        b.iter(|| yuv::chroma_444_to_440(&src444, &mut dst_440, w, h));
+    });
+    g.throughput(Throughput::Bytes((w * h) as u64));
+    g.bench_function("440_to_444_1920x1080", |b| {
+        b.iter(|| yuv::chroma_440_to_444(&src440, &mut dst_444, w, h));
+    });
     g.finish();
 }
 
@@ -369,6 +380,55 @@ fn bench_planar_family(c: &mut Criterion) {
     g.finish();
 }
 
+// -------------------------------------------------------------------------
+// Scene-referred float family (core 0.1.35): the normalisation hops to
+// and from packed 16-bit RGBA and the float → 16-bit YUVA deep-matrix
+// route. Throughput is source bytes.
+
+fn bench_float_family(c: &mut Criterion) {
+    use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
+    use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+
+    let (w, h) = (1920usize, 1080usize);
+    let opts = ConvertOptions::default();
+    // In-range float RGBA (a smooth ramp) so the quantiser takes the
+    // common path rather than the saturating branches.
+    let mut data = vec![0u8; w * h * 16];
+    for (i, word) in data.chunks_exact_mut(4).enumerate() {
+        let v = ((i % 977) as f32) / 977.0;
+        word.copy_from_slice(&v.to_le_bytes());
+    }
+    let rgbaf = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: w * 16,
+            data,
+        }],
+    };
+    let rgbaf_info = FrameInfo::new(PixelFormat::RgbaF32Le, w as u32, h as u32);
+    let rgba64 = convert(&rgbaf, rgbaf_info, PixelFormat::Rgba64Le, &opts).expect("convert");
+    let rgba64_info = FrameInfo::new(PixelFormat::Rgba64Le, w as u32, h as u32);
+
+    let mut g = c.benchmark_group("float_family");
+    g.throughput(Throughput::Bytes((w * h * 16) as u64));
+    g.bench_function("rgbaf32_to_rgba64_1920x1080", |b| {
+        b.iter(|| convert(&rgbaf, rgbaf_info, PixelFormat::Rgba64Le, &opts).expect("convert"));
+    });
+    g.throughput(Throughput::Bytes((w * h * 8) as u64));
+    g.bench_function("rgba64_to_rgbaf32_1920x1080", |b| {
+        b.iter(|| convert(&rgba64, rgba64_info, PixelFormat::RgbaF32Le, &opts).expect("convert"));
+    });
+    g.throughput(Throughput::Bytes((w * h * 16) as u64));
+    g.bench_function("rgbaf32_to_gbrapf32_1920x1080", |b| {
+        b.iter(|| convert(&rgbaf, rgbaf_info, PixelFormat::GbrapF32Le, &opts).expect("convert"));
+    });
+    g.throughput(Throughput::Bytes((w * h * 16) as u64));
+    g.bench_function("rgbaf32_to_yuva444p16_1920x1080", |b| {
+        b.iter(|| convert(&rgbaf, rgbaf_info, PixelFormat::Yuva444P16Le, &opts).expect("convert"));
+    });
+    g.finish();
+}
+
 criterion_group!(
     name = pixel_ops;
     config = Criterion::default().sample_size(30);
@@ -380,6 +440,7 @@ criterion_group!(
         bench_nv12,
         bench_chroma_resample,
         bench_chroma_resample16,
-        bench_planar_family
+        bench_planar_family,
+        bench_float_family
 );
 criterion_main!(pixel_ops);
