@@ -626,3 +626,42 @@ fn gray_deep_packed_roundtrip_identity() {
         assert_eq!(back.planes[0].data, gray.planes[0].data, "{deep:?}");
     }
 }
+
+/// `FormatInfo` must agree with the oxideav-core 0.1.35 plane-geometry
+/// helpers on every variant: plane count, alpha, float-ness, chroma
+/// siting (core reports log2 shifts, this crate reports factors) and
+/// the tight plane sizes the two derive for a sample picture — so a
+/// future core variant cannot land with a mismatched descriptor here.
+#[test]
+fn format_info_agrees_with_core_geometry() {
+    for &fmt in ALL_FORMATS {
+        let info = FormatInfo::of(fmt);
+        assert_eq!(info.planes as usize, fmt.plane_count(), "{fmt:?} planes");
+        assert_eq!(info.has_alpha, fmt.has_alpha(), "{fmt:?} alpha");
+        assert_eq!(info.bit_depth == 32, fmt.is_float(), "{fmt:?} float");
+        match fmt.chroma_subsampling() {
+            Some((ssx, ssy)) => {
+                assert_eq!(info.chroma_w_sub as u32, 1 << ssx, "{fmt:?} wsub");
+                assert_eq!(info.chroma_h_sub as u32, 1 << ssy, "{fmt:?} hsub");
+            }
+            None => {
+                assert_eq!((info.chroma_w_sub, info.chroma_h_sub), (1, 1), "{fmt:?}");
+            }
+        }
+        // Tight plane sizes: the frames this suite builds (8 × 8) must
+        // match core's `plane_size_bytes` on every plane.
+        let frame = build_frame(fmt, 8, 8);
+        for (i, plane) in frame.planes.iter().enumerate() {
+            assert_eq!(
+                Some(plane.data.len()),
+                fmt.plane_size_bytes(i, 8, 8),
+                "{fmt:?} plane {i} size"
+            );
+        }
+        assert_eq!(
+            Some(frame.planes.iter().map(|p| p.data.len()).sum::<usize>()),
+            fmt.frame_size_bytes(8, 8),
+            "{fmt:?} frame size"
+        );
+    }
+}
