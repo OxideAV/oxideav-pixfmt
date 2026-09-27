@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- *(odd_geometry)* every `supports()` pair converts at odd sizes (1×1, 3×5, 7×3, 5×2, 2×7) with output planes at core's `plane_dimensions` geometry; threaded == serial at odd sizes
+- *(color_signal)* BT.601 / 709 / 2020 × label / limited / full × 8 / 10 / 12-bit, alpha and `YuvJ*` layouts against the per-pixel oracle, on the 8-bit and deep-matrix rows
 - *(heif_12mp)* bench: the production-HEIF conversion set at 4032×3024 through `convert()`, with the pre-round baseline recorded in the README
 
 ## [0.1.8](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.7...v0.1.8) - 2026-08-30

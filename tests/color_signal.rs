@@ -365,3 +365,144 @@ fn range_signal_turns_the_j_rescale_into_a_copy() {
     let rescaled = convert(&f, info, PixelFormat::YuvJ420P, &ConvertOptions::default()).unwrap();
     assert_ne!(rescaled.planes[0].data, f.planes[0].data);
 }
+
+/// Item-4 closure: every matrix `ConvertOptions::color_space` names
+/// (BT.601 / BT.709 / BT.2020 NCL) × every range resolution
+/// (label, limited override, full override) × 8 / 10 / 12-bit, alpha
+/// and `YuvJ*` layouts, against the per-pixel oracle — through the 8-bit
+/// RGB rows and, for the deep layouts, the 16-bit deep matrix.
+#[test]
+fn matrix_range_depth_cross_product() {
+    use oxideav_pixfmt::FormatInfo;
+    let spaces = [
+        (ColorSpace::Bt601Limited, 0.299f32, 0.114f32),
+        (ColorSpace::Bt601Full, 0.299, 0.114),
+        (ColorSpace::Bt709Limited, 0.2126, 0.0722),
+        (ColorSpace::Bt709Full, 0.2126, 0.0722),
+        (ColorSpace::Bt2020Limited, 0.2627, 0.0593),
+        (ColorSpace::Bt2020Full, 0.2627, 0.0593),
+    ];
+    let formats = [
+        PixelFormat::Yuv420P,
+        PixelFormat::Yuv422P,
+        PixelFormat::Yuv444P,
+        PixelFormat::YuvJ420P,
+        PixelFormat::YuvJ444P,
+        PixelFormat::Yuva420P,
+        PixelFormat::Yuva444P,
+        PixelFormat::Yuv420P10Le,
+        PixelFormat::Yuv422P12Le,
+        PixelFormat::Yuva420P10Le,
+        PixelFormat::Yuva444P12Le,
+    ];
+    let (w, h) = (5usize, 3usize);
+    for fmt in formats {
+        let info = FormatInfo::of(fmt);
+        let bits = info.bit_depth as u32;
+        let (wsub, hsub) = (info.chroma_w_sub as usize, info.chroma_h_sub as usize);
+        let (cw, ch) = (w.div_ceil(wsub), h.div_ceil(hsub));
+        let label_full = matches!(
+            fmt,
+            PixelFormat::YuvJ420P | PixelFormat::YuvJ422P | PixelFormat::YuvJ444P
+        );
+        // Sample planes as u16 values at `bits`.
+        let val = |i: usize, mul: usize, add: usize| ((i * mul + add) % (1 << bits)) as u16;
+        let yv: Vec<u16> = (0..w * h).map(|i| val(i, 97, 11)).collect();
+        let uv: Vec<u16> = (0..cw * ch).map(|i| val(i, 61, 300)).collect();
+        let vv: Vec<u16> = (0..cw * ch).map(|i| val(i, 43, 700)).collect();
+        let av: Vec<u16> = (0..w * h).map(|i| val(i, 29, 5)).collect();
+        let enc = |v: &[u16], pw: usize| VideoPlane {
+            stride: pw * if bits > 8 { 2 } else { 1 },
+            data: if bits > 8 {
+                v.iter().flat_map(|x| x.to_le_bytes()).collect()
+            } else {
+                v.iter().map(|&x| x as u8).collect()
+            },
+        };
+        let mut planes = vec![enc(&yv, w), enc(&uv, cw), enc(&vv, cw)];
+        if info.has_alpha {
+            planes.push(enc(&av, w));
+        }
+        let frame = VideoFrame { pts: None, planes };
+        let fi = FrameInfo::new(fmt, w as u32, h as u32);
+        let narrow = |v: u16| (v >> (bits - 8)) as u8;
+        let widen = |v: u16| -> u16 {
+            if bits == 8 {
+                (v << 8) | v
+            } else {
+                let d = 16 - bits;
+                (v << d) | (v >> (bits - d))
+            }
+        };
+        for (cs, kr, kb) in spaces {
+            for range in [
+                ColorRange::Unspecified,
+                ColorRange::Limited,
+                ColorRange::Full,
+            ] {
+                let limited = match range {
+                    ColorRange::Limited => true,
+                    ColorRange::Full => false,
+                    _ => !label_full,
+                };
+                let o = ConvertOptions {
+                    color_space: cs,
+                    ..Default::default()
+                };
+                let ctx = ConvertContext::new().with_range(range);
+                let mx = m(kr, kb, limited);
+                // 8-bit RGBA row.
+                let got = convert_with(&frame, fi, PixelFormat::Rgba, &o, &ctx).unwrap();
+                let mut want = Vec::new();
+                for row in 0..h {
+                    for col in 0..w {
+                        let ci = (row / hsub) * cw + col / wsub;
+                        let (r, g, b) = yuv::yuv_to_rgb(
+                            narrow(yv[row * w + col]),
+                            narrow(uv[ci]),
+                            narrow(vv[ci]),
+                            mx,
+                        );
+                        let a = if info.has_alpha {
+                            narrow(av[row * w + col])
+                        } else {
+                            255
+                        };
+                        want.extend_from_slice(&[r, g, b, a]);
+                    }
+                }
+                assert_eq!(got.planes[0].data, want, "{fmt:?} {cs:?} {range:?} → Rgba");
+                // Deep matrix row (the `YuvJ*` labels have no deep path
+                // beyond 8 bits, but reach it through the family too).
+                if label_full {
+                    continue;
+                }
+                let got = convert_with(&frame, fi, PixelFormat::Rgba64Le, &o, &ctx).unwrap();
+                let mut want = Vec::new();
+                for row in 0..h {
+                    for col in 0..w {
+                        let ci = (row / hsub) * cw + col / wsub;
+                        let (r, g, b) = yuv::yuv16_pixel_to_rgb48(
+                            widen(yv[row * w + col]),
+                            widen(uv[ci]),
+                            widen(vv[ci]),
+                            mx,
+                        );
+                        let a = if info.has_alpha {
+                            widen(av[row * w + col])
+                        } else {
+                            u16::MAX
+                        };
+                        for c in [r, g, b, a] {
+                            want.extend_from_slice(&c.to_le_bytes());
+                        }
+                    }
+                }
+                assert_eq!(
+                    got.planes[0].data, want,
+                    "{fmt:?} {cs:?} {range:?} → Rgba64Le"
+                );
+            }
+        }
+    }
+}
