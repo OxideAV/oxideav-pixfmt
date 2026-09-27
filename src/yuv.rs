@@ -286,7 +286,7 @@ pub(crate) fn yuv422_to_rgb24_scalar(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let d = matrix.decode_params();
     for row in 0..h {
         let yrow = &yp[row * w..row * w + w];
@@ -312,7 +312,7 @@ pub(crate) fn yuv420_to_rgb24_scalar(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let d = matrix.decode_params();
     for row in 0..h {
         let cr = row >> 1;
@@ -341,13 +341,35 @@ pub(crate) fn rgb24_to_yuv444_scalar(
 ) {
     let p = matrix.encode_params();
     for row in 0..h {
-        for col in 0..w {
-            let o = (row * w + col) * 3;
-            let (y, u, v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
-            yp[row * w + col] = y;
-            up[row * w + col] = u;
-            vp[row * w + col] = v;
-        }
+        encode444_row_from(
+            &src[row * w * 3..(row + 1) * w * 3],
+            &mut yp[row * w..(row + 1) * w],
+            &mut up[row * w..(row + 1) * w],
+            &mut vp[row * w..(row + 1) * w],
+            w,
+            0,
+            &p,
+        );
+    }
+}
+
+/// Encode columns `x0..w` of one RGB24 row at 4:4:4.
+#[inline]
+pub(crate) fn encode444_row_from(
+    srow: &[u8],
+    yrow: &mut [u8],
+    urow: &mut [u8],
+    vrow: &mut [u8],
+    w: usize,
+    x0: usize,
+    p: &EncodeParams,
+) {
+    for col in x0..w {
+        let o = col * 3;
+        let (y, u, v) = rgb_to_yuv_fp(srow[o], srow[o + 1], srow[o + 2], p);
+        yrow[col] = y;
+        urow[col] = u;
+        vrow[col] = v;
     }
 }
 
@@ -360,27 +382,53 @@ pub(crate) fn rgb24_to_yuv422_scalar(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let p = matrix.encode_params();
     for row in 0..h {
-        for col in 0..w {
-            let o = (row * w + col) * 3;
-            let (y, _u, _v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
-            yp[row * w + col] = y;
-        }
-        for cc in 0..cw {
-            let mut cbs = 0i32;
-            let mut crs = 0i32;
-            for dx in 0..2 {
-                let col = cc * 2 + dx;
-                let o = (row * w + col) * 3;
-                let (_y, u, v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
-                cbs += u as i32;
-                crs += v as i32;
-            }
-            up[row * cw + cc] = ((cbs + 1) / 2) as u8;
-            vp[row * cw + cc] = ((crs + 1) / 2) as u8;
-        }
+        encode422_row_from(
+            &src[row * w * 3..(row + 1) * w * 3],
+            &mut yp[row * w..(row + 1) * w],
+            &mut up[row * cw..(row + 1) * cw],
+            &mut vp[row * cw..(row + 1) * cw],
+            w,
+            0,
+            &p,
+        );
+    }
+}
+
+/// Encode columns `x0..w` (`x0` even) of one RGB24 row at 4:2:2: every
+/// pixel is converted once and its rounded chroma feeds the pair
+/// average `(a + b + 1) / 2`. An odd `w` replicates the last column
+/// into the missing position of the trailing pair (see the module docs
+/// on edge handling), so that sample is the column's own chroma.
+#[inline]
+pub(crate) fn encode422_row_from(
+    srow: &[u8],
+    yrow: &mut [u8],
+    urow: &mut [u8],
+    vrow: &mut [u8],
+    w: usize,
+    x0: usize,
+    p: &EncodeParams,
+) {
+    debug_assert_eq!(x0 % 2, 0);
+    let full = w / 2;
+    for cc in x0 / 2..full {
+        let o = cc * 6;
+        let (y0, u0, v0) = rgb_to_yuv_fp(srow[o], srow[o + 1], srow[o + 2], p);
+        let (y1, u1, v1) = rgb_to_yuv_fp(srow[o + 3], srow[o + 4], srow[o + 5], p);
+        yrow[cc * 2] = y0;
+        yrow[cc * 2 + 1] = y1;
+        urow[cc] = ((u0 as i32 + u1 as i32 + 1) / 2) as u8;
+        vrow[cc] = ((v0 as i32 + v1 as i32 + 1) / 2) as u8;
+    }
+    if w % 2 == 1 && x0 < w {
+        let o = (w - 1) * 3;
+        let (y, u, v) = rgb_to_yuv_fp(srow[o], srow[o + 1], srow[o + 2], p);
+        yrow[w - 1] = y;
+        urow[full] = ((2 * u as i32 + 1) / 2) as u8;
+        vrow[full] = ((2 * v as i32 + 1) / 2) as u8;
     }
 }
 
@@ -393,32 +441,73 @@ pub(crate) fn rgb24_to_yuv420_scalar(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     let p = matrix.encode_params();
-    for row in 0..h {
-        for col in 0..w {
-            let o = (row * w + col) * 3;
-            let (y, _u, _v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
-            yp[row * w + col] = y;
+    for cr in 0..ch {
+        let row_a = cr * 2;
+        let urow = &mut up[cr * cw..(cr + 1) * cw];
+        let vrow = &mut vp[cr * cw..(cr + 1) * cw];
+        let sa = &src[row_a * w * 3..(row_a + 1) * w * 3];
+        if row_a + 1 < h {
+            let sb = &src[(row_a + 1) * w * 3..(row_a + 2) * w * 3];
+            let (ya, yb) = yp[row_a * w..(row_a + 2) * w].split_at_mut(w);
+            encode420_rows_from(sa, Some((sb, yb)), ya, urow, vrow, w, 0, &p);
+        } else {
+            let ya = &mut yp[row_a * w..(row_a + 1) * w];
+            encode420_rows_from(sa, None, ya, urow, vrow, w, 0, &p);
         }
     }
-    for cr in 0..ch {
-        for cc in 0..cw {
-            let mut cbs = 0i32;
-            let mut crs = 0i32;
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let row = cr * 2 + dy;
-                    let col = cc * 2 + dx;
-                    let o = (row * w + col) * 3;
-                    let (_y, u, v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
-                    cbs += u as i32;
-                    crs += v as i32;
-                }
+}
+
+/// Encode columns `x0..w` (`x0` even) of one 4:2:0 row pair: every
+/// pixel is converted once and its rounded chroma feeds the 2×2 box
+/// average `(sum + 2) / 4`. `second` is the pair's second row (source
+/// and luma destination); `None` on the trailing row of an odd-height
+/// picture, whose row is then replicated into the missing second row of
+/// every block. An odd `w` likewise replicates the last column.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode420_rows_from(
+    sa: &[u8],
+    second: Option<(&[u8], &mut [u8])>,
+    ya: &mut [u8],
+    urow: &mut [u8],
+    vrow: &mut [u8],
+    w: usize,
+    x0: usize,
+    p: &EncodeParams,
+) {
+    debug_assert_eq!(x0 % 2, 0);
+    let cw = w.div_ceil(2);
+    match second {
+        Some((sb, yb)) => {
+            for cc in x0 / 2..cw {
+                let c0 = cc * 2;
+                let c1 = (c0 + 1).min(w - 1);
+                let (y0, u0, v0) = rgb_to_yuv_fp(sa[c0 * 3], sa[c0 * 3 + 1], sa[c0 * 3 + 2], p);
+                let (y1, u1, v1) = rgb_to_yuv_fp(sa[c1 * 3], sa[c1 * 3 + 1], sa[c1 * 3 + 2], p);
+                let (y2, u2, v2) = rgb_to_yuv_fp(sb[c0 * 3], sb[c0 * 3 + 1], sb[c0 * 3 + 2], p);
+                let (y3, u3, v3) = rgb_to_yuv_fp(sb[c1 * 3], sb[c1 * 3 + 1], sb[c1 * 3 + 2], p);
+                ya[c0] = y0;
+                ya[c1] = y1;
+                yb[c0] = y2;
+                yb[c1] = y3;
+                urow[cc] = ((u0 as i32 + u1 as i32 + u2 as i32 + u3 as i32 + 2) / 4) as u8;
+                vrow[cc] = ((v0 as i32 + v1 as i32 + v2 as i32 + v3 as i32 + 2) / 4) as u8;
             }
-            up[cr * cw + cc] = ((cbs + 2) / 4) as u8;
-            vp[cr * cw + cc] = ((crs + 2) / 4) as u8;
+        }
+        None => {
+            for cc in x0 / 2..cw {
+                let c0 = cc * 2;
+                let c1 = (c0 + 1).min(w - 1);
+                let (y0, u0, v0) = rgb_to_yuv_fp(sa[c0 * 3], sa[c0 * 3 + 1], sa[c0 * 3 + 2], p);
+                let (y1, u1, v1) = rgb_to_yuv_fp(sa[c1 * 3], sa[c1 * 3 + 1], sa[c1 * 3 + 2], p);
+                ya[c0] = y0;
+                ya[c1] = y1;
+                urow[cc] = ((2 * u0 as i32 + 2 * u1 as i32 + 2) / 4) as u8;
+                vrow[cc] = ((2 * v0 as i32 + 2 * v1 as i32 + 2) / 4) as u8;
+            }
         }
     }
 }
@@ -503,53 +592,93 @@ pub fn rgb24_to_yuv420(
 // ---------------------------------------------------------------------
 // Planar ↔ planar subsample conversions (kept scalar — cheap already).
 
+// Odd dimensions follow the crate-wide rule documented on
+// [`crate::convert::convert`]: a subsampled chroma plane holds
+// `ceil(w / 2)` × `ceil(h / 2)` samples, the trailing sample covers the
+// truncated block, and the missing luma positions replicate the last
+// column / row (so a 2-sample average over a single column is that
+// column's value, and a 2×2 box over a 1×2 sliver is the pair average).
+
+/// Horizontal pair-average with the last column replicated when `w` is
+/// odd: `(a + b + 1) / 2` per destination sample.
+#[inline]
+fn pair_average_row(src: &[u8], dst: &mut [u8], w: usize) {
+    let full = w / 2;
+    for (d, pair) in dst[..full].iter_mut().zip(src[..full * 2].chunks_exact(2)) {
+        *d = ((pair[0] as u16 + pair[1] as u16).div_ceil(2)) as u8;
+    }
+    if w % 2 == 1 {
+        dst[full] = src[w - 1];
+    }
+}
+
 pub fn chroma_444_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     for row in 0..h {
-        for cc in 0..cw {
-            let a = src[row * w + cc * 2] as u16;
-            let b = src[row * w + cc * 2 + 1] as u16;
-            dst[row * cw + cc] = (a + b).div_ceil(2) as u8;
-        }
+        pair_average_row(
+            &src[row * w..row * w + w],
+            &mut dst[row * cw..row * cw + cw],
+            w,
+        );
     }
 }
 
 pub fn chroma_422_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     for row in 0..h {
-        dup_bytes_2x(
+        dup_bytes_2x_row(
             &src[row * cw..row * cw + cw],
             &mut dst[row * w..row * w + w],
-            cw,
+            w,
         );
     }
 }
 
 pub fn chroma_444_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     for cr in 0..ch {
-        for cc in 0..cw {
-            let mut s = 0u32;
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    s += src[(cr * 2 + dy) * w + cc * 2 + dx] as u32;
-                }
-            }
-            dst[cr * cw + cc] = ((s + 2) / 4) as u8;
+        let row_a = cr * 2;
+        let row_b = (cr * 2 + 1).min(h - 1);
+        let ra = &src[row_a * w..row_a * w + w];
+        let rb = &src[row_b * w..row_b * w + w];
+        let drow = &mut dst[cr * cw..cr * cw + cw];
+        let full = w / 2;
+        for cc in 0..full {
+            let s = ra[cc * 2] as u32
+                + ra[cc * 2 + 1] as u32
+                + rb[cc * 2] as u32
+                + rb[cc * 2 + 1] as u32;
+            drow[cc] = ((s + 2) / 4) as u8;
+        }
+        if w % 2 == 1 {
+            let s = 2 * ra[w - 1] as u32 + 2 * rb[w - 1] as u32;
+            drow[full] = ((s + 2) / 4) as u8;
         }
     }
 }
 
 pub fn chroma_420_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     for row in 0..h {
         let cr = row / 2;
-        dup_bytes_2x(
+        dup_bytes_2x_row(
             &src[cr * cw..cr * cw + cw],
             &mut dst[row * w..row * w + w],
-            cw,
+            w,
         );
+    }
+}
+
+/// Broadcast a `ceil(w / 2)`-sample chroma row to `w` luma columns:
+/// every sample is duplicated, and when `w` is odd the last sample
+/// lands once more in the trailing column.
+#[inline]
+fn dup_bytes_2x_row(src: &[u8], dst: &mut [u8], w: usize) {
+    let full = w / 2;
+    dup_bytes_2x(src, dst, full);
+    if w % 2 == 1 {
+        dst[w - 1] = src[full];
     }
 }
 
@@ -597,24 +726,24 @@ unsafe fn dup_bytes_2x_avx2(src: &[u8], dst: &mut [u8], n: usize) {
 }
 
 pub fn chroma_422_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     for cr in 0..ch {
+        let row_a = cr * 2;
+        let row_b = (cr * 2 + 1).min(h - 1);
         for cc in 0..cw {
-            let a = src[(cr * 2) * cw + cc] as u16;
-            let b = src[(cr * 2 + 1) * cw + cc] as u16;
+            let a = src[row_a * cw + cc] as u16;
+            let b = src[row_b * cw + cc] as u16;
             dst[cr * cw + cc] = (a + b).div_ceil(2) as u8;
         }
     }
 }
 
 pub fn chroma_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     for row in 0..h {
         let cr = row / 2;
-        for cc in 0..cw {
-            dst[row * cw + cc] = src[cr * cw + cc];
-        }
+        dst[row * cw..row * cw + cw].copy_from_slice(&src[cr * cw..cr * cw + cw]);
     }
 }
 
@@ -632,14 +761,16 @@ pub fn chroma_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 
 /// 4:4:4 chroma → 4:4:0 chroma (vertical pair-average, round to
 /// nearest; chroma width unchanged). Source plane is `w × h`;
-/// destination is `w × (h / 2)`. `h` must be even.
+/// destination is `w × ceil(h / 2)` — an odd `h` replicates the last
+/// row into the trailing chroma row.
 pub fn chroma_444_to_440(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let ch = h / 2;
-    debug_assert_eq!(h, ch * 2, "chroma_444_to_440: height must be even");
+    let ch = h.div_ceil(2);
     for cr in 0..ch {
+        let row_a = cr * 2;
+        let row_b = (cr * 2 + 1).min(h - 1);
         for cc in 0..w {
-            let a = src[(cr * 2) * w + cc] as u16;
-            let b = src[(cr * 2 + 1) * w + cc] as u16;
+            let a = src[row_a * w + cc] as u16;
+            let b = src[row_b * w + cc] as u16;
             dst[cr * w + cc] = (a + b).div_ceil(2) as u8;
         }
     }
@@ -647,10 +778,8 @@ pub fn chroma_444_to_440(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 
 /// 4:4:0 chroma → 4:4:4 chroma (vertical nearest — each chroma row is
 /// broadcast to two luma rows; width unchanged). Source plane is
-/// `w × (h / 2)`; destination is `w × h`. `h` must be even.
+/// `w × ceil(h / 2)`; destination is `w × h`.
 pub fn chroma_440_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let ch = h / 2;
-    debug_assert_eq!(h, ch * 2, "chroma_440_to_444: height must be even");
     for row in 0..h {
         let cr = row / 2;
         dst[row * w..row * w + w].copy_from_slice(&src[cr * w..cr * w + w]);
@@ -744,14 +873,13 @@ pub fn chroma_411_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 /// chroma row (since 4:2:0 already pair-averaged the vertical pair, the
 /// 4:1:1 row above and the 4:1:1 row below share the chroma value) and
 /// horizontally pair-averages two source samples into one destination
-/// sample. `w` and `h` must both be even (4:2:0 requirement) and `w`
-/// must additionally be a multiple of 4.
+/// sample. `w` must be a multiple of 4 (the 4:1:1 grid); an odd `h`
+/// reads `ceil(h / 2)` 4:2:0 chroma rows, the last one serving the
+/// trailing luma row.
 pub fn chroma_420_to_411(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let src_cw = w / 2;
-    let src_ch = h / 2;
     let dst_cw = w / 4;
     debug_assert_eq!(w, dst_cw * 4, "chroma_420_to_411: width must be /4");
-    debug_assert_eq!(h, src_ch * 2, "chroma_420_to_411: height must be /2");
     for row in 0..h {
         let src_row = row / 2;
         for cc in 0..dst_cw {
@@ -763,19 +891,21 @@ pub fn chroma_420_to_411(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
 }
 
 /// 4:1:1 chroma → 4:2:0 chroma. 4:1:1 is `(w / 4) × h` and 4:2:0 is
-/// `(w / 2) × (h / 2)`. Each destination chroma row is the vertical
-/// average of two source rows; each destination sample is the horizontal
+/// `(w / 2) × ceil(h / 2)`. Each destination chroma row is the vertical
+/// average of two source rows (an odd `h` replicates the last row into
+/// the trailing pair); each destination sample is the horizontal
 /// duplicate of the source sample broadcast to two columns.
 pub fn chroma_411_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     let src_cw = w / 4;
     let dst_cw = w / 2;
-    let dst_ch = h / 2;
+    let dst_ch = h.div_ceil(2);
     debug_assert_eq!(w, src_cw * 4, "chroma_411_to_420: width must be /4");
-    debug_assert_eq!(h, dst_ch * 2, "chroma_411_to_420: height must be /2");
     for cr in 0..dst_ch {
+        let row_a = cr * 2;
+        let row_b = (cr * 2 + 1).min(h - 1);
         for cc in 0..src_cw {
-            let a = src[(cr * 2) * src_cw + cc] as u16;
-            let b = src[(cr * 2 + 1) * src_cw + cc] as u16;
+            let a = src[row_a * src_cw + cc] as u16;
+            let b = src[row_b * src_cw + cc] as u16;
             let v = (a + b).div_ceil(2) as u8;
             // Broadcast vertical-averaged chroma sample to two destination
             // columns (4:2:0 has cw = src_cw * 2).
@@ -1009,108 +1139,146 @@ fn c16_put(buf: &mut [u8], i: usize, v: u32) {
 }
 
 /// 4:4:4 → 4:2:2 on 16-bit LE chroma (horizontal pair-average).
-/// Source plane is `w × h` samples; destination is `(w / 2) × h`.
+/// Source plane is `w × h` samples; destination is `ceil(w / 2) × h`.
 pub fn chroma16le_444_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     for row in 0..h {
-        for cc in 0..cw {
-            let a = c16_get(src, row * w + cc * 2);
-            let b = c16_get(src, row * w + cc * 2 + 1);
-            c16_put(dst, row * cw + cc, (a + b).div_ceil(2));
-        }
+        pair_average_row16(
+            &src[row * w * 2..(row * w + w) * 2],
+            &mut dst[row * cw * 2..(row * cw + cw) * 2],
+            w,
+        );
+    }
+}
+
+/// Horizontal pair-average on 16-bit words with the last column
+/// replicated when `w` is odd.
+#[inline]
+fn pair_average_row16(src: &[u8], dst: &mut [u8], w: usize) {
+    let full = w / 2;
+    for cc in 0..full {
+        let a = c16_get(src, cc * 2);
+        let b = c16_get(src, cc * 2 + 1);
+        c16_put(dst, cc, (a + b).div_ceil(2));
+    }
+    if w % 2 == 1 {
+        c16_put(dst, full, c16_get(src, w - 1));
+    }
+}
+
+/// Broadcast a `ceil(w / 2)`-word chroma row to `w` columns (each word
+/// duplicated; an odd `w` lands the last word once more at the end).
+#[inline]
+fn dup_words_2x_row(src: &[u8], dst: &mut [u8], w: usize) {
+    let full = w / 2;
+    for cc in 0..full {
+        let v = c16_get(src, cc);
+        c16_put(dst, cc * 2, v);
+        c16_put(dst, cc * 2 + 1, v);
+    }
+    if w % 2 == 1 {
+        c16_put(dst, w - 1, c16_get(src, full));
     }
 }
 
 /// 4:2:2 → 4:4:4 on 16-bit LE chroma (horizontal duplicate).
-/// Source plane is `(w / 2) × h` samples; destination is `w × h`.
+/// Source plane is `ceil(w / 2) × h` samples; destination is `w × h`.
 pub fn chroma16le_422_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     for row in 0..h {
-        for cc in 0..cw {
-            let v = c16_get(src, row * cw + cc);
-            c16_put(dst, row * w + cc * 2, v);
-            c16_put(dst, row * w + cc * 2 + 1, v);
-        }
+        dup_words_2x_row(
+            &src[row * cw * 2..(row * cw + cw) * 2],
+            &mut dst[row * w * 2..(row * w + w) * 2],
+            w,
+        );
     }
 }
 
 /// 4:4:4 → 4:2:0 on 16-bit LE chroma (2×2 box average, round to
-/// nearest). Source is `w × h`; destination is `(w / 2) × (h / 2)`.
+/// nearest). Source is `w × h`; destination is `ceil(w / 2) × ceil(h / 2)`
+/// with the last column / row replicated into a truncated block.
 pub fn chroma16le_444_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     for cr in 0..ch {
-        for cc in 0..cw {
-            let mut s = 0u32;
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    s += c16_get(src, (cr * 2 + dy) * w + cc * 2 + dx);
-                }
-            }
+        let row_a = cr * 2;
+        let row_b = (cr * 2 + 1).min(h - 1);
+        let full = w / 2;
+        for cc in 0..full {
+            let s = c16_get(src, row_a * w + cc * 2)
+                + c16_get(src, row_a * w + cc * 2 + 1)
+                + c16_get(src, row_b * w + cc * 2)
+                + c16_get(src, row_b * w + cc * 2 + 1);
             c16_put(dst, cr * cw + cc, (s + 2) / 4);
+        }
+        if w % 2 == 1 {
+            let s = 2 * c16_get(src, row_a * w + w - 1) + 2 * c16_get(src, row_b * w + w - 1);
+            c16_put(dst, cr * cw + full, (s + 2) / 4);
         }
     }
 }
 
 /// 4:2:0 → 4:4:4 on 16-bit LE chroma (2×2 nearest broadcast).
-/// Source is `(w / 2) × (h / 2)`; destination is `w × h`.
+/// Source is `ceil(w / 2) × ceil(h / 2)`; destination is `w × h`.
 pub fn chroma16le_420_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     for row in 0..h {
         let cr = row / 2;
-        for cc in 0..cw {
-            let v = c16_get(src, cr * cw + cc);
-            c16_put(dst, row * w + cc * 2, v);
-            c16_put(dst, row * w + cc * 2 + 1, v);
-        }
+        dup_words_2x_row(
+            &src[cr * cw * 2..(cr * cw + cw) * 2],
+            &mut dst[row * w * 2..(row * w + w) * 2],
+            w,
+        );
     }
 }
 
 /// 4:2:2 → 4:2:0 on 16-bit LE chroma (vertical pair-average; chroma
-/// width unchanged). Source is `(w / 2) × h`; destination is
-/// `(w / 2) × (h / 2)`.
+/// width unchanged). Source is `ceil(w / 2) × h`; destination is
+/// `ceil(w / 2) × ceil(h / 2)` (odd `h` replicates the last row).
 pub fn chroma16le_422_to_420(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     for cr in 0..ch {
+        let row_a = cr * 2;
+        let row_b = (cr * 2 + 1).min(h - 1);
         for cc in 0..cw {
-            let a = c16_get(src, (cr * 2) * cw + cc);
-            let b = c16_get(src, (cr * 2 + 1) * cw + cc);
+            let a = c16_get(src, row_a * cw + cc);
+            let b = c16_get(src, row_b * cw + cc);
             c16_put(dst, cr * cw + cc, (a + b).div_ceil(2));
         }
     }
 }
 
 /// 4:2:0 → 4:2:2 on 16-bit LE chroma (vertical duplicate; chroma width
-/// unchanged). Source is `(w / 2) × (h / 2)`; destination is
-/// `(w / 2) × h`.
+/// unchanged). Source is `ceil(w / 2) × ceil(h / 2)`; destination is
+/// `ceil(w / 2) × h`.
 pub fn chroma16le_420_to_422(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     for row in 0..h {
         let cr = row / 2;
-        for cc in 0..cw {
-            let v = c16_get(src, cr * cw + cc);
-            c16_put(dst, row * cw + cc, v);
-        }
+        dst[row * cw * 2..(row * cw + cw) * 2]
+            .copy_from_slice(&src[cr * cw * 2..(cr * cw + cw) * 2]);
     }
 }
 
 /// 4:4:4 → 4:4:0 on 16-bit LE chroma (vertical pair-average, round to
 /// nearest; width unchanged). Source is `w × h`; destination is
-/// `w × (h / 2)`.
+/// `w × ceil(h / 2)` (odd `h` replicates the last row).
 pub fn chroma16le_444_to_440(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    let ch = h / 2;
+    let ch = h.div_ceil(2);
     for cr in 0..ch {
+        let row_a = cr * 2;
+        let row_b = (cr * 2 + 1).min(h - 1);
         for cc in 0..w {
-            let a = c16_get(src, (cr * 2) * w + cc);
-            let b = c16_get(src, (cr * 2 + 1) * w + cc);
+            let a = c16_get(src, row_a * w + cc);
+            let b = c16_get(src, row_b * w + cc);
             c16_put(dst, cr * w + cc, (a + b).div_ceil(2));
         }
     }
 }
 
 /// 4:4:0 → 4:4:4 on 16-bit LE chroma (vertical duplicate; width
-/// unchanged). Source is `w × (h / 2)`; destination is `w × h`.
+/// unchanged). Source is `w × ceil(h / 2)`; destination is `w × h`.
 pub fn chroma16le_440_to_444(src: &[u8], dst: &mut [u8], w: usize, h: usize) {
     for row in 0..h {
         let cr = row / 2;

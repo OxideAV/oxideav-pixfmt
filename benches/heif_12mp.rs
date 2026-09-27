@@ -7,11 +7,16 @@
 //! synthesised once (smooth gradients staged through `convert` itself)
 //! outside the measured region.
 //!
+//! Each case runs twice: serial (`convert`, the default contract) and
+//! with the host's full thread budget (`convert_with` +
+//! `ExecutionContext::auto()`, suffix `_mt`), so the row-band engine's
+//! parallel speed-up is measured next to the single-core number.
+//!
 //! Run with `cargo bench --features bench --bench heif_12mp`.
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+use oxideav_core::{ExecutionContext, PixelFormat, VideoFrame, VideoPlane};
+use oxideav_pixfmt::{convert, convert_with, ConvertContext, ConvertOptions, FrameInfo};
 
 const W: u32 = 4032;
 const H: u32 = 3024;
@@ -57,6 +62,7 @@ fn bench_heif_12mp(c: &mut Criterion) {
         (PixelFormat::Rgb24, PixelFormat::Gray8),
     ];
     let opts = ConvertOptions::default();
+    let mt = ConvertContext::new().with_execution(ExecutionContext::auto());
     let mut group = c.benchmark_group("heif_12mp");
     group.sample_size(10);
     group.throughput(Throughput::Elements(W as u64 * H as u64));
@@ -65,6 +71,9 @@ fn bench_heif_12mp(c: &mut Criterion) {
         let info = FrameInfo::new(sf, W, H);
         group.bench_function(format!("{sf:?}_to_{df:?}"), |b| {
             b.iter(|| convert(&src, info, df, &opts).expect("convert"));
+        });
+        group.bench_function(format!("{sf:?}_to_{df:?}_mt"), |b| {
+            b.iter(|| convert_with(&src, info, df, &opts, &mt).expect("convert"));
         });
     }
     group.finish();

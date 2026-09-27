@@ -278,12 +278,18 @@ fn gray_odd_dimension_contract() {
     .expect("odd-dim luma extraction");
     assert_eq!(out.planes[0].data.len(), 9);
 
-    // Gray8 3×3 → 4:2:0 (planar or NV): rejected.
+    // Gray8 3×3 → 4:2:0 (planar or NV): legal, with the chroma grid
+    // rounded up to 2×2 neutral samples.
     let g = gray_frame(3, 3, vec![55u8; 9]);
     let ginfo = FrameInfo::new(PixelFormat::Gray8, 3, 3);
-    assert!(convert(&g, ginfo, PixelFormat::Yuv420P, &o).is_err());
-    assert!(convert(&g, ginfo, PixelFormat::Nv12, &o).is_err());
-    // ...but 4:4:4 has no grid constraint.
+    let p = convert(&g, ginfo, PixelFormat::Yuv420P, &o).expect("odd gray → 4:2:0");
+    assert_eq!(p.planes[1].stride, 2);
+    assert_eq!(p.planes[1].data, vec![128u8; 4]);
+    assert_eq!(p.planes[2].data, vec![128u8; 4]);
+    let nv = convert(&g, ginfo, PixelFormat::Nv12, &o).expect("odd gray → NV12");
+    assert_eq!(nv.planes[1].stride, 4);
+    assert_eq!(nv.planes[1].data, vec![128u8; 8]);
+    // ...and 4:4:4 has no grid constraint at all.
     assert!(convert(&g, ginfo, PixelFormat::Yuv444P, &o).is_ok());
     assert!(convert(&g, ginfo, PixelFormat::YuvJ444P, &o).is_ok());
 }

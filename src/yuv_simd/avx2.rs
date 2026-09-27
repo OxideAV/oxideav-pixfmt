@@ -217,7 +217,7 @@ pub(crate) unsafe fn yuv422_to_rgb24(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let d = matrix.decode_params();
     let y_off_v = d.y_off;
     let y_scale_v = _mm256_set1_epi32(d.y_scale);
@@ -261,7 +261,7 @@ pub(crate) unsafe fn yuv420_to_rgb24(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let d = matrix.decode_params();
     let y_off_v = d.y_off;
     let y_scale_v = _mm256_set1_epi32(d.y_scale);
@@ -467,7 +467,7 @@ pub(crate) unsafe fn rgb24_to_yuv422(
     matrix: YuvMatrix,
 ) {
     let p = matrix.encode_params();
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let ones = _mm_set1_epi8(1);
     let round1 = _mm_set1_epi16(1);
     for row in 0..h {
@@ -508,7 +508,9 @@ pub(crate) unsafe fn rgb24_to_yuv422(
             let mut cbs = 0i32;
             let mut crs = 0i32;
             for dx in 0..2 {
-                let col = cc * 2 + dx;
+                // Odd width: replicate the last luma column into the
+                // missing position of the trailing chroma pair.
+                let col = (cc * 2 + dx).min(w - 1);
                 let o = col * 3;
                 let (_y, u, v) = rgb_to_yuv_fp(srow[o], srow[o + 1], srow[o + 2], &p);
                 cbs += u as i32;
@@ -531,15 +533,16 @@ pub(crate) unsafe fn rgb24_to_yuv420(
     matrix: YuvMatrix,
 ) {
     let p = matrix.encode_params();
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    // Complete row pairs; an odd trailing luma row is handled below.
+    let pairs = h / 2;
     let ones = _mm_set1_epi8(1);
     let round2 = _mm_set1_epi16(2);
 
     // Fused luma + chroma pass over row pairs. Each iteration takes
     // two source rows of 16 pixels, writes 16 Y bytes per row and
     // 8 chroma bytes per row-pair.
-    for cr in 0..ch {
+    for cr in 0..pairs {
         let row_a = cr * 2;
         let row_b = cr * 2 + 1;
         let srow_a = &src[row_a * w * 3..row_a * w * 3 + w * 3];
@@ -598,7 +601,9 @@ pub(crate) unsafe fn rgb24_to_yuv420(
             for dy in 0..2 {
                 for dx in 0..2 {
                     let row = cr * 2 + dy;
-                    let col = cc * 2 + dx;
+                    // Odd width: replicate the last luma column into
+                    // the missing position of the trailing chroma pair.
+                    let col = (cc * 2 + dx).min(w - 1);
                     let o = (row * w + col) * 3;
                     let (_y, u, v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
                     cbs += u as i32;
@@ -609,13 +614,29 @@ pub(crate) unsafe fn rgb24_to_yuv420(
             vp[cr * cw + cc] = ((crs + 2) / 4) as u8;
         }
     }
-    // Handle a potential leftover odd row (h odd). Scalar.
-    if h > ch * 2 {
+    // Odd height: the trailing luma row forms a chroma row of its own,
+    // with the row replicated into the missing second row of every
+    // 2×2 block (same rounding as a full block). Scalar.
+    if h > pairs * 2 {
         let row = h - 1;
+        let cr = pairs;
         for col in 0..w {
             let o = (row * w + col) * 3;
             let (y, _u, _v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
             yp[row * w + col] = y;
+        }
+        for cc in 0..cw {
+            let mut cbs = 0i32;
+            let mut crs = 0i32;
+            for dx in 0..2 {
+                let col = (cc * 2 + dx).min(w - 1);
+                let o = (row * w + col) * 3;
+                let (_y, u, v) = rgb_to_yuv_fp(src[o], src[o + 1], src[o + 2], &p);
+                cbs += 2 * u as i32;
+                crs += 2 * v as i32;
+            }
+            up[cr * cw + cc] = ((cbs + 2) / 4) as u8;
+            vp[cr * cw + cc] = ((crs + 2) / 4) as u8;
         }
     }
 }

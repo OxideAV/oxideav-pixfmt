@@ -244,17 +244,29 @@ fn geometry_rules() {
     assert_eq!(back.planes[1].data.len(), 5 * 2);
     let p444 = conv(&src, PixelFormat::Yuv440P, PixelFormat::Yuv444P, 5, 4);
     assert_eq!(p444.planes[1].data.len(), 5 * 4);
-    // Odd height: rejected, not panicked.
-    let src = build_yuv(PixelFormat::Yuv440P, 6, 5, 0);
+    // Odd height: legal — the chroma plane carries ceil(5 / 2) = 3 rows
+    // and the trailing luma row reuses the last one.
+    let mut src = build_yuv(PixelFormat::Yuv440P, 6, 6, 0);
+    src.planes[0].data.truncate(6 * 5);
     let info = FrameInfo::new(PixelFormat::Yuv440P, 6, 5);
+    let p444 = convert(&src, info, PixelFormat::Yuv444P, &opts).expect("odd 4:4:0 → 4:4:4");
+    for row in 0..5 {
+        let cr = row / 2;
+        assert_eq!(
+            &p444.planes[1].data[row * 6..row * 6 + 6],
+            &src.planes[1].data[cr * 6..cr * 6 + 6]
+        );
+    }
     for dst in [
-        PixelFormat::Yuv444P,
         PixelFormat::Yuv420P,
         PixelFormat::Rgb24,
         PixelFormat::Yuv440P10Le,
     ] {
-        assert!(convert(&src, info, dst, &opts).is_err(), "→ {dst:?}");
+        assert!(convert(&src, info, dst, &opts).is_ok(), "→ {dst:?}");
     }
+    // A chroma plane with only the truncated two rows is malformed.
+    let short = build_yuv(PixelFormat::Yuv440P, 6, 5, 0);
+    assert!(convert(&short, info, PixelFormat::Rgb24, &opts).is_err());
     let rgb = VideoFrame {
         pts: None,
         planes: vec![VideoPlane {
@@ -263,7 +275,8 @@ fn geometry_rules() {
         }],
     };
     let info = FrameInfo::new(PixelFormat::Rgb24, 6, 5);
-    assert!(convert(&rgb, info, PixelFormat::Yuv440P, &opts).is_err());
+    let enc = convert(&rgb, info, PixelFormat::Yuv440P, &opts).expect("RGB → odd 4:4:0");
+    assert_eq!(enc.planes[1].data.len(), 6 * 3);
     // Luma-only extraction ignores the chroma grid, so it still works.
     let src = build_yuv(PixelFormat::Yuv440P, 6, 5, 0);
     let info = FrameInfo::new(PixelFormat::Yuv440P, 6, 5);

@@ -542,30 +542,48 @@ fn rgba_to_yuva420p_to_rgba_roundtrip_keeps_alpha_and_lifts_psnr() {
 }
 
 #[test]
-fn yuv420p_to_yuva420p_rejects_odd_dimensions() {
-    // 4:2:0 has no representation for a half-pixel chroma sample, so
-    // odd width or height MUST be rejected rather than silently
-    // truncated.
+fn yuv420p_to_yuva420p_odd_dimensions_use_rounded_up_chroma() {
+    // Odd luma dimensions are legal: the 4:2:0 chroma plane holds
+    // ceil(w / 2) × ceil(h / 2) samples (T.81 A.1.1 component
+    // dimensions; oxideav-core `plane_dimensions`). 15 × 8 luma pairs
+    // with 8 × 4 chroma, which carries straight through to Yuva420P.
     let opts = ConvertOptions::default();
-    let bad = VideoFrame {
+    let src = VideoFrame {
         pts: None,
         planes: vec![
             VideoPlane {
                 stride: 15,
-                data: vec![0; 15 * 8],
+                data: (0..15 * 8).map(|i| (i * 3) as u8).collect(),
             },
             VideoPlane {
                 stride: 8,
-                data: vec![128; 8 * 4],
+                data: (0..8 * 4).map(|i| (100 + i) as u8).collect(),
             },
             VideoPlane {
                 stride: 8,
-                data: vec![128; 8 * 4],
+                data: (0..8 * 4).map(|i| (140 + i) as u8).collect(),
             },
         ],
     };
-    let bad_info = FrameInfo::new(PixelFormat::Yuv420P, 15, 8);
-    assert!(convert(&bad, bad_info, PixelFormat::Yuva420P, &opts).is_err());
+    let info = FrameInfo::new(PixelFormat::Yuv420P, 15, 8);
+    let out = convert(&src, info, PixelFormat::Yuva420P, &opts).expect("odd width converts");
+    assert_eq!(out.planes.len(), 4);
+    assert_eq!(out.planes[0].data, src.planes[0].data);
+    assert_eq!(out.planes[1].stride, 8);
+    assert_eq!(out.planes[1].data, src.planes[1].data);
+    assert_eq!(out.planes[2].data, src.planes[2].data);
+    assert!(out.planes[3].data.iter().all(|&a| a == 0xFF));
+    assert_eq!(out.planes[3].data.len(), 15 * 8);
+
+    // A chroma plane one column short of ceil(w / 2) is a malformed
+    // frame: rejected with an error, never a panic or a silent
+    // truncation.
+    let mut short = src.clone();
+    short.planes[1] = VideoPlane {
+        stride: 7,
+        data: vec![128; 7 * 4],
+    };
+    assert!(convert(&short, info, PixelFormat::Yuva420P, &opts).is_err());
 }
 
 // ---------------------------------------------------------------------
@@ -840,9 +858,10 @@ fn yuvj_planar_inter_conversions_route_through_same_chroma_resampler() {
 }
 
 #[test]
-fn yuv420p_to_yuv422p_rejects_odd_height() {
-    // 4:2:0 source has half-height chroma; odd luma height has no
-    // 4:2:0 chroma representation. Error::Invalid expected.
+fn yuv420p_to_yuv422p_odd_height_needs_rounded_up_chroma_rows() {
+    // 16 × 5 luma → the 4:2:0 chroma plane has ceil(5 / 2) = 3 rows. A
+    // source that only carries 2 rows is malformed and rejects with an
+    // error (it used to index past the plane).
     let opts = ConvertOptions::default();
     let bad = VideoFrame {
         pts: None,
@@ -861,8 +880,35 @@ fn yuv420p_to_yuv422p_rejects_odd_height() {
             },
         ],
     };
-    let bad_info = FrameInfo::new(PixelFormat::Yuv420P, 16, 5);
-    assert!(convert(&bad, bad_info, PixelFormat::Yuv422P, &opts).is_err());
+    let info = FrameInfo::new(PixelFormat::Yuv420P, 16, 5);
+    assert!(convert(&bad, info, PixelFormat::Yuv422P, &opts).is_err());
+
+    // With the full three chroma rows the move succeeds: every luma row
+    // takes chroma row `row / 2`, so the trailing odd row reuses the
+    // last chroma row.
+    let good = VideoFrame {
+        pts: None,
+        planes: vec![
+            bad.planes[0].clone(),
+            VideoPlane {
+                stride: 8,
+                data: (0..8 * 3).map(|i| (60 + i) as u8).collect(),
+            },
+            VideoPlane {
+                stride: 8,
+                data: (0..8 * 3).map(|i| (160 + i) as u8).collect(),
+            },
+        ],
+    };
+    let out = convert(&good, info, PixelFormat::Yuv422P, &opts).expect("odd height converts");
+    assert_eq!(out.planes[1].data.len(), 8 * 5);
+    for row in 0..5 {
+        let cr = row / 2;
+        assert_eq!(
+            &out.planes[1].data[row * 8..row * 8 + 8],
+            &good.planes[1].data[cr * 8..cr * 8 + 8]
+        );
+    }
 }
 
 // -------------------------------------------------------------------------

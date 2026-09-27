@@ -156,15 +156,46 @@ fn yuv_12_to_10_truncates() {
 
 /// Odd dimensions on subsampled cross-depth layouts reject up front.
 #[test]
-fn yuv_cross_depth_odd_dims_reject() {
+fn yuv_cross_depth_odd_dims_use_rounded_up_chroma() {
+    // 3×3 4:2:0 carries ceil(3/2) = 2 × 2 chroma. Read the 3×3 picture
+    // out of a 4×4 buffer (stride 8 bytes) — a valid odd-geometry frame
+    // — and check the depth move on every sample it covers.
     let src = yuv16_frame(4, 4, 2, 2, 1, 10);
     let out = convert(
         &src,
         FrameInfo::new(PixelFormat::Yuv420P10Le, 3, 3),
         PixelFormat::Yuv420P12Le,
         &ConvertOptions::default(),
-    );
-    assert!(out.is_err());
+    )
+    .expect("odd 4:2:0 depth move");
+    let rd = |p: &VideoPlane, i: usize| u16::from_le_bytes([p.data[i * 2], p.data[i * 2 + 1]]);
+    // 10 → 12 bit: value in the high bits, top two bits replicated below.
+    let widen = |v: u16| (v << 2) | (v >> 8);
+    assert_eq!(out.planes[0].stride, 3 * 2);
+    for y in 0..3 {
+        for x in 0..3 {
+            assert_eq!(
+                rd(&out.planes[0], y * 3 + x),
+                widen(rd(&src.planes[0], y * 4 + x))
+            );
+        }
+    }
+    for p in 1..3 {
+        assert_eq!(out.planes[p].stride, 2 * 2);
+        for i in 0..4 {
+            assert_eq!(rd(&out.planes[p], i), widen(rd(&src.planes[p], i)));
+        }
+    }
+    // A chroma plane shorter than the rounded-up grid is an error.
+    let mut short = src.clone();
+    short.planes[1].data.truncate(2);
+    assert!(convert(
+        &short,
+        FrameInfo::new(PixelFormat::Yuv420P10Le, 3, 3),
+        PixelFormat::Yuv420P12Le,
+        &ConvertOptions::default(),
+    )
+    .is_err());
 }
 
 // ---------------------------------------------------------------------

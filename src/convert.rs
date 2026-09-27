@@ -11,13 +11,17 @@
 //! itself, so every entry point takes them as an explicit
 //! [`FrameInfo`] argument alongside the frame.
 
-use oxideav_core::{Error, PixelFormat, Result, VideoFrame, VideoPlane};
+use oxideav_core::{
+    ColorRange, ColorSignal, Error, ExecutionContext, MatrixCoefficients, PixelFormat, Result,
+    VideoFrame, VideoPlane,
+};
 
 use crate::cmyk;
 use crate::float;
 use crate::gray;
 use crate::pal8;
 use crate::palette::Palette;
+use crate::planar8::{self, chroma_dims, tight_plane, Packed8, Planar8};
 use crate::rgb;
 use crate::yuv::{self, YuvMatrix};
 
@@ -67,11 +71,167 @@ pub enum ColorSpace {
 }
 
 /// Options bundle passed to [`convert`].
+///
+/// `color_space` selects the matrix **primaries** for every hop that
+/// crosses between YUV and RGB / gray / float when nothing more
+/// specific is known; whether the YUV samples are limited (studio) or
+/// full range is a property of the pixel format (`Yuv*` limited,
+/// `YuvJ*` full) and the range half of the variant is not consulted
+/// for those hops. A colour signal — the source frame's
+/// [`VideoFrame::color_signal`] record, or a caller override in
+/// [`ConvertContext::signal`] passed to [`convert_with`] — takes
+/// precedence over both; see [`convert_with`].
 #[derive(Clone, Debug, Default)]
 pub struct ConvertOptions {
     pub dither: Dither,
     pub palette: Option<Palette>,
     pub color_space: ColorSpace,
+}
+
+/// Per-call context for [`convert_with`]: the pieces of a conversion
+/// request that [`ConvertOptions`] cannot carry without breaking the
+/// callers that build it as a struct literal.
+///
+/// The struct is `#[non_exhaustive]`: build it with
+/// [`ConvertContext::new`] / `Default` and set fields through the
+/// builder methods (or by assignment on a mutable binding). New fields
+/// can then be added without a semver break.
+///
+/// ```
+/// use oxideav_core::{ColorRange, ExecutionContext, MatrixCoefficients};
+/// use oxideav_pixfmt::ConvertContext;
+///
+/// // A full-range BT.709 4:2:0 + alpha payload (as a HEIF `nclx` box
+/// // can declare), converted on up to four row bands in parallel.
+/// let ctx = ConvertContext::new()
+///     .with_range(ColorRange::Full)
+///     .with_matrix(MatrixCoefficients::BT709)
+///     .with_execution(ExecutionContext::with_threads(4));
+/// assert_eq!(ctx.signal.range, ColorRange::Full);
+/// assert_eq!(ctx.execution.threads, 4);
+/// ```
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct ConvertContext {
+    /// Colour-signal override for the YUV side of the conversion. Every
+    /// *specified* field wins over the source frame's
+    /// [`VideoFrame::color_signal`] record, which in turn wins over the
+    /// pixel-format label and [`ConvertOptions::color_space`]. The
+    /// default (fully unspecified) changes nothing. Only `range` and
+    /// `matrix` affect sample values; `primaries` / `transfer` are
+    /// descriptive and ignored.
+    pub signal: ColorSignal,
+    /// Thread budget for the conversion, under oxideav-core's threading
+    /// contract: the default [`ExecutionContext::serial`] runs on the
+    /// caller's thread; `threads > 1` lets the row-band engine convert
+    /// up to `effective_workers(bands)` bands on scoped threads that
+    /// are joined before the call returns. The output is byte-identical
+    /// whatever the budget.
+    pub execution: ExecutionContext,
+}
+
+impl ConvertContext {
+    /// The defaults: no signal override, serial execution.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the whole colour-signal override.
+    pub fn with_signal(mut self, signal: ColorSignal) -> Self {
+        self.signal = signal;
+        self
+    }
+
+    /// Override the YUV sample range (`ColorRange::Unspecified` restores
+    /// "from the frame / format").
+    pub fn with_range(mut self, range: ColorRange) -> Self {
+        self.signal.range = range;
+        self
+    }
+
+    /// Override the YUV ↔ RGB matrix (`MatrixCoefficients::UNSPECIFIED`
+    /// restores "from the frame / options").
+    pub fn with_matrix(mut self, matrix: MatrixCoefficients) -> Self {
+        self.signal.matrix = matrix;
+        self
+    }
+
+    /// Set the thread budget.
+    pub fn with_execution(mut self, execution: ExecutionContext) -> Self {
+        self.execution = execution;
+        self
+    }
+
+    /// Shorthand for `with_execution(ExecutionContext::with_threads(n))`.
+    pub fn with_threads(self, threads: usize) -> Self {
+        self.with_execution(ExecutionContext::with_threads(threads))
+    }
+}
+
+/// A conversion request with its colour signal resolved (context
+/// override, then frame record, then format label / options).
+struct Resolved {
+    /// Range of the YUV side; `Unspecified` defers to each op's format
+    /// label.
+    range: ColorRange,
+    /// `(K_R, K_B)` from a signalled matrix; `None` defers to
+    /// `ConvertOptions::color_space`.
+    kr_kb: Option<(f32, f32)>,
+    execution: ExecutionContext,
+}
+
+impl Resolved {
+    /// `true` when limited range applies to a YUV side whose format
+    /// label pins `format_limited`.
+    fn limited(&self, format_limited: bool) -> bool {
+        match self.range {
+            ColorRange::Limited => true,
+            ColorRange::Full => false,
+            _ => format_limited,
+        }
+    }
+
+    /// Worker count for a picture of `h` rows: the execution budget
+    /// clamped to the number of bands worth spawning.
+    fn workers(&self, h: usize) -> usize {
+        self.execution
+            .effective_workers(h.div_ceil(planar8::MIN_BAND_ROWS))
+    }
+
+    /// The matrix weights (range still to be chosen per op).
+    fn primaries(&self, opts: &ConvertOptions) -> YuvMatrix {
+        match self.kr_kb {
+            Some((kr, kb)) => YuvMatrix {
+                kr,
+                kb,
+                limited: true,
+            },
+            None => YuvMatrix::from_color_space(opts.color_space),
+        }
+    }
+}
+
+/// `(K_R, K_B)` for an H.273 `MatrixCoefficients` code point (Table 4 of
+/// `docs/video/signal-metadata/T-REC-H.273-202407-I.pdf`): `Ok(None)`
+/// for unspecified (2), the weights for the equation 45–47 matrices this
+/// crate implements (1, 4, 5, 6, 7, 9), and `Error::Unsupported` for the
+/// rest (identity (0) is routed separately by the caller).
+fn matrix_weights(m: MatrixCoefficients) -> Result<Option<(f32, f32)>> {
+    Ok(Some(match m.code_point() {
+        2 => return Ok(None),
+        1 => (0.2126, 0.0722),
+        4 => (0.30, 0.11),
+        5 | 6 => (0.299, 0.114),
+        7 => (0.212, 0.087),
+        9 => (0.2627, 0.0593),
+        _ => {
+            return Err(Error::unsupported(format!(
+                "pixfmt: matrix coefficients {} ({}) are not implemented",
+                m.code_point(),
+                m.name().unwrap_or("reserved")
+            )))
+        }
+    }))
 }
 
 /// Return `Some(src)` when the caller's destination format already
@@ -138,6 +298,39 @@ pub fn convert(
     dst_format: PixelFormat,
     opts: &ConvertOptions,
 ) -> Result<VideoFrame> {
+    convert_with(src, src_info, dst_format, opts, &ConvertContext::default())
+}
+
+/// [`convert`] with a per-call [`ConvertContext`]: an explicit YUV
+/// sample range and a thread budget. `convert(..)` is exactly
+/// `convert_with(.., &ConvertContext::default())`.
+///
+/// # Odd dimensions
+///
+/// Subsampled layouts accept any width and height. A 4:2:0 / 4:2:2 /
+/// 4:4:0 chroma plane holds `ceil(w / wsub)` × `ceil(h / hsub)` samples
+/// — the component-dimension rule of ITU-T T.81 A.1.1
+/// (`x_i = ceil(X · H_i / H_max)`) and the geometry
+/// [`oxideav_core::PixelFormat::plane_dimensions`] reports. Decoding
+/// maps luma `(col, row)` to chroma `(col / wsub, row / hsub)`, so the
+/// trailing odd column / row reuses the last chroma sample; encoding
+/// and chroma downsampling average each chroma block's luma positions
+/// with the missing ones replicating the last column / row (equivalent
+/// to padding the picture to even dimensions by edge replication before
+/// subsampling). Even dimensions are unaffected. The staged signal
+/// texts (H.273 §8.7, the BT-series 4:2:0 definitions) define chroma
+/// sample *positions* for pictures whose luma dimensions are multiples
+/// of the subsampling factors and say nothing about a trailing partial
+/// block; replication is this crate's documented choice. `Yuv411P`
+/// keeps requiring a width that is a multiple of 4, and the packed
+/// `Yuyv422` / `Uyvy422` layouts keep requiring an even width.
+pub fn convert_with(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    dst_format: PixelFormat,
+    opts: &ConvertOptions,
+    ctx: &ConvertContext,
+) -> Result<VideoFrame> {
     if src_info.format == dst_format {
         return Ok(src.clone());
     }
@@ -146,18 +339,237 @@ pub fn convert(
     // below sees plain nominal-depth planes.
     let normalized = normalize_significant_bits(src, src_info)?;
     let src = normalized.as_ref().unwrap_or(src);
+
+    // Resolve the colour signal. A frame's record describes its own
+    // samples, so it is consulted only when the source is YUV carriage
+    // (an RGB frame tagged e.g. sRGB / identity says nothing about the
+    // YUV the caller is encoding to); the context override applies to
+    // whichever side is YUV.
+    let src_yuv = is_yuv_carriage(src_info.format);
+    let dst_yuv = is_yuv_carriage(dst_format);
+    let frame_signal = if src_yuv {
+        src.color_signal().unwrap_or_default()
+    } else {
+        ColorSignal::unspecified()
+    };
+    let signal = ctx.signal.or(frame_signal);
+    let crosses = src_yuv != dst_yuv;
+    if crosses && signal.matrix == MatrixCoefficients::IDENTITY {
+        return identity_route(src, src_info, dst_format, opts, signal.range, ctx);
+    }
+    let kr_kb = if crosses {
+        matrix_weights(signal.matrix)?
+    } else {
+        None
+    };
+    let resolved = Resolved {
+        range: signal.range,
+        kr_kb,
+        execution: ctx.execution.clone(),
+    };
+
     if let Some(op) = lookup_any(src_info.format, dst_format) {
-        return op.apply(src, src_info, opts);
+        return op.apply(src, src_info, opts, &resolved);
     }
     if let Some((first, pivot, second)) = lookup_staged(src_info.format, dst_format) {
-        let mid = first.apply(src, src_info, opts)?;
+        let mid = first.apply(src, src_info, opts, &resolved)?;
         let mid_info = FrameInfo::new(pivot, src_info.width, src_info.height);
-        return second.apply(&mid, mid_info, opts);
+        return second.apply(&mid, mid_info, opts, &resolved);
     }
     Err(Error::unsupported(format!(
         "pixfmt: conversion {:?} → {:?} not implemented",
         src_info.format, dst_format
     )))
+}
+
+/// H.273 `MatrixCoefficients == 0` (identity): the "YUV" planes carry
+/// G, B, R directly (equations 48–50: `Y = G`, `Cb = B`, `Cr = R`),
+/// with limited range scaling all three components like luma
+/// (equations 27–29) and full range using the whole code space
+/// (equations 33–35). The route relabels the planes as the planar GBR
+/// member of the same depth and alpha — the `Gbrp*` / `Gbrap*` plane
+/// order is exactly G, B, R(, A) — after bringing the source to 4:4:4
+/// and rescaling a limited-range signal to full; the encode direction
+/// mirrors it. Subsampled identity sources (legal but unusual) are
+/// upsampled nearest-neighbour like any other 4:2:0 / 4:2:2 chroma.
+fn identity_route(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    dst_format: PixelFormat,
+    opts: &ConvertOptions,
+    range: ColorRange,
+    ctx: &ConvertContext,
+) -> Result<VideoFrame> {
+    // The legs below are carriage moves / plain RGB conversions: no
+    // signal, same thread budget.
+    let plain = ConvertContext::new().with_execution(ctx.execution.clone());
+    let (w, h) = (src_info.width, src_info.height);
+    if is_yuv_carriage(src_info.format) {
+        let (f444, bits, alpha, full_label) = identity_carrier(src_info.format);
+        let mut p444 = if src_info.format == f444 {
+            src.clone()
+        } else {
+            convert_with(src, src_info, f444, opts, &plain)?
+        };
+        let limited = match range {
+            ColorRange::Limited => true,
+            ColorRange::Full => false,
+            _ => !full_label,
+        };
+        let gbr = gbr_member(bits, alpha);
+        let planes = identity_planes(
+            &mut p444, w as usize, h as usize, bits, alpha, limited, true,
+        )?;
+        let gbr_frame = make_frame(src, planes);
+        if gbr == dst_format {
+            return Ok(gbr_frame);
+        }
+        return convert_with(
+            &gbr_frame,
+            FrameInfo::new(gbr, w, h),
+            dst_format,
+            opts,
+            &plain,
+        );
+    }
+    let (f444, bits, alpha, full_label) = identity_carrier(dst_format);
+    let gbr = gbr_member(bits, alpha);
+    let mut g = if src_info.format == gbr {
+        src.clone()
+    } else {
+        convert_with(src, src_info, gbr, opts, &plain)?
+    };
+    let limited = match range {
+        ColorRange::Limited => true,
+        ColorRange::Full => false,
+        _ => !full_label,
+    };
+    let planes = identity_planes(&mut g, w as usize, h as usize, bits, alpha, limited, false)?;
+    let yuv = make_frame(src, planes);
+    if f444 == dst_format {
+        return Ok(yuv);
+    }
+    convert_with(&yuv, FrameInfo::new(f444, w, h), dst_format, opts, &plain)
+}
+
+/// The 4:4:4 carrier an identity-coded YUV format is relabelled
+/// through: `(format, bits, alpha, full_range_label)`.
+fn identity_carrier(f: PixelFormat) -> (PixelFormat, u32, bool, bool) {
+    use PixelFormat as P;
+    match f {
+        P::YuvJ420P | P::YuvJ422P | P::YuvJ444P => (P::YuvJ444P, 8, false, true),
+        _ => match planar_yuv_desc(f) {
+            Some(d) => {
+                let member = match (d.bits, d.alpha) {
+                    (8, false) => P::Yuv444P,
+                    (8, true) => P::Yuva444P,
+                    (10, false) => P::Yuv444P10Le,
+                    (10, true) => P::Yuva444P10Le,
+                    (12, false) => P::Yuv444P12Le,
+                    (12, true) => P::Yuva444P12Le,
+                    (_, false) => P::Yuv444P16Le,
+                    (_, true) => P::Yuva444P16Le,
+                };
+                (member, d.bits, d.alpha, false)
+            }
+            // Semi-planar / packed / 4:1:1 carriage: 8-bit, no alpha.
+            None => (P::Yuv444P, 8, false, false),
+        },
+    }
+}
+
+/// The planar GBR(A) member at `bits` depth.
+fn gbr_member(bits: u32, alpha: bool) -> PixelFormat {
+    use PixelFormat as P;
+    match (bits, alpha) {
+        (8, false) => P::Gbrp8,
+        (8, true) => P::Gbrap8,
+        (10, false) => P::Gbrp10Le,
+        (10, true) => P::Gbrap10Le,
+        (12, false) => P::Gbrp12Le,
+        (12, true) => P::Gbrap12Le,
+        (_, false) => P::Gbrp16Le,
+        (_, true) => P::Gbrap16Le,
+    }
+}
+
+/// Tight colour (+ alpha) planes of a 4:4:4 frame at `bits`, with the
+/// three colour planes range-moved: limited → full when `to_rgb` (the
+/// decode direction), full → limited otherwise, and untouched when
+/// `limited` is false. Alpha is copied.
+fn identity_planes(
+    frame: &mut VideoFrame,
+    w: usize,
+    h: usize,
+    bits: u32,
+    alpha: bool,
+    limited: bool,
+    to_rgb: bool,
+) -> Result<Vec<VideoPlane>> {
+    let sb = if bits > 8 { 2 } else { 1 };
+    let n = if alpha { 4 } else { 3 };
+    if frame.planes.len() < n {
+        return Err(Error::invalid(
+            "pixfmt: identity-coded frame is missing planes",
+        ));
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut data = tight_plane(&frame.planes[i], w * sb, h)?.into_owned();
+        if limited && i < 3 {
+            if to_rgb {
+                range_limited_to_full(&mut data, bits);
+            } else {
+                range_full_to_limited(&mut data, bits);
+            }
+        }
+        out.push(VideoPlane {
+            stride: w * sb,
+            data,
+        });
+    }
+    Ok(out)
+}
+
+/// Limited → full range on a luma-like plane at `bits` (H.273
+/// equations 27–29 inverted): `round((v − 16·2^(n−8)) · (2^n − 1) /
+/// (219·2^(n−8)))`, clamped. The 8-bit case is the crate's existing Q15
+/// luma rescale.
+fn range_limited_to_full(plane: &mut [u8], bits: u32) {
+    if bits <= 8 {
+        yuv::limited_to_full_luma(plane);
+        return;
+    }
+    let s = 1i64 << (bits - 8);
+    let max = (1i64 << bits) - 1;
+    let den = 219 * s;
+    for word in plane.chunks_exact_mut(2) {
+        let v = u16::from_le_bytes([word[0], word[1]]) as i64 & max;
+        let num = (v - 16 * s) * max;
+        let out = if num <= 0 {
+            0
+        } else {
+            ((num + den / 2) / den).min(max)
+        };
+        word.copy_from_slice(&(out as u16).to_le_bytes());
+    }
+}
+
+/// Full → limited range on a luma-like plane at `bits` (H.273
+/// equations 27–29): `round((219 · v / (2^n − 1) + 16) · 2^(n−8))`.
+/// The 8-bit case is the crate's existing Q15 luma rescale.
+fn range_full_to_limited(plane: &mut [u8], bits: u32) {
+    if bits <= 8 {
+        yuv::full_to_limited_luma(plane);
+        return;
+    }
+    let s = 1i64 << (bits - 8);
+    let max = (1i64 << bits) - 1;
+    for word in plane.chunks_exact_mut(2) {
+        let v = u16::from_le_bytes([word[0], word[1]]) as i64 & max;
+        let out = ((219 * s * v + 16 * s * max + max / 2) / max).min(max);
+        word.copy_from_slice(&(out as u16).to_le_bytes());
+    }
 }
 
 /// Widen an LSB-anchored `from`-bit value to `to` bits by repeating its
@@ -1880,14 +2292,23 @@ impl ConvertOp {
         src: &VideoFrame,
         src_info: FrameInfo,
         opts: &ConvertOptions,
+        ctx: &Resolved,
     ) -> Result<VideoFrame> {
-        // The plain `Yuv*` paths always use the limited-range matrix and
-        // the full-range `YuvJ*` paths always use the full-range matrix —
-        // range is a property of the pixel format, so only the primaries
-        // half of `ConvertOptions::color_space` is honoured here. The
-        // format-specific override happens in the YuvToRgb / RgbToYuv
-        // arms below via their `full_range` field.
-        let matrix = YuvMatrix::from_color_space(opts.color_space).with_range(true);
+        // The plain `Yuv*` paths use the limited-range matrix and the
+        // full-range `YuvJ*` paths the full-range matrix — range is a
+        // property of the pixel format, so only the primaries half of
+        // `ConvertOptions::color_space` is honoured here; the YuvToRgb /
+        // RgbToYuv / gray arms below carry their format's range in a
+        // `full_range` field. A resolved colour signal (context override
+        // or the source frame's record) overrides the format's range on
+        // every arm that has a YUV side, and a signalled matrix replaces
+        // the `color_space` weights on the hops that cross YUV ↔ RGB.
+        let primaries = ctx.primaries(opts);
+        // Matrix for an arm whose YUV format pins limited range.
+        let matrix = primaries.with_range(ctx.limited(true));
+        // Matrix for an arm whose YUV format pins `full_range`.
+        let ranged = |full_range: bool| primaries.with_range(ctx.limited(!full_range));
+        let workers = ctx.workers(src_info.height as usize);
         match *self {
             Self::Swizzle3 { src: sp, dst: dp } => swizzle3(src, src_info, sp, dp),
             Self::Swizzle4 { src: sp, dst: dp } => swizzle4(src, src_info, sp, dp),
@@ -1934,36 +2355,56 @@ impl ConvertOp {
                     packed_map(src, src_info, 3, 4, gray::rgb24_to_ya16le)
                 }
             }
-            Self::YuvLumaToGray { full_range } => do_yuv_luma_to_gray(src, src_info, full_range),
+            Self::YuvLumaToGray { full_range } => {
+                do_yuv_luma_to_gray(src, src_info, !ctx.limited(!full_range))
+            }
             Self::GrayToYuvPlanar {
                 wsub,
                 hsub,
                 full_range,
-            } => do_gray_to_yuv_planar(src, src_info, wsub, hsub, full_range),
-            Self::GrayToNv => do_gray_to_nv(src, src_info),
+            } => do_gray_to_yuv_planar(src, src_info, wsub, hsub, !ctx.limited(!full_range)),
+            Self::GrayToNv => do_gray_to_nv(src, src_info, !ctx.limited(true)),
             Self::YuvToRgb {
                 wsub,
                 hsub,
                 alpha,
                 full_range,
-            } => {
-                let m = matrix.with_range(!full_range);
-                do_yuv_to_rgb(src, src_info, m, wsub, hsub, alpha)
-            }
+            } => do_yuv_to_rgb(
+                src,
+                src_info,
+                ranged(full_range),
+                wsub,
+                hsub,
+                alpha,
+                workers,
+            ),
             Self::RgbToYuv {
                 wsub,
                 hsub,
                 alpha_in,
                 full_range,
-            } => {
-                let m = matrix.with_range(!full_range);
-                do_rgb_to_yuv(src, src_info, m, wsub, hsub, alpha_in)
-            }
+            } => do_rgb_to_yuv(
+                src,
+                src_info,
+                ranged(full_range),
+                wsub,
+                hsub,
+                alpha_in,
+                workers,
+            ),
             Self::RescaleRange {
                 wsub,
                 hsub,
                 to_full,
-            } => rescale_range(src, src_info, wsub, hsub, to_full),
+            } => {
+                // The source's label is limited when rescaling to full
+                // (and full otherwise); a signal that already puts the
+                // samples in the destination's range makes the move a
+                // plain copy.
+                let src_limited = ctx.limited(to_full);
+                let rescale = src_limited == to_full;
+                rescale_range(src, src_info, wsub, hsub, to_full, rescale)
+            }
             Self::ChromaResample {
                 src_wsub,
                 src_hsub,
@@ -1972,9 +2413,11 @@ impl ConvertOp {
             } => chroma_resample(src, src_info, src_wsub, src_hsub, dst_wsub, dst_hsub),
             Self::NvToYuv420p { is_nv12 } => nv_to_yuv420p(src, src_info, is_nv12),
             Self::Yuv420pToNv { is_nv12 } => yuv420p_to_nv(src, src_info, is_nv12),
-            Self::NvToRgb { is_nv12, alpha } => nv_to_rgb(src, src_info, matrix, is_nv12, alpha),
+            Self::NvToRgb { is_nv12, alpha } => {
+                nv_to_rgb(src, src_info, matrix, is_nv12, alpha, workers)
+            }
             Self::RgbToNv { is_nv12, alpha_in } => {
-                rgb_to_nv(src, src_info, matrix, is_nv12, alpha_in)
+                rgb_to_nv(src, src_info, matrix, is_nv12, alpha_in, workers)
             }
             Self::Packed422ToYuv422p { is_yuyv } => packed422_to_yuv422p(src, src_info, is_yuyv),
             Self::Yuv422pToPacked422 { is_yuyv } => yuv422p_to_packed422(src, src_info, is_yuyv),
@@ -2009,13 +2452,13 @@ impl ConvertOp {
             Self::YuvToYuva { wsub, hsub } => do_yuv_to_yuva(src, src_info, wsub, hsub),
             Self::YuvaToYuv { wsub, hsub } => do_yuva_to_yuv(src, src_info, wsub, hsub),
             Self::YuvaToRgb { wsub, hsub, alpha } => {
-                do_yuva_to_rgb(src, src_info, matrix, wsub, hsub, alpha)
+                do_yuva_to_rgb(src, src_info, matrix, wsub, hsub, alpha, workers)
             }
             Self::RgbToYuva {
                 wsub,
                 hsub,
                 alpha_in,
-            } => do_rgb_to_yuva(src, src_info, matrix, wsub, hsub, alpha_in),
+            } => do_rgb_to_yuva(src, src_info, matrix, wsub, hsub, alpha_in, workers),
             Self::YuvaChromaResample {
                 src_wsub,
                 src_hsub,
@@ -2134,13 +2577,17 @@ impl ConvertOp {
             Self::GrayToPacked422 { is_yuyv } => do_gray_to_packed422(src, src_info, is_yuyv),
             Self::PlanarFamily { src: s, dst: d } => planar_family(src, src_info, s, d),
             Self::PlanarFamilyToRgb { src: s, alpha } => {
-                planar_family_to_rgb(src, src_info, matrix, s, alpha)
+                planar_family_to_rgb(src, src_info, matrix, s, alpha, workers)
             }
             Self::RgbToPlanarFamily { dst: d, alpha_in } => {
-                rgb_to_planar_family(src, src_info, matrix, d, alpha_in)
+                rgb_to_planar_family(src, src_info, matrix, d, alpha_in, workers)
             }
-            Self::PlanarFamilyToGray { src: s } => planar_family_to_gray(src, src_info, s),
-            Self::GrayToPlanarFamily { dst: d } => gray_to_planar_family(src, src_info, d),
+            Self::PlanarFamilyToGray { src: s } => {
+                planar_family_to_gray(src, src_info, s, ctx.limited(true))
+            }
+            Self::GrayToPlanarFamily { dst: d } => {
+                gray_to_planar_family(src, src_info, d, ctx.limited(true))
+            }
             Self::FloatToFloat { src: s, dst: d } => {
                 float_to_float(src, src_info, matrix.with_range(false), s, d)
             }
@@ -2204,15 +2651,37 @@ fn packed_map(
     ))
 }
 
-fn gather_tight(src: &[u8], stride: usize, w_bytes: usize, h: usize) -> Vec<u8> {
+/// Gather a plane's `w_bytes × h` payload into a tight buffer. A plane
+/// too short for the geometry is `Error::Invalid`, never a panic — the
+/// same rules as [`tight_plane`], which the hot paths use to avoid the
+/// copy altogether.
+fn gather_tight(src: &[u8], stride: usize, w_bytes: usize, h: usize) -> Result<Vec<u8>> {
+    if h == 0 || w_bytes == 0 {
+        return Ok(Vec::new());
+    }
+    if stride < w_bytes {
+        return Err(Error::invalid(format!(
+            "pixfmt: plane stride {stride} shorter than its {w_bytes}-byte rows"
+        )));
+    }
+    let need = stride
+        .checked_mul(h - 1)
+        .and_then(|v| v.checked_add(w_bytes))
+        .ok_or_else(|| Error::invalid("pixfmt: plane geometry overflows usize"))?;
+    if src.len() < need {
+        return Err(Error::invalid(format!(
+            "pixfmt: plane holds {} bytes, geometry needs {need}",
+            src.len()
+        )));
+    }
     if stride == w_bytes {
-        return src[..w_bytes * h].to_vec();
+        return Ok(src[..need].to_vec());
     }
     let mut out = Vec::with_capacity(w_bytes * h);
     for row in 0..h {
         out.extend_from_slice(tight_row(src, stride, row, w_bytes));
     }
-    out
+    Ok(out)
 }
 
 // -------------------------------------------------------------------------
@@ -2526,7 +2995,7 @@ fn do_gray_to_mono(
     let h = src_info.height as usize;
     let in_plane = &src.planes[0];
     let packed_stride = w.div_ceil(8);
-    let src_tight = gather_tight(&in_plane.data, in_plane.stride, w, h);
+    let src_tight = gather_tight(&in_plane.data, in_plane.stride, w, h)?;
     let mut out = vec![0u8; packed_stride * h];
     gray::gray8_to_mono(&src_tight, &mut out, w, h, black_is_zero);
     Ok(make_frame(
@@ -2572,7 +3041,7 @@ fn do_rgb_to_gray(
         }
         out
     } else {
-        gather_tight(&in_plane.data, in_plane.stride, w * 3, h)
+        gather_tight(&in_plane.data, in_plane.stride, w * 3, h)?
     };
     let mut gray = vec![0u8; w * h];
     yuv::rgb24_to_gray8(&rgb24, &mut gray, w * h, matrix);
@@ -2605,16 +3074,10 @@ fn do_deep_yuv_to_rgb48(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: YUV → RGB requires dimensions divisible by chroma subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
-    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch);
-    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch);
+    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h)?;
+    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch)?;
+    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch)?;
     // Upsample chroma to 4:4:4 at 16-bit precision when subsampled.
     let (u444, v444) = match (wsub, hsub) {
         (1, 1) => (up, vp),
@@ -2656,7 +3119,7 @@ fn do_deep_yuv_to_rgb48(
             }],
         ));
     }
-    let ap = gather_tight(&src.planes[3].data, src.planes[3].stride, w * 2, h);
+    let ap = gather_tight(&src.planes[3].data, src.planes[3].stride, w * 2, h)?;
     let mut rgba = vec![0u8; w * h * 8];
     for i in 0..w * h {
         rgba[i * 8..i * 8 + 6].copy_from_slice(&rgb[i * 6..i * 6 + 6]);
@@ -2685,16 +3148,10 @@ fn do_rgb48_to_deep_yuv(
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: RGB → YUV requires dimensions divisible by chroma subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
+    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
     let comps = if alpha { 4 } else { 3 };
     let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h);
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h)?;
     // Split out a tight 3-word RGB stream (and the alpha plane).
     let (rgb, ap) = if alpha {
         let mut rgb = vec![0u8; w * h * 6];
@@ -2848,7 +3305,7 @@ fn do_packed422_to_gray(
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h)?;
     let luma_off = if is_yuyv { 0 } else { 1 };
     let mut yp: Vec<u8> = (0..w * h).map(|i| packed[i * 2 + luma_off]).collect();
     yuv::limited_to_full_luma(&mut yp);
@@ -2875,7 +3332,7 @@ fn do_gray_to_packed422(
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let in_plane = &src.planes[0];
-    let mut yp = gather_tight(&in_plane.data, in_plane.stride, w, h);
+    let mut yp = gather_tight(&in_plane.data, in_plane.stride, w, h)?;
     yuv::full_to_limited_luma(&mut yp);
     let mut out = vec![128u8; w * h * 2];
     let luma_off = if is_yuyv { 0 } else { 1 };
@@ -3019,7 +3476,7 @@ fn do_yuv_luma_to_gray(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
     if !full_range {
         yuv::limited_to_full_luma(&mut yp);
     }
@@ -3046,14 +3503,8 @@ fn do_gray_to_yuv_planar(
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: Gray8 → subsampled YUV requires dimensions divisible by the subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let (cw, ch) = chroma_grid(w, h, wsub, hsub)?;
+    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
     if !full_range {
         yuv::full_to_limited_luma(&mut yp);
     }
@@ -3079,18 +3530,14 @@ fn do_gray_to_yuv_planar(
 /// `Gray8` → NV12 / NV21: limited-range luma + one interleaved chroma
 /// plane holding the neutral code 128 in every byte — U and V are equal,
 /// so NV12 and NV21 receive identical bytes.
-fn do_gray_to_nv(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
+fn do_gray_to_nv(src: &VideoFrame, src_info: FrameInfo, full_range: bool) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 || h % 2 != 0 {
-        return Err(Error::invalid(
-            "pixfmt: Gray8 → NV12/NV21 requires even width and height",
-        ));
+    let (cw, ch) = chroma_dims(w, h, 2, 2);
+    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    if !full_range {
+        yuv::full_to_limited_luma(&mut yp);
     }
-    let cw = w / 2;
-    let ch = h / 2;
-    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    yuv::full_to_limited_luma(&mut yp);
     Ok(make_frame(
         src,
         vec![
@@ -3116,77 +3563,32 @@ fn do_yuv_to_rgb(
     wsub: usize,
     hsub: usize,
     alpha: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
-    if src.planes.len() < 3 {
-        return Err(Error::invalid("pixfmt: YUV source needs 3 planes"));
-    }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    // Subsampled-chroma layouts have no representation for a partial
-    // chroma sample, so the luma dimensions must divide evenly by the
-    // subsampling factors. Truncating (`w / wsub`) here would size the
-    // U/V planes one sample short of what the decoder reads back for the
-    // trailing odd luma column/row, indexing past the chroma plane.
-    // Reject up front (mirrors the RGB → YUV guard) instead.
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: YUV → RGB requires dimensions divisible by chroma subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
-    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
-
-    let mut rgb_buf = vec![0u8; w * h * 3];
-    match (wsub, hsub) {
-        (1, 1) => yuv::yuv444_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
-        (2, 1) => yuv::yuv422_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
-        (2, 2) => yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
-        // 4:1:1 → RGB: upsample U / V from `(w/4) × h` to `w × h` by
-        // horizontally broadcasting each chroma sample to the four luma
-        // columns it covers, then run the proven 4:4:4 → RGB path on
-        // the staged planes. Width must be a multiple of 4 — the
-        // `chroma_411_*` helpers `debug_assert!` this; the public-API
-        // guard is in `convert()`'s up-front dispatch where 4:1:1
-        // sources reject odd luma columns with `Error::Invalid`.
-        (4, 1) => {
-            if w % 4 != 0 {
-                return Err(Error::invalid(
-                    "pixfmt: 4:1:1 YUV requires width divisible by 4",
-                ));
-            }
-            let mut u444 = vec![0u8; w * h];
-            let mut v444 = vec![0u8; w * h];
-            yuv::chroma_411_to_444(&up, &mut u444, w, h);
-            yuv::chroma_411_to_444(&vp, &mut v444, w, h);
-            yuv::yuv444_to_rgb24(&yp, &u444, &v444, &mut rgb_buf, w, h, matrix);
-        }
-        _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
-    }
-
-    if !alpha {
-        return Ok(make_frame(
-            src,
-            vec![VideoPlane {
-                stride: w * 3,
-                data: rgb_buf,
-            }],
-        ));
-    }
-    let mut rgba = vec![0u8; w * h * 4];
-    for i in 0..w * h {
-        rgba[i * 4] = rgb_buf[i * 3];
-        rgba[i * 4 + 1] = rgb_buf[i * 3 + 1];
-        rgba[i * 4 + 2] = rgb_buf[i * 3 + 2];
-        rgba[i * 4 + 3] = 255;
-    }
+    let (yp, up, vp, _) = planar8_source(src, w, h, wsub, hsub, false)?;
+    let bpp = if alpha { 4 } else { 3 };
+    let out = planar8::decode(
+        &Planar8 {
+            y: &yp,
+            u: &up,
+            v: &vp,
+            a: None,
+            w,
+            h,
+            wsub,
+            hsub,
+        },
+        bpp,
+        matrix,
+        workers,
+    );
     Ok(make_frame(
         src,
         vec![VideoPlane {
-            stride: w * 4,
-            data: rgba,
+            stride: w * bpp,
+            data: out,
         }],
     ))
 }
@@ -3198,63 +3600,33 @@ fn do_rgb_to_yuv(
     wsub: usize,
     hsub: usize,
     alpha_in: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: RGB → YUV requires dimensions divisible by subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-
-    let in_plane = &src.planes[0];
-    // Project to a tight RGB24 buffer.
-    let rgb24: Vec<u8> = if alpha_in {
-        let mut out = Vec::with_capacity(w * h * 3);
-        for row in 0..h {
-            let row_bytes = w * 4;
-            let sr = tight_row(&in_plane.data, in_plane.stride, row, row_bytes);
-            for i in 0..w {
-                out.push(sr[i * 4]);
-                out.push(sr[i * 4 + 1]);
-                out.push(sr[i * 4 + 2]);
-            }
-        }
-        out
+    let (cw, _ch) = chroma_grid(w, h, wsub, hsub)?;
+    let packed = packed8_source(src, w, h, if alpha_in { 4 } else { 3 })?;
+    // 4:1:1: encode at 4:4:4 (luma byte-for-byte from R/G/B, full-
+    // resolution chroma from the same per-pixel matrix), then box-
+    // average chroma horizontally to one sample per four luma columns —
+    // what a 4:1:1 JPEG encoder produces from `cjpeg -sample 4x1`.
+    let (out_wsub, out_hsub) = if wsub == 4 { (1, 1) } else { (wsub, hsub) };
+    let enc = planar8::encode(&packed, out_wsub, out_hsub, matrix, false, workers);
+    let (up, vp) = if wsub == 4 {
+        let mut u = vec![0u8; cw * h];
+        let mut v = vec![0u8; cw * h];
+        yuv::chroma_444_to_411(&enc.u, &mut u, w, h);
+        yuv::chroma_444_to_411(&enc.v, &mut v, w, h);
+        (u, v)
     } else {
-        gather_tight(&in_plane.data, in_plane.stride, w * 3, h)
+        (enc.u, enc.v)
     };
-
-    let mut yp = vec![0u8; w * h];
-    let mut up = vec![0u8; cw * ch];
-    let mut vp = vec![0u8; cw * ch];
-    match (wsub, hsub) {
-        (1, 1) => yuv::rgb24_to_yuv444(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
-        (2, 1) => yuv::rgb24_to_yuv422(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
-        (2, 2) => yuv::rgb24_to_yuv420(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
-        // RGB → 4:1:1: encode to 4:4:4 first (luma byte-for-byte from
-        // R/G/B, full-resolution chroma from the same per-pixel
-        // R/G/B → Cb/Cr matrix), then horizontally box-average chroma
-        // down to one sample per four luma columns. Matches what a
-        // 4:1:1 JPEG encoder produces from `cjpeg -sample 4x1`.
-        (4, 1) => {
-            // Width-divisibility was already checked above (w % wsub).
-            let mut u444 = vec![0u8; w * h];
-            let mut v444 = vec![0u8; w * h];
-            yuv::rgb24_to_yuv444(&rgb24, &mut yp, &mut u444, &mut v444, w, h, matrix);
-            yuv::chroma_444_to_411(&u444, &mut up, w, h);
-            yuv::chroma_444_to_411(&v444, &mut vp, w, h);
-        }
-        _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
-    }
     Ok(make_frame(
         src,
         vec![
             VideoPlane {
                 stride: w,
-                data: yp,
+                data: enc.y,
             },
             VideoPlane {
                 stride: cw,
@@ -3268,24 +3640,92 @@ fn do_rgb_to_yuv(
     ))
 }
 
+/// Chroma plane dimensions for `w × h` under `(wsub, hsub)`, rejecting
+/// the one geometry the kernels cannot express: 4:1:1 needs a width
+/// that is a multiple of 4 (no representation for a 1-, 2- or 3-luma
+/// trailing column). Every other siting rounds up per the odd-dimension
+/// rule on [`convert_with`].
+fn chroma_grid(w: usize, h: usize, wsub: usize, hsub: usize) -> Result<(usize, usize)> {
+    if wsub == 4 && w % 4 != 0 {
+        return Err(Error::invalid(
+            "pixfmt: 4:1:1 YUV requires width divisible by 4",
+        ));
+    }
+    Ok(chroma_dims(w, h, wsub, hsub))
+}
+
+/// Borrow (or gather) the tight Y / U / V (/ A) byte planes of an 8-bit
+/// planar YUV(A) source at `w × h`.
+#[allow(clippy::type_complexity)]
+fn planar8_source<'a>(
+    src: &'a VideoFrame,
+    w: usize,
+    h: usize,
+    wsub: usize,
+    hsub: usize,
+    alpha: bool,
+) -> Result<(
+    std::borrow::Cow<'a, [u8]>,
+    std::borrow::Cow<'a, [u8]>,
+    std::borrow::Cow<'a, [u8]>,
+    Option<std::borrow::Cow<'a, [u8]>>,
+)> {
+    let need = if alpha { 4 } else { 3 };
+    if src.planes.len() < need {
+        return Err(Error::invalid(format!(
+            "pixfmt: planar YUV source needs {need} planes"
+        )));
+    }
+    let (cw, ch) = chroma_grid(w, h, wsub, hsub)?;
+    let yp = tight_plane(&src.planes[0], w, h)?;
+    let up = tight_plane(&src.planes[1], cw, ch)?;
+    let vp = tight_plane(&src.planes[2], cw, ch)?;
+    let ap = if alpha {
+        Some(tight_plane(&src.planes[3], w, h)?)
+    } else {
+        None
+    };
+    Ok((yp, up, vp, ap))
+}
+
+/// Describe a packed 8-bit RGB(A) source plane for the row-band
+/// encoder, validating its length.
+fn packed8_source(src: &VideoFrame, w: usize, h: usize, bpp: usize) -> Result<Packed8<'_>> {
+    let Some(plane) = src.planes.first() else {
+        return Err(Error::invalid("pixfmt: packed RGB source needs a plane"));
+    };
+    // Validate through the tight-plane rules (stride / length), but hand
+    // the engine the stride-aware view so no gather copy is made.
+    let _ = tight_plane(plane, w * bpp, h)?;
+    Ok(Packed8 {
+        data: &plane.data,
+        stride: plane.stride,
+        bpp,
+        w,
+        h,
+    })
+}
+
 fn rescale_range(
     src: &VideoFrame,
     src_info: FrameInfo,
     wsub: usize,
     hsub: usize,
     to_full: bool,
+    rescale: bool,
 ) -> Result<VideoFrame> {
     if src.planes.len() < 3 {
         return Err(Error::invalid("pixfmt: YuvJ source needs 3 planes"));
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let cw = w / wsub;
-    let ch = h / hsub;
-    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let mut up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
-    let mut vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
-    if to_full {
+    let (cw, ch) = chroma_grid(w, h, wsub, hsub)?;
+    let mut yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    let mut up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch)?;
+    let mut vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch)?;
+    if !rescale {
+        // Samples already in the destination's range: carriage copy.
+    } else if to_full {
         yuv::limited_to_full_luma(&mut yp);
         yuv::limited_to_full_chroma(&mut up);
         yuv::limited_to_full_chroma(&mut vp);
@@ -3339,29 +3779,19 @@ fn chroma_resample(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    // The dimension constraint is the LCM of the two layouts' chroma
-    // grids — both src and dst need to express their U/V planes
-    // tightly, so width must be a multiple of `max(src_wsub, dst_wsub)`
-    // and height a multiple of `max(src_hsub, dst_hsub)`.
-    let wsub_max = src_wsub.max(dst_wsub);
-    let hsub_max = src_hsub.max(dst_hsub);
-    if w % wsub_max != 0 || h % hsub_max != 0 {
-        return Err(Error::invalid(
-            "pixfmt: planar YUV chroma resample needs dimensions divisible by the wider subsampling",
-        ));
-    }
-    let src_cw = w / src_wsub;
-    let src_ch = h / src_hsub;
-    let dst_cw = w / dst_wsub;
+    // Both chroma grids round up per the odd-dimension rule; only the
+    // 4:1:1 grid pins the width (multiple of 4).
+    let (src_cw, src_ch) = chroma_grid(w, h, src_wsub, src_hsub)?;
+    let (dst_cw, _) = chroma_grid(w, h, dst_wsub, dst_hsub)?;
 
     // Luma plane: byte-for-byte copy (gather_tight already drops stride
     // padding).
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
     // Chroma planes: gather then route through the appropriate
     // resampler. `u_src` and `v_src` are independent so the helper is
     // invoked twice with identical parameters.
-    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, src_cw, src_ch);
-    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, src_cw, src_ch);
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, src_cw, src_ch)?;
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, src_cw, src_ch)?;
     let (u_dst, v_dst) =
         resample_chroma_pair(&u_src, &v_src, w, h, src_wsub, src_hsub, dst_wsub, dst_hsub)?;
 
@@ -3399,8 +3829,7 @@ fn resample_chroma_pair(
     dst_wsub: usize,
     dst_hsub: usize,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let dst_cw = w / dst_wsub;
-    let dst_ch = h / dst_hsub;
+    let (dst_cw, dst_ch) = chroma_dims(w, h, dst_wsub, dst_hsub);
     let mut u_dst = vec![0u8; dst_cw * dst_ch];
     let mut v_dst = vec![0u8; dst_cw * dst_ch];
 
@@ -3528,21 +3957,13 @@ fn yuva_chroma_resample(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let wsub_max = src_wsub.max(dst_wsub);
-    let hsub_max = src_hsub.max(dst_hsub);
-    if w % wsub_max != 0 || h % hsub_max != 0 {
-        return Err(Error::invalid(
-            "pixfmt: Yuva chroma resample needs dimensions divisible by the wider subsampling",
-        ));
-    }
-    let src_cw = w / src_wsub;
-    let src_ch = h / src_hsub;
-    let dst_cw = w / dst_wsub;
+    let (src_cw, src_ch) = chroma_grid(w, h, src_wsub, src_hsub)?;
+    let (dst_cw, _) = chroma_grid(w, h, dst_wsub, dst_hsub)?;
 
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, src_cw, src_ch);
-    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, src_cw, src_ch);
-    let ap = gather_tight(&src.planes[3].data, src.planes[3].stride, w, h);
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, src_cw, src_ch)?;
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, src_cw, src_ch)?;
+    let ap = gather_tight(&src.planes[3].data, src.planes[3].stride, w, h)?;
     let (u_dst, v_dst) =
         resample_chroma_pair(&u_src, &v_src, w, h, src_wsub, src_hsub, dst_wsub, dst_hsub)?;
 
@@ -3588,31 +4009,23 @@ fn chroma_resample16(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let wsub_max = src_wsub.max(dst_wsub);
-    let hsub_max = src_hsub.max(dst_hsub);
-    if w % wsub_max != 0 || h % hsub_max != 0 {
-        return Err(Error::invalid(
-            "pixfmt: planar YUV chroma resample needs dimensions divisible by the wider subsampling",
-        ));
-    }
-    let src_cw = w / src_wsub;
-    let src_ch = h / src_hsub;
-    let dst_cw = w / dst_wsub;
+    let (src_cw, src_ch) = chroma_dims(w, h, src_wsub, src_hsub);
+    let (dst_cw, _) = chroma_dims(w, h, dst_wsub, dst_hsub);
 
     // All planes are 16-bit LE: two bytes per sample.
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h)?;
     let u_src = gather_tight(
         &src.planes[1].data,
         src.planes[1].stride,
         src_cw * 2,
         src_ch,
-    );
+    )?;
     let v_src = gather_tight(
         &src.planes[2].data,
         src.planes[2].stride,
         src_cw * 2,
         src_ch,
-    );
+    )?;
     let (u_dst, v_dst) =
         resample_chroma16_pair(&u_src, &v_src, w, h, src_wsub, src_hsub, dst_wsub, dst_hsub)?;
 
@@ -3651,8 +4064,7 @@ fn resample_chroma16_pair(
     dst_wsub: usize,
     dst_hsub: usize,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let dst_cw = w / dst_wsub;
-    let dst_ch = h / dst_hsub;
+    let (dst_cw, dst_ch) = chroma_dims(w, h, dst_wsub, dst_hsub);
     let mut u_dst = vec![0u8; dst_cw * dst_ch * 2];
     let mut v_dst = vec![0u8; dst_cw * dst_ch * 2];
 
@@ -3824,23 +4236,14 @@ fn planar_family(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let wsub_max = s.wsub.max(d.wsub);
-    let hsub_max = s.hsub.max(d.hsub);
-    if w % wsub_max != 0 || h % hsub_max != 0 {
-        return Err(Error::invalid(
-            "pixfmt: planar YUV(A) conversion needs dimensions divisible by the wider subsampling",
-        ));
-    }
-    let scw = w / s.wsub;
-    let sch = h / s.hsub;
-    let dcw = w / d.wsub;
-    let dch = h / d.hsub;
+    let (scw, sch) = chroma_dims(w, h, s.wsub, s.hsub);
+    let (dcw, dch) = chroma_dims(w, h, d.wsub, d.hsub);
     let sb_src = s.sample_bytes();
     let sb_dst = d.sample_bytes();
 
-    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb_src, h);
-    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, scw * sb_src, sch);
-    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, scw * sb_src, sch);
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb_src, h)?;
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, scw * sb_src, sch)?;
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, scw * sb_src, sch)?;
 
     // Luma: straight depth move, never resampled.
     let yp = plane_to_depth(&y_src, w * h, s.bits, d.bits);
@@ -3880,7 +4283,7 @@ fn planar_family(
     ];
     if d.alpha {
         let ap = if s.alpha {
-            let a_src = gather_tight(&src.planes[3].data, src.planes[3].stride, w * sb_src, h);
+            let a_src = gather_tight(&src.planes[3].data, src.planes[3].stride, w * sb_src, h)?;
             plane_to_depth(&a_src, w * h, s.bits, d.bits)
         } else {
             opaque_plane(w * h, d.bits)
@@ -3904,6 +4307,7 @@ fn planar_family_to_rgb(
     matrix: YuvMatrix,
     s: PlanarYuv,
     alpha: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
     let need = if s.alpha { 4 } else { 3 };
     if src.planes.len() < need {
@@ -3913,68 +4317,59 @@ fn planar_family_to_rgb(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % s.wsub != 0 || h % s.hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: YUV → RGB requires dimensions divisible by chroma subsampling",
-        ));
-    }
-    let cw = w / s.wsub;
-    let ch = h / s.hsub;
+    let (cw, ch) = chroma_dims(w, h, s.wsub, s.hsub);
     let sb = s.sample_bytes();
-    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
-    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * sb, ch);
-    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * sb, ch);
-    let yp = plane_to_depth(&y_src, w * h, s.bits, 8);
-    let up = plane_to_depth(&u_src, cw * ch, s.bits, 8);
-    let vp = plane_to_depth(&v_src, cw * ch, s.bits, 8);
-
-    let mut rgb_buf = vec![0u8; w * h * 3];
-    match (s.wsub, s.hsub) {
-        (1, 1) => yuv::yuv444_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
-        (2, 1) => yuv::yuv422_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
-        (2, 2) => yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
-        // 4:4:0: broadcast each chroma row to its two luma rows, then
-        // decode as 4:4:4 (the same nearest-neighbour policy the 4:2:0
-        // kernel applies vertically).
-        (1, 2) => {
-            let mut u444 = vec![0u8; w * h];
-            let mut v444 = vec![0u8; w * h];
-            yuv::chroma_440_to_444(&up, &mut u444, w, h);
-            yuv::chroma_440_to_444(&vp, &mut v444, w, h);
-            yuv::yuv444_to_rgb24(&yp, &u444, &v444, &mut rgb_buf, w, h, matrix)
-        }
-        _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
-    }
-
-    if !alpha {
-        return Ok(make_frame(
-            src,
-            vec![VideoPlane {
-                stride: w * 3,
-                data: rgb_buf,
-            }],
-        ));
-    }
-    let ap = if s.alpha {
-        let a_src = gather_tight(&src.planes[3].data, src.planes[3].stride, w * sb, h);
-        plane_to_depth(&a_src, w * h, s.bits, 8)
+    let y_src = tight_plane(&src.planes[0], w * sb, h)?;
+    let u_src = tight_plane(&src.planes[1], cw * sb, ch)?;
+    let v_src = tight_plane(&src.planes[2], cw * sb, ch)?;
+    // Deep planes are narrowed to bytes (crate depth policy); 8-bit
+    // planes are borrowed as they are.
+    let yp = plane_to_depth_cow(y_src, w * h, s.bits);
+    let up = plane_to_depth_cow(u_src, cw * ch, s.bits);
+    let vp = plane_to_depth_cow(v_src, cw * ch, s.bits);
+    let ap = if alpha && s.alpha {
+        let a_src = tight_plane(&src.planes[3], w * sb, h)?;
+        Some(plane_to_depth_cow(a_src, w * h, s.bits))
     } else {
-        vec![255u8; w * h]
+        None
     };
-    let mut rgba = vec![0u8; w * h * 4];
-    for i in 0..w * h {
-        rgba[i * 4] = rgb_buf[i * 3];
-        rgba[i * 4 + 1] = rgb_buf[i * 3 + 1];
-        rgba[i * 4 + 2] = rgb_buf[i * 3 + 2];
-        rgba[i * 4 + 3] = ap[i];
-    }
+    let bpp = if alpha { 4 } else { 3 };
+    let out = planar8::decode(
+        &Planar8 {
+            y: &yp,
+            u: &up,
+            v: &vp,
+            a: ap.as_deref(),
+            w,
+            h,
+            wsub: s.wsub,
+            hsub: s.hsub,
+        },
+        bpp,
+        matrix,
+        workers,
+    );
     Ok(make_frame(
         src,
         vec![VideoPlane {
-            stride: w * 4,
-            data: rgba,
+            stride: w * bpp,
+            data: out,
         }],
     ))
+}
+
+/// [`plane_to_depth`] to 8 bits, without copying a plane that is
+/// already byte storage.
+fn plane_to_depth_cow(
+    src: std::borrow::Cow<'_, [u8]>,
+    count: usize,
+    src_bits: u32,
+) -> std::borrow::Cow<'_, [u8]> {
+    if src_bits > 8 {
+        std::borrow::Cow::Owned(plane_to_depth(&src, count, src_bits, 8))
+    } else {
+        src
+    }
 }
 
 /// Computed `RgbToPlanarFamily` op: `Rgb24` / `Rgba` → family member.
@@ -3989,59 +4384,35 @@ fn rgb_to_planar_family(
     matrix: YuvMatrix,
     d: PlanarYuv,
     alpha_in: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % d.wsub != 0 || h % d.hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: RGB → YUV requires dimensions divisible by subsampling",
-        ));
-    }
-    let cw = w / d.wsub;
-    let ch = h / d.hsub;
     let sb = d.sample_bytes();
-
-    let in_plane = &src.planes[0];
-    let mut rgb24: Vec<u8> = Vec::with_capacity(w * h * 3);
-    let mut alpha8: Vec<u8> = Vec::new();
-    if alpha_in {
-        alpha8 = vec![0xFF; w * h];
-        for row in 0..h {
-            let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
-            for i in 0..w {
-                rgb24.push(sr[i * 4]);
-                rgb24.push(sr[i * 4 + 1]);
-                rgb24.push(sr[i * 4 + 2]);
-                alpha8[row * w + i] = sr[i * 4 + 3];
-            }
-        }
+    let packed = packed8_source(src, w, h, if alpha_in { 4 } else { 3 })?;
+    // 4:4:0: encode at 4:4:4, then vertical pair-average the chroma
+    // (rounded to nearest, like the 4:2:2 → 4:2:0 step).
+    let (enc_wsub, enc_hsub) = if (d.wsub, d.hsub) == (1, 2) {
+        (1, 1)
     } else {
-        rgb24 = gather_tight(&in_plane.data, in_plane.stride, w * 3, h);
-    }
-
-    let mut yp8 = vec![0u8; w * h];
-    let mut up8 = vec![0u8; cw * ch];
-    let mut vp8 = vec![0u8; cw * ch];
-    match (d.wsub, d.hsub) {
-        (1, 1) => yuv::rgb24_to_yuv444(&rgb24, &mut yp8, &mut up8, &mut vp8, w, h, matrix),
-        (2, 1) => yuv::rgb24_to_yuv422(&rgb24, &mut yp8, &mut up8, &mut vp8, w, h, matrix),
-        (2, 2) => yuv::rgb24_to_yuv420(&rgb24, &mut yp8, &mut up8, &mut vp8, w, h, matrix),
-        // 4:4:0: encode at 4:4:4, then vertical pair-average the chroma
-        // (rounded to nearest, like the 4:2:2 → 4:2:0 step).
-        (1, 2) => {
-            let mut u444 = vec![0u8; w * h];
-            let mut v444 = vec![0u8; w * h];
-            yuv::rgb24_to_yuv444(&rgb24, &mut yp8, &mut u444, &mut v444, w, h, matrix);
-            yuv::chroma_444_to_440(&u444, &mut up8, w, h);
-            yuv::chroma_444_to_440(&v444, &mut vp8, w, h);
-        }
-        _ => return Err(Error::unsupported("pixfmt: unsupported YUV subsampling")),
-    }
+        (d.wsub, d.hsub)
+    };
+    let enc = planar8::encode(&packed, enc_wsub, enc_hsub, matrix, d.alpha, workers);
+    let (cw, ch) = chroma_dims(w, h, d.wsub, d.hsub);
+    let (up8, vp8) = if (d.wsub, d.hsub) == (1, 2) {
+        let mut u = vec![0u8; cw * ch];
+        let mut v = vec![0u8; cw * ch];
+        yuv::chroma_444_to_440(&enc.u, &mut u, w, h);
+        yuv::chroma_444_to_440(&enc.v, &mut v, w, h);
+        (u, v)
+    } else {
+        (enc.u, enc.v)
+    };
 
     let mut planes = vec![
         VideoPlane {
             stride: w * sb,
-            data: plane_to_depth(&yp8, w * h, 8, d.bits),
+            data: plane_to_depth(&enc.y, w * h, 8, d.bits),
         },
         VideoPlane {
             stride: cw * sb,
@@ -4053,10 +4424,9 @@ fn rgb_to_planar_family(
         },
     ];
     if d.alpha {
-        let ap = if alpha_in {
-            plane_to_depth(&alpha8, w * h, 8, d.bits)
-        } else {
-            opaque_plane(w * h, d.bits)
+        let ap = match enc.a {
+            Some(alpha8) => plane_to_depth(&alpha8, w * h, 8, d.bits),
+            None => opaque_plane(w * h, d.bits),
         };
         planes.push(VideoPlane {
             stride: w * sb,
@@ -4075,6 +4445,7 @@ fn planar_family_to_gray(
     src: &VideoFrame,
     src_info: FrameInfo,
     s: PlanarYuv,
+    limited: bool,
 ) -> Result<VideoFrame> {
     if src.planes.is_empty() {
         return Err(Error::invalid("pixfmt: YUV source needs a luma plane"));
@@ -4082,9 +4453,11 @@ fn planar_family_to_gray(
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let sb = s.sample_bytes();
-    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h)?;
     let mut yp = plane_to_depth(&y_src, w * h, s.bits, 8);
-    yuv::limited_to_full_luma(&mut yp);
+    if limited {
+        yuv::limited_to_full_luma(&mut yp);
+    }
     Ok(make_frame(
         src,
         vec![VideoPlane {
@@ -4103,19 +4476,16 @@ fn gray_to_planar_family(
     src: &VideoFrame,
     src_info: FrameInfo,
     d: PlanarYuv,
+    limited: bool,
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % d.wsub != 0 || h % d.hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: Gray8 → subsampled YUV requires dimensions divisible by the subsampling",
-        ));
-    }
-    let cw = w / d.wsub;
-    let ch = h / d.hsub;
+    let (cw, ch) = chroma_dims(w, h, d.wsub, d.hsub);
     let sb = d.sample_bytes();
-    let mut luma8 = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    yuv::full_to_limited_luma(&mut luma8);
+    let mut luma8 = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    if limited {
+        yuv::full_to_limited_luma(&mut luma8);
+    }
     let mut planes = vec![
         VideoPlane {
             stride: w * sb,
@@ -4158,17 +4528,11 @@ fn do_yuv_depth_down(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: YUV bit-depth conversion needs dimensions divisible by the subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
+    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
     // Source planes are 16-bit LE: each sample is two bytes wide.
-    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
-    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch);
-    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch);
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h)?;
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch)?;
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch)?;
     let mut yp = vec![0u8; w * h];
     let mut up = vec![0u8; cw * ch];
     let mut vp = vec![0u8; cw * ch];
@@ -4212,16 +4576,10 @@ fn do_yuv_depth_up(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: YUV bit-depth conversion needs dimensions divisible by the subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
-    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
+    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch)?;
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch)?;
     let mut yp = vec![0u8; w * h * 2];
     let mut up = vec![0u8; cw * ch * 2];
     let mut vp = vec![0u8; cw * ch * 2];
@@ -4265,16 +4623,10 @@ fn do_yuv_depth_rescale(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: YUV bit-depth conversion needs dimensions divisible by the subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
-    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch);
-    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch);
+    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
+    let y_src = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h)?;
+    let u_src = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch)?;
+    let v_src = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch)?;
     let mut yp = vec![0u8; w * h * 2];
     let mut up = vec![0u8; cw * ch * 2];
     let mut vp = vec![0u8; cw * ch * 2];
@@ -4308,7 +4660,7 @@ fn do_gray_depth_down8(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Resu
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let in_plane = &src.planes[0];
-    let tight = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let tight = gather_tight(&in_plane.data, in_plane.stride, w * 2, h)?;
     let mut out = vec![0u8; w * h];
     yuv::depth_down_le16_plane(&tight, &mut out, w * h, bits);
     Ok(make_frame(
@@ -4326,7 +4678,7 @@ fn do_gray_depth_up8(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Result
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let in_plane = &src.planes[0];
-    let tight = gather_tight(&in_plane.data, in_plane.stride, w, h);
+    let tight = gather_tight(&in_plane.data, in_plane.stride, w, h)?;
     let mut out = vec![0u8; w * h * 2];
     yuv::depth_up_8_to_le16_plane(&tight, &mut out, w * h, bits);
     Ok(make_frame(
@@ -4348,7 +4700,7 @@ fn do_gray_depth_rescale(
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let in_plane = &src.planes[0];
-    let tight = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let tight = gather_tight(&in_plane.data, in_plane.stride, w * 2, h)?;
     let mut out = vec![0u8; w * h * 2];
     yuv::depth_rescale_le16_plane(&tight, &mut out, w * h, src_bits, dst_bits);
     Ok(make_frame(
@@ -4361,28 +4713,16 @@ fn do_gray_depth_rescale(
 }
 
 fn nv_to_yuv420p(src: &VideoFrame, src_info: FrameInfo, is_nv12: bool) -> Result<VideoFrame> {
-    if src.planes.len() < 2 {
-        return Err(Error::invalid("pixfmt: NV source needs 2 planes"));
-    }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let uv = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch);
-    let mut up = vec![0u8; cw * ch];
-    let mut vp = vec![0u8; cw * ch];
-    if is_nv12 {
-        yuv::nv12_uv_split(&uv, &mut up, &mut vp, cw, ch);
-    } else {
-        yuv::nv21_vu_split(&uv, &mut up, &mut vp, cw, ch);
-    }
+    let (yp, up, vp) = nv_source(src, w, h, is_nv12)?;
+    let cw = w.div_ceil(2);
     Ok(make_frame(
         src,
         vec![
             VideoPlane {
                 stride: w,
-                data: yp,
+                data: yp.into_owned(),
             },
             VideoPlane {
                 stride: cw,
@@ -4397,16 +4737,10 @@ fn nv_to_yuv420p(src: &VideoFrame, src_info: FrameInfo, is_nv12: bool) -> Result
 }
 
 fn yuv420p_to_nv(src: &VideoFrame, src_info: FrameInfo, is_nv12: bool) -> Result<VideoFrame> {
-    if src.planes.len() < 3 {
-        return Err(Error::invalid("pixfmt: Yuv420P source needs 3 planes"));
-    }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
-    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
+    let (yp, up, vp, _) = planar8_source(src, w, h, 2, 2, false)?;
+    let (cw, ch) = chroma_dims(w, h, 2, 2);
     let mut uv = vec![0u8; cw * ch * 2];
     if is_nv12 {
         yuv::nv12_uv_merge(&up, &vp, &mut uv, cw, ch);
@@ -4418,7 +4752,7 @@ fn yuv420p_to_nv(src: &VideoFrame, src_info: FrameInfo, is_nv12: bool) -> Result
         vec![
             VideoPlane {
                 stride: w,
-                data: yp,
+                data: yp.into_owned(),
             },
             VideoPlane {
                 stride: cw * 2,
@@ -4441,21 +4775,51 @@ fn nv_to_rgb(
     matrix: YuvMatrix,
     is_nv12: bool,
     alpha: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let (yp, up, vp) = nv_source(src, w, h, is_nv12)?;
+    let bpp = if alpha { 4 } else { 3 };
+    let out = planar8::decode(
+        &Planar8 {
+            y: &yp,
+            u: &up,
+            v: &vp,
+            a: None,
+            w,
+            h,
+            wsub: 2,
+            hsub: 2,
+        },
+        bpp,
+        matrix,
+        workers,
+    );
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * bpp,
+            data: out,
+        }],
+    ))
+}
+
+/// Tight luma plane plus the interleaved chroma plane of an NV12 / NV21
+/// source split into U and V planes (`ceil(w / 2)` × `ceil(h / 2)`).
+#[allow(clippy::type_complexity)]
+fn nv_source(
+    src: &VideoFrame,
+    w: usize,
+    h: usize,
+    is_nv12: bool,
+) -> Result<(std::borrow::Cow<'_, [u8]>, Vec<u8>, Vec<u8>)> {
     if src.planes.len() < 2 {
         return Err(Error::invalid("pixfmt: NV source needs 2 planes"));
     }
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    if w % 2 != 0 || h % 2 != 0 {
-        return Err(Error::invalid(
-            "pixfmt: NV12/NV21 requires even width and height",
-        ));
-    }
-    let cw = w / 2;
-    let ch = h / 2;
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let uv = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch);
+    let (cw, ch) = chroma_dims(w, h, 2, 2);
+    let yp = tight_plane(&src.planes[0], w, h)?;
+    let uv = tight_plane(&src.planes[1], cw * 2, ch)?;
     let mut up = vec![0u8; cw * ch];
     let mut vp = vec![0u8; cw * ch];
     if is_nv12 {
@@ -4463,31 +4827,7 @@ fn nv_to_rgb(
     } else {
         yuv::nv21_vu_split(&uv, &mut up, &mut vp, cw, ch);
     }
-    let mut rgb_buf = vec![0u8; w * h * 3];
-    yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix);
-    if !alpha {
-        return Ok(make_frame(
-            src,
-            vec![VideoPlane {
-                stride: w * 3,
-                data: rgb_buf,
-            }],
-        ));
-    }
-    let mut rgba = vec![0u8; w * h * 4];
-    for i in 0..w * h {
-        rgba[i * 4] = rgb_buf[i * 3];
-        rgba[i * 4 + 1] = rgb_buf[i * 3 + 1];
-        rgba[i * 4 + 2] = rgb_buf[i * 3 + 2];
-        rgba[i * 4 + 3] = 255;
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * 4,
-            data: rgba,
-        }],
-    ))
+    Ok((yp, up, vp))
 }
 
 /// Packed RGB → NV12 / NV21. Reuses the planar 4:2:0 encoder, then
@@ -4498,48 +4838,25 @@ fn rgb_to_nv(
     matrix: YuvMatrix,
     is_nv12: bool,
     alpha_in: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 || h % 2 != 0 {
-        return Err(Error::invalid(
-            "pixfmt: NV12/NV21 requires even width and height",
-        ));
-    }
-    let cw = w / 2;
-    let ch = h / 2;
-    let in_plane = &src.planes[0];
-    let rgb24: Vec<u8> = if alpha_in {
-        let mut out = Vec::with_capacity(w * h * 3);
-        for row in 0..h {
-            let row_bytes = w * 4;
-            let sr = tight_row(&in_plane.data, in_plane.stride, row, row_bytes);
-            for i in 0..w {
-                out.push(sr[i * 4]);
-                out.push(sr[i * 4 + 1]);
-                out.push(sr[i * 4 + 2]);
-            }
-        }
-        out
-    } else {
-        gather_tight(&in_plane.data, in_plane.stride, w * 3, h)
-    };
-    let mut yp = vec![0u8; w * h];
-    let mut up = vec![0u8; cw * ch];
-    let mut vp = vec![0u8; cw * ch];
-    yuv::rgb24_to_yuv420(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix);
+    let packed = packed8_source(src, w, h, if alpha_in { 4 } else { 3 })?;
+    let enc = planar8::encode(&packed, 2, 2, matrix, false, workers);
+    let (cw, ch) = (enc.cw, enc.ch);
     let mut uv = vec![0u8; cw * ch * 2];
     if is_nv12 {
-        yuv::nv12_uv_merge(&up, &vp, &mut uv, cw, ch);
+        yuv::nv12_uv_merge(&enc.u, &enc.v, &mut uv, cw, ch);
     } else {
-        yuv::nv21_vu_merge(&up, &vp, &mut uv, cw, ch);
+        yuv::nv21_vu_merge(&enc.u, &enc.v, &mut uv, cw, ch);
     }
     Ok(make_frame(
         src,
         vec![
             VideoPlane {
                 stride: w,
-                data: yp,
+                data: enc.y,
             },
             VideoPlane {
                 stride: cw * 2,
@@ -4568,7 +4885,7 @@ fn packed422_to_yuv422p(
     }
     let cw = w / 2;
     let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h)?;
     let mut yp = vec![0u8; w * h];
     let mut up = vec![0u8; cw * h];
     let mut vp = vec![0u8; cw * h];
@@ -4610,9 +4927,9 @@ fn yuv422p_to_packed422(
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let cw = w / 2;
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, h);
-    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, h);
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, h)?;
+    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, h)?;
     let mut packed = vec![0u8; w * h * 2];
     if is_yuyv {
         yuv::yuv422p_to_yuyv422(&yp, &up, &vp, &mut packed, w, h);
@@ -4635,7 +4952,7 @@ fn packed422_swap(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let in_plane = &src.planes[0];
-    let mut packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let mut packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h)?;
     yuv::yuyv_uyvy_swap(&mut packed);
     Ok(make_frame(
         src,
@@ -4660,7 +4977,7 @@ fn packed422_to_rgb(
     }
     let cw = w / 2;
     let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h);
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * 2, h)?;
     // Reuse the planar 4:2:2 → RGB path: deinterleave first, then go
     // through the proven scalar/SIMD planar decoder.
     let mut yp = vec![0u8; w * h];
@@ -4727,7 +5044,7 @@ fn rgb_to_packed422(
         }
         out
     } else {
-        gather_tight(&in_plane.data, in_plane.stride, w * 3, h)
+        gather_tight(&in_plane.data, in_plane.stride, w * 3, h)?
     };
     let mut yp = vec![0u8; w * h];
     let mut up = vec![0u8; cw * h];
@@ -4834,10 +5151,10 @@ fn rgb_to_pal8(
     let in_plane = &src.planes[0];
     let mut out = vec![0u8; w * h];
     if alpha_in {
-        let tight = gather_tight(&in_plane.data, in_plane.stride, w * 4, h);
+        let tight = gather_tight(&in_plane.data, in_plane.stride, w * 4, h)?;
         pal8::quantise_rgba_to_pal8(&tight, &mut out, w, h, palette, opts.dither);
     } else {
-        let tight = gather_tight(&in_plane.data, in_plane.stride, w * 3, h);
+        let tight = gather_tight(&in_plane.data, in_plane.stride, w * 3, h)?;
         pal8::quantise_rgb24_to_pal8(&tight, &mut out, w, h, palette, opts.dither);
     }
     // Attach the table that was actually used so the frame carries its
@@ -4887,16 +5204,10 @@ fn do_yuv_to_yuva(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: YUV → YUVA requires dimensions divisible by the chroma subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
-    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
+    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch)?;
+    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch)?;
     let ap = vec![0xFFu8; w * h];
     Ok(make_frame(
         src,
@@ -4936,16 +5247,10 @@ fn do_yuva_to_yuv(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: YUVA → YUV requires dimensions divisible by the chroma subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
-    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
+    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
+    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch)?;
+    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch)?;
     Ok(make_frame(
         src,
         vec![
@@ -4977,58 +5282,32 @@ fn do_yuva_to_rgb(
     wsub: usize,
     hsub: usize,
     alpha: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
-    if src.planes.len() < 4 {
-        return Err(Error::invalid(
-            "pixfmt: Yuva source needs 4 planes (Y, U, V, A)",
-        ));
-    }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: YUVA → RGB requires dimensions divisible by the chroma subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw, ch);
-    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw, ch);
-
-    let mut rgb_buf = vec![0u8; w * h * 3];
-    match (wsub, hsub) {
-        (1, 1) => yuv::yuv444_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
-        (2, 1) => yuv::yuv422_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
-        (2, 2) => yuv::yuv420_to_rgb24(&yp, &up, &vp, &mut rgb_buf, w, h, matrix),
-        _ => return Err(Error::unsupported("pixfmt: unsupported YUVA subsampling")),
-    }
-
-    if !alpha {
-        return Ok(make_frame(
-            src,
-            vec![VideoPlane {
-                stride: w * 3,
-                data: rgb_buf,
-            }],
-        ));
-    }
-
-    // Gather the alpha plane at luma resolution, then interleave into
-    // the RGBA destination at the fourth byte of each pixel.
-    let ap = gather_tight(&src.planes[3].data, src.planes[3].stride, w, h);
-    let mut rgba = vec![0u8; w * h * 4];
-    for i in 0..w * h {
-        rgba[i * 4] = rgb_buf[i * 3];
-        rgba[i * 4 + 1] = rgb_buf[i * 3 + 1];
-        rgba[i * 4 + 2] = rgb_buf[i * 3 + 2];
-        rgba[i * 4 + 3] = ap[i];
-    }
+    let (yp, up, vp, ap) = planar8_source(src, w, h, wsub, hsub, true)?;
+    let bpp = if alpha { 4 } else { 3 };
+    let out = planar8::decode(
+        &Planar8 {
+            y: &yp,
+            u: &up,
+            v: &vp,
+            a: ap.as_deref(),
+            w,
+            h,
+            wsub,
+            hsub,
+        },
+        bpp,
+        matrix,
+        workers,
+    );
     Ok(make_frame(
         src,
         vec![VideoPlane {
-            stride: w * 4,
-            data: rgba,
+            stride: w * bpp,
+            data: out,
         }],
     ))
 }
@@ -5045,60 +5324,28 @@ fn do_rgb_to_yuva(
     wsub: usize,
     hsub: usize,
     alpha_in: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % wsub != 0 || h % hsub != 0 {
-        return Err(Error::invalid(
-            "pixfmt: RGB → YUVA requires dimensions divisible by the chroma subsampling",
-        ));
-    }
-    let cw = w / wsub;
-    let ch = h / hsub;
-
-    let in_plane = &src.planes[0];
-    // Tight RGB24 + alpha plane (full resolution; opaque if input is Rgb24).
-    let mut rgb24: Vec<u8> = Vec::with_capacity(w * h * 3);
-    let mut ap: Vec<u8> = vec![0xFFu8; w * h];
-    if alpha_in {
-        for row in 0..h {
-            let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
-            for i in 0..w {
-                rgb24.push(sr[i * 4]);
-                rgb24.push(sr[i * 4 + 1]);
-                rgb24.push(sr[i * 4 + 2]);
-                ap[row * w + i] = sr[i * 4 + 3];
-            }
-        }
-    } else {
-        rgb24 = gather_tight(&in_plane.data, in_plane.stride, w * 3, h);
-        // ap stays opaque (all 0xFF).
-    }
-
-    let mut yp = vec![0u8; w * h];
-    let mut up = vec![0u8; cw * ch];
-    let mut vp = vec![0u8; cw * ch];
-    match (wsub, hsub) {
-        (1, 1) => yuv::rgb24_to_yuv444(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
-        (2, 1) => yuv::rgb24_to_yuv422(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
-        (2, 2) => yuv::rgb24_to_yuv420(&rgb24, &mut yp, &mut up, &mut vp, w, h, matrix),
-        _ => return Err(Error::unsupported("pixfmt: unsupported YUVA subsampling")),
-    }
-
+    let packed = packed8_source(src, w, h, if alpha_in { 4 } else { 3 })?;
+    let enc = planar8::encode(&packed, wsub, hsub, matrix, true, workers);
+    // `Rgb24` sources have no alpha: synthesise opaque.
+    let ap = enc.a.unwrap_or_else(|| vec![0xFFu8; w * h]);
     Ok(make_frame(
         src,
         vec![
             VideoPlane {
                 stride: w,
-                data: yp,
+                data: enc.y,
             },
             VideoPlane {
-                stride: cw,
-                data: up,
+                stride: enc.cw,
+                data: enc.u,
             },
             VideoPlane {
-                stride: cw,
-                data: vp,
+                stride: enc.cw,
+                data: enc.v,
             },
             VideoPlane {
                 stride: w,
@@ -5156,9 +5403,9 @@ fn do_gbr_to_packed_deep(
     let shift = 16 - bits as u32;
     // GBR plane order: G=0, B=1, R=2, A=3. Each plane is `w` 16-bit words
     // per row (2 bytes each).
-    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
-    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 2, h);
-    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 2, h);
+    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h)?;
+    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 2, h)?;
+    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 2, h)?;
     // The alpha plane is only consulted when the packed target carries
     // it; a surplus source alpha is dropped.
     let a = if alpha_in && alpha_out {
@@ -5167,7 +5414,7 @@ fn do_gbr_to_packed_deep(
             src.planes[3].stride,
             w * 2,
             h,
-        ))
+        )?)
     } else {
         None
     };
@@ -5219,16 +5466,16 @@ fn do_gbr_to_packed8(
     let h = src_info.height as usize;
     let shift = bits - 8;
     let mask: u16 = ((1u32 << bits) - 1) as u16;
-    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h);
-    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 2, h);
-    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 2, h);
+    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h)?;
+    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 2, h)?;
+    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 2, h)?;
     let a = if alpha {
         Some(gather_tight(
             &src.planes[3].data,
             src.planes[3].stride,
             w * 2,
             h,
-        ))
+        )?)
     } else {
         None
     };
@@ -5266,7 +5513,7 @@ fn do_packed8_to_gbr(
     let shift = bits - 8;
     let comps = if alpha { 4 } else { 3 };
     let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps, h);
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps, h)?;
     let widen = |v: u8| -> u16 {
         let v = v as u32;
         (((v << shift) | (v >> (8 - shift))) & ((1u32 << bits) - 1)) as u16
@@ -5331,16 +5578,16 @@ fn do_gbr8_to_packed8(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w, h);
-    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w, h);
+    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w, h)?;
+    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w, h)?;
     let a = if alpha_in && alpha_out {
         Some(gather_tight(
             &src.planes[3].data,
             src.planes[3].stride,
             w,
             h,
-        ))
+        )?)
     } else {
         None
     };
@@ -5377,7 +5624,7 @@ fn do_packed8_to_gbr8(
     let h = src_info.height as usize;
     let comps = if alpha_in { 4 } else { 3 };
     let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps, h);
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps, h)?;
     let mut g = vec![0u8; w * h];
     let mut b = vec![0u8; w * h];
     let mut r = vec![0u8; w * h];
@@ -5420,11 +5667,13 @@ fn do_gbr8_alpha(src: &VideoFrame, src_info: FrameInfo, add: bool) -> Result<Vid
     let h = src_info.height as usize;
     let mut planes: Vec<VideoPlane> = src.planes[..3]
         .iter()
-        .map(|p| VideoPlane {
-            stride: w,
-            data: gather_tight(&p.data, p.stride, w, h),
+        .map(|p| {
+            Ok(VideoPlane {
+                stride: w,
+                data: gather_tight(&p.data, p.stride, w, h)?,
+            })
         })
-        .collect();
+        .collect::<Result<_>>()?;
     if add {
         planes.push(VideoPlane {
             stride: w,
@@ -5454,16 +5703,16 @@ fn do_gbr8_to_packed_deep(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
-    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w, h);
-    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w, h);
+    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
+    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w, h)?;
+    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w, h)?;
     let a = if alpha_in && alpha_out {
         Some(gather_tight(
             &src.planes[3].data,
             src.planes[3].stride,
             w,
             h,
-        ))
+        )?)
     } else {
         None
     };
@@ -5503,7 +5752,7 @@ fn do_packed_deep_to_gbr8(
     let h = src_info.height as usize;
     let comps = if alpha_in { 4 } else { 3 };
     let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h);
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h)?;
     let mut g = vec![0u8; w * h];
     let mut b = vec![0u8; w * h];
     let mut r = vec![0u8; w * h];
@@ -5552,9 +5801,9 @@ fn do_gbr_to_gray(
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let sb = if bits > 8 { 2 } else { 1 };
-    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
-    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * sb, h);
-    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * sb, h);
+    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h)?;
+    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * sb, h)?;
+    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * sb, h)?;
     // Interleave the top 8 bits of each sample into an R, G, B byte
     // triple and reuse the proven packed projection kernel.
     let mut rgb24 = vec![0u8; w * h * 3];
@@ -5597,7 +5846,7 @@ fn do_gray_to_gbr(
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let gray = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h);
+    let gray = gather_tight(&src.planes[0].data, src.planes[0].stride, w, h)?;
     let plane = if bits > 8 {
         let shift = bits - 8;
         let mask = (1u32 << bits) - 1;
@@ -5651,7 +5900,7 @@ fn do_packed_deep_to_gbr(
     let shift = 16 - bits as u32;
     let comps = if alpha_in { 4 } else { 3 };
     let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h);
+    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h)?;
     let mut g = vec![0u8; w * h * 2];
     let mut b = vec![0u8; w * h * 2];
     let mut r = vec![0u8; w * h * 2];
@@ -5724,16 +5973,16 @@ fn gather_float(src: &VideoFrame, src_info: FrameInfo, s: FloatLayout) -> Result
     let n = w * h;
     let mut rgba = vec![1.0f32; n * 4];
     if s.is_planar() {
-        let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 4, h);
-        let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 4, h);
-        let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 4, h);
+        let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 4, h)?;
+        let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 4, h)?;
+        let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 4, h)?;
         let a = if s.has_alpha() {
             Some(gather_tight(
                 &src.planes[3].data,
                 src.planes[3].stride,
                 w * 4,
                 h,
-            ))
+            )?)
         } else {
             None
         };
@@ -5747,7 +5996,7 @@ fn gather_float(src: &VideoFrame, src_info: FrameInfo, s: FloatLayout) -> Result
         }
     } else {
         let words = s.packed_words();
-        let packed = gather_tight(&src.planes[0].data, src.planes[0].stride, w * words * 4, h);
+        let packed = gather_tight(&src.planes[0].data, src.planes[0].stride, w * words * 4, h)?;
         for i in 0..n {
             match s {
                 FloatLayout::Gray => {
@@ -5790,16 +6039,16 @@ fn gather_int(src: &VideoFrame, src_info: FrameInfo, s: IntLayout) -> Result<Flo
     let mut rgba = vec![1.0f32; n * 4];
     match s.shape {
         IntShape::PlanarGbr => {
-            let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
-            let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * sb, h);
-            let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * sb, h);
+            let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h)?;
+            let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * sb, h)?;
+            let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * sb, h)?;
             let a = if s.alpha {
                 Some(gather_tight(
                     &src.planes[3].data,
                     src.planes[3].stride,
                     w * sb,
                     h,
-                ))
+                )?)
             } else {
                 None
             };
@@ -5813,7 +6062,7 @@ fn gather_int(src: &VideoFrame, src_info: FrameInfo, s: IntLayout) -> Result<Flo
             }
         }
         IntShape::Gray => {
-            let packed = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h);
+            let packed = gather_tight(&src.planes[0].data, src.planes[0].stride, w * sb, h)?;
             for i in 0..n {
                 let v = read(&packed, i);
                 rgba[i * 4] = v;
@@ -5823,7 +6072,8 @@ fn gather_int(src: &VideoFrame, src_info: FrameInfo, s: IntLayout) -> Result<Flo
         }
         IntShape::PackedRgb => {
             let comps = s.comps();
-            let packed = gather_tight(&src.planes[0].data, src.planes[0].stride, w * comps * sb, h);
+            let packed =
+                gather_tight(&src.planes[0].data, src.planes[0].stride, w * comps * sb, h)?;
             for i in 0..n {
                 for c in 0..comps {
                     rgba[i * 4 + c] = read(&packed, i * comps + c);

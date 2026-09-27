@@ -60,6 +60,15 @@ fn path() -> Path {
     p
 }
 
+/// `true` when the NEON path is selected (aarch64 with runtime NEON and
+/// no scalar override) — the gate the row-band engine's interleave
+/// helpers share with the YUV kernels.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub(crate) fn neon_enabled() -> bool {
+    path() == Path::Neon
+}
+
 // ---------------------------------------------------------------------
 // Public entrypoints.
 
@@ -131,6 +140,8 @@ pub(crate) fn rgb24_to_yuv420(
     match path() {
         #[cfg(target_arch = "x86_64")]
         Path::Avx2 => unsafe { avx2::rgb24_to_yuv420(src, yp, up, vp, w, h, matrix) },
+        #[cfg(target_arch = "aarch64")]
+        Path::Neon => unsafe { neon::rgb24_to_yuv420(src, yp, up, vp, w, h, matrix) },
         _ => yuv::rgb24_to_yuv420_scalar(src, yp, up, vp, w, h, matrix),
     }
 }
@@ -147,6 +158,8 @@ pub(crate) fn rgb24_to_yuv422(
     match path() {
         #[cfg(target_arch = "x86_64")]
         Path::Avx2 => unsafe { avx2::rgb24_to_yuv422(src, yp, up, vp, w, h, matrix) },
+        #[cfg(target_arch = "aarch64")]
+        Path::Neon => unsafe { neon::rgb24_to_yuv422(src, yp, up, vp, w, h, matrix) },
         _ => yuv::rgb24_to_yuv422_scalar(src, yp, up, vp, w, h, matrix),
     }
 }
@@ -163,6 +176,8 @@ pub(crate) fn rgb24_to_yuv444(
     match path() {
         #[cfg(target_arch = "x86_64")]
         Path::Avx2 => unsafe { avx2::rgb24_to_yuv444(src, yp, up, vp, w, h, matrix) },
+        #[cfg(target_arch = "aarch64")]
+        Path::Neon => unsafe { neon::rgb24_to_yuv444(src, yp, up, vp, w, h, matrix) },
         _ => yuv::rgb24_to_yuv444_scalar(src, yp, up, vp, w, h, matrix),
     }
 }

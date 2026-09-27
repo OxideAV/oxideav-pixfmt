@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(convert)* `convert_with` + `ConvertContext` (`#[non_exhaustive]`, builder methods): a per-call colour-signal override (`oxideav_core::ColorSignal` range + matrix) and an `ExecutionContext` thread budget; `convert(..)` is `convert_with(.., &ConvertContext::default())`
+- *(convert)* colour signalling: the source frame's `VideoFrame::color_signal()` record (YUV sources) and the context override select the YUV range and the H.273 matrix (1 BT.709, 4 FCC, 5/6 BT.601, 7 SMPTE ST 240, 9 BT.2020 NCL; 0 identity routes the planes as G, B, R through the planar GBR family; other code points reject with `Error::Unsupported` on YUV ↔ RGB hops). Full range now reaches `Yuva*` and the 10/12/16-bit layouts; unsignalled frames convert exactly as before
+- *(convert)* odd dimensions on every subsampled planar / semi-planar layout, both directions: chroma planes are `ceil(w / wsub)` × `ceil(h / hsub)` (T.81 A.1.1), decode reuses the last chroma sample, encode / downsampling replicate the last column / row
+- *(yuv)* exact NEON RGB24 → 4:4:4 / 4:2:2 / 4:2:0 encoders
+
+### Changed
+
+- *(convert)* the 8-bit planar YUV(A) ↔ `Rgb24` / `Rgba` rows run on one row-band engine: tight planes borrowed instead of copied, RGBA interleaved in the decode pass, optional scoped-thread bands. Output is byte-identical (pinned against a per-pixel oracle in `tests/engine_identity.rs`)
+- *(convert)* short / malformed planes are `Error::Invalid` everywhere instead of an index panic
+
 ### Other
 
 - *(heif_12mp)* bench: the production-HEIF conversion set at 4032×3024 through `convert()`, with the pre-round baseline recorded in the README

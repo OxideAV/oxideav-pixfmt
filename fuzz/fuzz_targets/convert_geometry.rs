@@ -24,8 +24,14 @@
 //!   * byte 0 — source pixel-format selector (mod the format table len).
 //!   * byte 1 — width selector → mapped to a small/odd value.
 //!   * byte 2 — height selector → mapped to a small/odd value.
-//!   * byte 3 — extra stride padding in bytes (clamped) added to every
-//!     plane's tight row stride.
+//!   * byte 3 — bits 0-2: extra stride padding in bytes added to every
+//!     plane's tight row stride; bit 3: size subsampled chroma planes
+//!     with **truncating** division (`w / wsub`, one sample short of
+//!     the `ceil(w / wsub)` grid on an odd axis — a malformed frame the
+//!     converter must reject, not read past) instead of the legal
+//!     rounded-up grid; bits 4-6: thread budget (1..=8) handed to
+//!     `convert_with` so the row-band engine's band split is driven
+//!     too.
 //!   * byte 4 — destination-format rotation: instead of every dst, start
 //!     the dst sweep at this offset so successive inputs spread coverage.
 //!   * remaining bytes (`fill`) — used to fill the plane data (cycled),
@@ -41,8 +47,10 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FormatInfo, FrameInfo, Palette};
+use oxideav_core::{ColorRange, MatrixCoefficients, PixelFormat, VideoFrame, VideoPlane};
+use oxideav_pixfmt::{
+    convert, convert_with, ConvertContext, ConvertOptions, FormatInfo, FrameInfo, Palette,
+};
 
 /// Every source format the geometry harness knows how to build a
 /// well-formed frame for. Keep this list in sync with the conversion
@@ -168,11 +176,27 @@ fn build_plane(
 /// Construct a structurally-valid source frame for `fmt` at `w`×`h` with
 /// `pad` extra stride bytes per plane, returning `None` for a format the
 /// harness does not build (so the caller skips it).
-fn build_frame(fmt: PixelFormat, w: u32, h: u32, pad: usize, fill: &[u8]) -> Option<VideoFrame> {
+fn build_frame(
+    fmt: PixelFormat,
+    w: u32,
+    h: u32,
+    pad: usize,
+    truncate_chroma: bool,
+    fill: &[u8],
+) -> Option<VideoFrame> {
     let wu = w as usize;
     let hu = h as usize;
     let info = FormatInfo::of(fmt);
     let mut seed = 0usize;
+    // Chroma grid: the legal rounded-up `ceil(n / sub)` or, when asked,
+    // the truncated `n / sub` that is one sample short on an odd axis.
+    let grid = |n: usize, sub: usize| {
+        if truncate_chroma {
+            n / sub
+        } else {
+            n.div_ceil(sub)
+        }
+    };
 
     let planes: Vec<VideoPlane> = match fmt {
         // Single-plane packed RGB / gray / CMYK / deep-RGB. Bytes-per-pixel
@@ -223,12 +247,10 @@ fn build_frame(fmt: PixelFormat, w: u32, h: u32, pad: usize, fill: &[u8]) -> Opt
             vec![build_plane(hu, wu * 2, pad, fill, &mut seed)]
         }
         // NV12 / NV21 — full-res Y plane + a half-res interleaved UV plane
-        // (cw*2 bytes per chroma row, ch rows). Use truncating division so
-        // an odd dimension produces the exact under-sized geometry the
-        // converter must reject rather than read past.
+        // (cw*2 bytes per chroma row, ch rows) on the selected grid.
         PixelFormat::Nv12 | PixelFormat::Nv21 => {
-            let cw = wu / 2;
-            let ch = hu / 2;
+            let cw = grid(wu, 2);
+            let ch = grid(hu, 2);
             vec![
                 build_plane(hu, wu, pad, fill, &mut seed),
                 build_plane(ch, cw * 2, pad, fill, &mut seed),
@@ -252,14 +274,14 @@ fn build_frame(fmt: PixelFormat, w: u32, h: u32, pad: usize, fill: &[u8]) -> Opt
                 .map(|_| build_plane(hu, wu * sb, pad, fill, &mut seed))
                 .collect()
         }
-        // Generic planar YUV (incl. Yuva420P). Y at full res; chroma at
-        // (w/wsub)×(h/hsub) using truncating division — exactly the
-        // geometry that exercises the odd-dimension chroma-index path.
-        // A trailing alpha plane at luma resolution for Yuva420P.
+        // Generic planar YUV (incl. the Yuva family). Y at full res;
+        // chroma on the selected grid — rounded up (legal odd geometry,
+        // must convert) or truncated (malformed, must be rejected). A
+        // trailing alpha plane at luma resolution for Yuva*.
         _ if info.is_planar => {
             let sb = luma_bytes_per_sample(&info);
-            let cw = wu / info.chroma_w_sub as usize;
-            let ch = hu / info.chroma_h_sub as usize;
+            let cw = grid(wu, info.chroma_w_sub as usize);
+            let ch = grid(hu, info.chroma_h_sub as usize);
             let mut planes = vec![
                 build_plane(hu, wu * sb, pad, fill, &mut seed),
                 build_plane(ch, cw * sb, pad, fill, &mut seed),
@@ -285,11 +307,13 @@ fuzz_target!(|data: &[u8]| {
     let w = pick_dim(data[1]);
     let h = pick_dim(data[2]);
     // Extra stride padding, clamped small to keep allocations tiny.
-    let pad = (data[3] % 8) as usize;
+    let pad = (data[3] & 7) as usize;
+    let truncate_chroma = data[3] & 8 != 0;
+    let threads = (((data[3] >> 4) & 7) + 1) as usize;
     let dst_start = data[4] as usize;
     let fill = &data[5..];
 
-    let mut src = match build_frame(fmt, w, h, pad, fill) {
+    let mut src = match build_frame(fmt, w, h, pad, truncate_chroma, fill) {
         Some(f) => f,
         None => return,
     };
@@ -330,9 +354,31 @@ fuzz_target!(|data: &[u8]| {
 
     // Drive every destination format. `convert` itself rejects same-fmt
     // and unsupported pairs cheaply; the contract is no-panic regardless.
+    // Colour-signal override: range and matrix (including identity,
+    // unspecified and reserved code points, which must convert or
+    // reject cleanly).
+    let ctx = ConvertContext::new()
+        .with_threads(threads)
+        .with_range(match data[4] % 3 {
+            0 => ColorRange::Unspecified,
+            1 => ColorRange::Limited,
+            _ => ColorRange::Full,
+        })
+        .with_matrix(MatrixCoefficients::new(match (data[4] / 3) % 6 {
+            0 => 2,
+            1 => 1,
+            2 => 9,
+            3 => 0,
+            4 => 5,
+            _ => data[4],
+        }));
     let n = FORMATS.len();
     for i in 0..n {
         let dst = FORMATS[(dst_start + i) % n];
-        let _ = convert(&src, info, dst, &opts);
+        if threads == 1 && ctx.signal.is_unspecified() {
+            let _ = convert(&src, info, dst, &opts);
+        } else {
+            let _ = convert_with(&src, info, dst, &opts, &ctx);
+        }
     }
 });

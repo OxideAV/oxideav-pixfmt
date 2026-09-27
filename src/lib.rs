@@ -28,6 +28,41 @@
 //! to `[0, 255]` after reconstruction. See [`yuv`] for the exact matrix
 //! coefficients.
 //!
+//! Range is a property of the pixel format (`YuvJ*` full, every other
+//! YUV layout limited); [`ConvertOptions::color_space`] picks the
+//! matrix weights. A colour signal overrides both: the source frame's
+//! [`oxideav_core::VideoFrame::color_signal`] record (e.g. a HEIF
+//! `nclx` box declaring a `Yuva420P` or `Yuv420P10Le` payload full range
+//! BT.709), or a caller override in [`ConvertContext::signal`] passed to
+//! [`convert_with`]. Signalled H.273 matrices 1 (BT.709), 4 (FCC),
+//! 5 / 6 (BT.601), 7 (SMPTE ST 240) and 9 (BT.2020 NCL) are applied
+//! directly; 0 (identity) routes the planes as G, B, R through the
+//! planar GBR family; an unsignalled frame behaves exactly as before.
+//!
+//! # Odd dimensions
+//!
+//! Every subsampled planar / semi-planar layout accepts odd widths and
+//! heights: the chroma planes hold `ceil(w / wsub)` × `ceil(h / hsub)`
+//! samples (ITU-T T.81 A.1.1 component dimensions; the core
+//! `PixelFormat::plane_dimensions` contract), the trailing odd luma
+//! column / row decodes against the last chroma sample, and encoding /
+//! chroma downsampling replicate the last column / row into a truncated
+//! block. Even dimensions are unaffected. `Yuv411P` still needs a
+//! multiple-of-4 width and packed `Yuyv422` / `Uyvy422` an even width.
+//! See [`convert_with`] for the full statement.
+//!
+//! # Speed and threading
+//!
+//! The 8-bit planar YUV(A) ↔ `Rgb24` / `Rgba` rows share one row-band
+//! engine: tight planes are borrowed rather than copied, RGBA is
+//! interleaved in the same pass as the decode, and the picture is cut
+//! into bands of whole chroma rows. [`convert`] runs serial (the
+//! oxideav-core threading contract's default); [`convert_with`] with a
+//! [`ConvertContext`] whose `execution` budget is above one converts the
+//! bands on scoped threads. The output is byte-identical at every
+//! budget, and identical to the scalar Q15 reference on every SIMD path
+//! (AVX2 on x86_64, NEON on aarch64, both directions).
+//!
 //! # Feature coverage
 //!
 //! Not every pair in the Cartesian product of [`PixelFormat`] variants
@@ -117,8 +152,7 @@
 //!   (4:4:4 → 4:4:0) and a row broadcast (4:4:0 → 4:4:4); every other
 //!   siting move composes those with the existing kernels through a
 //!   4:4:4 intermediate, bit-identical to a fused kernel. Odd widths
-//!   are legal; odd heights are rejected with `Error::Invalid`, the
-//!   same rule 4:2:2 applies to odd widths.
+//!   and heights are legal (see the odd-dimension rule below).
 //! - **Scene-referred float** (`GrayF32Le` / `RgbF32Le` / `RgbaF32Le`
 //!   / `GbrpF32Le` / `GbrapF32Le`): every ordered pair inside the
 //!   family is direct and never clamps (gray broadcast, linear-light
@@ -208,6 +242,7 @@ pub mod format_info;
 pub mod gray;
 pub mod pal8;
 pub mod palette;
+mod planar8;
 pub mod rgb;
 mod simd_dispatch;
 pub mod transfer;
@@ -219,8 +254,8 @@ pub use alpha::{
     unpremultiply,
 };
 pub use convert::{
-    convert, convert_in_place_if_same, supports, supports_direct, ColorSpace, ConvertOptions,
-    Dither, FrameInfo,
+    convert, convert_in_place_if_same, convert_with, supports, supports_direct, ColorSpace,
+    ConvertContext, ConvertOptions, Dither, FrameInfo,
 };
 pub use format_info::{ChromaSubsampling, FormatInfo};
 pub use palette::{generate_palette, Palette, PaletteGenOptions, PaletteStrategy};

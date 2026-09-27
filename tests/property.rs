@@ -509,9 +509,10 @@ fn prop_no_panic_over_supported_pairs() {
 }
 
 #[test]
-fn prop_rgb_to_yuv_odd_dims_error_not_panic() {
-    // RGB -> 4:2:0 with odd dimensions must return Err (divisibility
-    // guard), never panic or silently produce a malformed frame.
+fn prop_rgb_to_yuv_odd_dims_round_up_chroma() {
+    // RGB -> 4:2:0 with odd dimensions produces a well-formed frame
+    // whose chroma planes are ceil(w/2) × ceil(h/2), and decoding it
+    // back yields a full-size RGB picture — never a panic.
     let opts = ConvertOptions::default();
     let mut rng = Rng::new(0x0DD0_0DD0);
     for _ in 0..cases(100, 6) {
@@ -519,8 +520,21 @@ fn prop_rgb_to_yuv_odd_dims_error_not_panic() {
         let h = rng.range(1, 20) * 2 - 1; // odd
         let rgb = rand_packed(&mut rng, w, h, 3, 0);
         let ri = FrameInfo::new(PixelFormat::Rgb24, w, h);
-        let res = convert(&rgb, ri, PixelFormat::Yuv420P, &opts);
-        assert!(res.is_err(), "odd {w}x{h} -> Yuv420P should error");
+        let yuv = convert(&rgb, ri, PixelFormat::Yuv420P, &opts)
+            .unwrap_or_else(|e| panic!("odd {w}x{h} -> Yuv420P: {e:?}"));
+        let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
+        assert_eq!(yuv.planes[0].data.len(), (w * h) as usize);
+        assert_eq!(yuv.planes[1].stride, cw);
+        assert_eq!(yuv.planes[1].data.len(), cw * ch);
+        assert_eq!(yuv.planes[2].data.len(), cw * ch);
+        let back = convert(
+            &yuv,
+            FrameInfo::new(PixelFormat::Yuv420P, w, h),
+            PixelFormat::Rgb24,
+            &opts,
+        )
+        .expect("decode back");
+        assert_eq!(back.planes[0].data.len(), (w * h * 3) as usize);
     }
 }
 
@@ -742,12 +756,14 @@ fn prop_float_family_roundtrips_and_saturates() {
             PixelFormat::Yuv444P16Le,
             PixelFormat::Yuva420P16Le,
         ] {
-            let got = convert(&hostile, hinfo, dst, &opts);
-            if dst == PixelFormat::Yuva420P16Le && (w % 2 != 0 || h % 2 != 0) {
-                assert!(got.is_err(), "seed {seed}: odd dims must be rejected");
-                continue;
+            // Odd dimensions are legal on the 4:2:0 destination too:
+            // its chroma grid rounds up.
+            let got = convert(&hostile, hinfo, dst, &opts)
+                .unwrap_or_else(|e| panic!("seed {seed} → {dst:?}: {e:?}"));
+            if dst == PixelFormat::Yuva420P16Le {
+                let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
+                assert_eq!(got.planes[1].data.len(), cw * ch * 2, "seed {seed}");
             }
-            let got = got.unwrap_or_else(|e| panic!("seed {seed} → {dst:?}: {e:?}"));
             if dst == fmt && bits > 8 && bits < 16 {
                 for plane in &got.planes {
                     for word in plane.data.chunks_exact(2) {

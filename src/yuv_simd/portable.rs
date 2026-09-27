@@ -59,7 +59,7 @@ pub(crate) fn yuv420_to_rgb24(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let d = matrix.decode_params();
     for row in 0..h {
         let cr = row / 2;

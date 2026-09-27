@@ -247,14 +247,24 @@ fn yuvj_rgba_paths() {
 /// Odd dimensions on subsampled J layouts reject exactly like the
 /// limited-range families do.
 #[test]
-fn yuvj_odd_dimensions_reject() {
+fn yuvj_odd_dimensions_round_up_chroma() {
+    // A 3×3 YuvJ420P picture carries 2×2 chroma (ceil); read out of a
+    // 4×4 buffer it converts, full-range grey decoding to (128,128,128).
     let src = flat_yuv(4, 4, 2, 2, 128, 128, 128);
     let o = opts(ColorSpace::Bt601Limited);
-    // Claim 3×3 on a 4:2:0 J layout: must be Error::Invalid, not a panic.
     let info = FrameInfo::new(PixelFormat::YuvJ420P, 3, 3);
-    assert!(convert(&src, info, PixelFormat::Rgb24, &o).is_err());
-    // RGB → J with odd dims likewise.
+    let rgb = convert(&src, info, PixelFormat::Rgb24, &o).expect("odd J 4:2:0");
+    assert_eq!(rgb.planes[0].data, vec![128u8; 27]);
+    // RGB → J with odd dims likewise produces the rounded-up grid, and
+    // flat colour survives the edge-replicated chroma average.
     let rgb = rgb_frame(3, 3, &[100u8; 27]);
     let info = FrameInfo::new(PixelFormat::Rgb24, 3, 3);
-    assert!(convert(&rgb, info, PixelFormat::YuvJ420P, &o).is_err());
+    let j = convert(&rgb, info, PixelFormat::YuvJ420P, &o).expect("RGB → odd J");
+    assert_eq!(j.planes[0].data, vec![100u8; 9]);
+    assert_eq!(j.planes[1].data, vec![128u8; 4]);
+    assert_eq!(j.planes[2].data, vec![128u8; 4]);
+    // A 3×3 claim on chroma planes holding a single sample is malformed.
+    let short = flat_yuv(3, 3, 2, 2, 128, 128, 128);
+    let info = FrameInfo::new(PixelFormat::YuvJ420P, 3, 3);
+    assert!(convert(&short, info, PixelFormat::Rgb24, &o).is_err());
 }

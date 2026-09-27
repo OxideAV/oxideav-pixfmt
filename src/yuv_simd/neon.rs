@@ -1,12 +1,22 @@
 //! NEON (aarch64) implementations of the YUV ↔ RGB inner loops.
 //!
-//! Only the decode direction is vectorised; RGB24's 3-byte-packed stream
-//! makes the encode path more awkward and we dispatch it to the scalar
-//! fallback for now.
+//! Both directions are vectorised. Decode runs 8 pixels per step with
+//! `vst3_u8` interleaving the RGB24 store; encode de-interleaves 16
+//! RGB24 pixels per step with `vld3q_u8`, evaluates the Q15 matrix in
+//! 32-bit lanes (`vmlal_n_s16`, exact — no 16-bit high-half
+//! approximation), saturates to bytes exactly like the scalar clamp,
+//! and forms the chroma box averages from the rounded per-pixel chroma
+//! with pairwise adds and rounding narrows (`vpaddlq_u8` +
+//! `vrshrn_n_u16`), which compute the scalar `(sum + 1) / 2` and
+//! `(sum + 2) / 4` exactly. Every output byte equals the scalar
+//! reference.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use crate::yuv::{yuv_to_rgb_fp, DecodeParams, YuvMatrix, FP_HALF, FP_SHIFT};
+use crate::yuv::{
+    encode420_rows_from, encode422_row_from, encode444_row_from, yuv_to_rgb_fp, DecodeParams,
+    EncodeParams, YuvMatrix, FP_HALF, FP_SHIFT,
+};
 use core::arch::aarch64::*;
 
 const LANES: usize = 8;
@@ -131,7 +141,7 @@ pub(crate) unsafe fn yuv422_to_rgb24(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let d = matrix.decode_params();
     let y_scale = vdupq_n_s32(d.y_scale);
     for row in 0..h {
@@ -170,7 +180,7 @@ pub(crate) unsafe fn yuv420_to_rgb24(
     h: usize,
     matrix: YuvMatrix,
 ) {
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let d = matrix.decode_params();
     let y_scale = vdupq_n_s32(d.y_scale);
     for row in 0..h {
@@ -196,6 +206,195 @@ pub(crate) unsafe fn yuv420_to_rgb24(
             drow[col * 3] = r;
             drow[col * 3 + 1] = g;
             drow[col * 3 + 2] = b;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Encode: RGB24 → planar YUV.
+
+/// One Q15 dot product over 8 pixels: `(cr*r + cg*g + cb*b + bias) >> 15`
+/// saturated to u8 — the scalar `rgb_to_yuv_fp` row for one component.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn dot8(
+    r: int16x8_t,
+    g: int16x8_t,
+    b: int16x8_t,
+    c: [i32; 3],
+    bias: int32x4_t,
+) -> uint8x8_t {
+    let (cr, cg, cb) = (c[0] as i16, c[1] as i16, c[2] as i16);
+    let mut lo = vmlal_n_s16(bias, vget_low_s16(r), cr);
+    lo = vmlal_n_s16(lo, vget_low_s16(g), cg);
+    lo = vmlal_n_s16(lo, vget_low_s16(b), cb);
+    let mut hi = vmlal_n_s16(bias, vget_high_s16(r), cr);
+    hi = vmlal_n_s16(hi, vget_high_s16(g), cg);
+    hi = vmlal_n_s16(hi, vget_high_s16(b), cb);
+    let lo = vshrq_n_s32::<FP_SHIFT>(lo);
+    let hi = vshrq_n_s32::<FP_SHIFT>(hi);
+    vqmovun_s16(vcombine_s16(vqmovn_s32(lo), vqmovn_s32(hi)))
+}
+
+/// Encode 16 RGB24 pixels at `src` into per-pixel (Y, Cb, Cr) bytes.
+#[inline]
+#[target_feature(enable = "neon")]
+unsafe fn encode16(src: *const u8, p: &EncodeParams) -> (uint8x16_t, uint8x16_t, uint8x16_t) {
+    let px = vld3q_u8(src);
+    let widen = |v: uint8x16_t| {
+        (
+            vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(v))),
+            vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(v))),
+        )
+    };
+    let (r0, r1) = widen(px.0);
+    let (g0, g1) = widen(px.1);
+    let (b0, b1) = widen(px.2);
+    let yb = vdupq_n_s32(p.y_bias);
+    let cb_bias = vdupq_n_s32(p.c_bias);
+    let yc = [p.cy_r, p.cy_g, p.cy_b];
+    let uc = [p.cb_r, p.cb_g, p.cb_b];
+    let vc = [p.cr_r, p.cr_g, p.cr_b];
+    let y = vcombine_u8(dot8(r0, g0, b0, yc, yb), dot8(r1, g1, b1, yc, yb));
+    let u = vcombine_u8(dot8(r0, g0, b0, uc, cb_bias), dot8(r1, g1, b1, uc, cb_bias));
+    let v = vcombine_u8(dot8(r0, g0, b0, vc, cb_bias), dot8(r1, g1, b1, vc, cb_bias));
+    (y, u, v)
+}
+
+/// The Q15 encode coefficients all fit an i16 multiplicand (|c| < 2^15
+/// for every matrix the crate builds); `vmlal_n_s16` relies on it.
+#[inline]
+fn coeffs_fit_i16(p: &EncodeParams) -> bool {
+    [
+        p.cy_r, p.cy_g, p.cy_b, p.cb_r, p.cb_g, p.cb_b, p.cr_r, p.cr_g, p.cr_b,
+    ]
+    .iter()
+    .all(|&c| (i16::MIN as i32..=i16::MAX as i32).contains(&c))
+}
+
+#[target_feature(enable = "neon")]
+pub(crate) unsafe fn rgb24_to_yuv444(
+    src: &[u8],
+    yp: &mut [u8],
+    up: &mut [u8],
+    vp: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    let p = matrix.encode_params();
+    let vec_ok = coeffs_fit_i16(&p);
+    for row in 0..h {
+        let srow = &src[row * w * 3..(row + 1) * w * 3];
+        let yrow = &mut yp[row * w..(row + 1) * w];
+        let urow = &mut up[row * w..(row + 1) * w];
+        let vrow = &mut vp[row * w..(row + 1) * w];
+        let blocks = if vec_ok { w / 16 } else { 0 };
+        for blk in 0..blocks {
+            let x = blk * 16;
+            let (y, u, v) = encode16(srow.as_ptr().add(x * 3), &p);
+            vst1q_u8(yrow.as_mut_ptr().add(x), y);
+            vst1q_u8(urow.as_mut_ptr().add(x), u);
+            vst1q_u8(vrow.as_mut_ptr().add(x), v);
+        }
+        encode444_row_from(srow, yrow, urow, vrow, w, blocks * 16, &p);
+    }
+}
+
+#[target_feature(enable = "neon")]
+pub(crate) unsafe fn rgb24_to_yuv422(
+    src: &[u8],
+    yp: &mut [u8],
+    up: &mut [u8],
+    vp: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    let p = matrix.encode_params();
+    let cw = w.div_ceil(2);
+    let vec_ok = coeffs_fit_i16(&p);
+    for row in 0..h {
+        let srow = &src[row * w * 3..(row + 1) * w * 3];
+        let yrow = &mut yp[row * w..(row + 1) * w];
+        let urow = &mut up[row * cw..(row + 1) * cw];
+        let vrow = &mut vp[row * cw..(row + 1) * cw];
+        let blocks = if vec_ok { w / 16 } else { 0 };
+        for blk in 0..blocks {
+            let x = blk * 16;
+            let (y, u, v) = encode16(srow.as_ptr().add(x * 3), &p);
+            vst1q_u8(yrow.as_mut_ptr().add(x), y);
+            // (a + b + 1) >> 1 over adjacent pairs.
+            vst1_u8(
+                urow.as_mut_ptr().add(x / 2),
+                vrshrn_n_u16::<1>(vpaddlq_u8(u)),
+            );
+            vst1_u8(
+                vrow.as_mut_ptr().add(x / 2),
+                vrshrn_n_u16::<1>(vpaddlq_u8(v)),
+            );
+        }
+        encode422_row_from(srow, yrow, urow, vrow, w, blocks * 16, &p);
+    }
+}
+
+#[target_feature(enable = "neon")]
+pub(crate) unsafe fn rgb24_to_yuv420(
+    src: &[u8],
+    yp: &mut [u8],
+    up: &mut [u8],
+    vp: &mut [u8],
+    w: usize,
+    h: usize,
+    matrix: YuvMatrix,
+) {
+    let p = matrix.encode_params();
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
+    let vec_ok = coeffs_fit_i16(&p);
+    for cr in 0..ch {
+        let row_a = cr * 2;
+        let sa = &src[row_a * w * 3..(row_a + 1) * w * 3];
+        let urow = &mut up[cr * cw..(cr + 1) * cw];
+        let vrow = &mut vp[cr * cw..(cr + 1) * cw];
+        if row_a + 1 < h {
+            let sb = &src[(row_a + 1) * w * 3..(row_a + 2) * w * 3];
+            let (ya, yb) = yp[row_a * w..(row_a + 2) * w].split_at_mut(w);
+            let blocks = if vec_ok { w / 16 } else { 0 };
+            for blk in 0..blocks {
+                let x = blk * 16;
+                let (y0, u0, v0) = encode16(sa.as_ptr().add(x * 3), &p);
+                let (y1, u1, v1) = encode16(sb.as_ptr().add(x * 3), &p);
+                vst1q_u8(ya.as_mut_ptr().add(x), y0);
+                vst1q_u8(yb.as_mut_ptr().add(x), y1);
+                // (sum of the 2×2 block + 2) >> 2.
+                let us = vaddq_u16(vpaddlq_u8(u0), vpaddlq_u8(u1));
+                let vs = vaddq_u16(vpaddlq_u8(v0), vpaddlq_u8(v1));
+                vst1_u8(urow.as_mut_ptr().add(x / 2), vrshrn_n_u16::<2>(us));
+                vst1_u8(vrow.as_mut_ptr().add(x / 2), vrshrn_n_u16::<2>(vs));
+            }
+            encode420_rows_from(sa, Some((sb, yb)), ya, urow, vrow, w, blocks * 16, &p);
+        } else {
+            let ya = &mut yp[row_a * w..(row_a + 1) * w];
+            let blocks = if vec_ok { w / 16 } else { 0 };
+            for blk in 0..blocks {
+                let x = blk * 16;
+                let (y0, u0, v0) = encode16(sa.as_ptr().add(x * 3), &p);
+                vst1q_u8(ya.as_mut_ptr().add(x), y0);
+                // Odd height: the row is replicated into the block's
+                // missing second row — (2·(a + b) + 2) >> 2.
+                let us = vpaddlq_u8(u0);
+                let vs = vpaddlq_u8(v0);
+                vst1_u8(
+                    urow.as_mut_ptr().add(x / 2),
+                    vrshrn_n_u16::<2>(vaddq_u16(us, us)),
+                );
+                vst1_u8(
+                    vrow.as_mut_ptr().add(x / 2),
+                    vrshrn_n_u16::<2>(vaddq_u16(vs, vs)),
+                );
+            }
+            encode420_rows_from(sa, None, ya, urow, vrow, w, blocks * 16, &p);
         }
     }
 }

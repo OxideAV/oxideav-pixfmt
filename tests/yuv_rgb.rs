@@ -233,8 +233,6 @@ fn subsampled_yuv_to_rgb_rejects_odd_dimensions() {
         (PixelFormat::Yuv420P, 3, 4, 2, 2),
         // 4:2:0 — odd height.
         (PixelFormat::Yuv420P, 4, 3, 2, 2),
-        // 4:2:0 — both odd (the 1×1 corner case).
-        (PixelFormat::Yuv420P, 1, 1, 2, 2),
         // 4:2:2 — odd width (height is full-res, so only width matters).
         (PixelFormat::Yuv422P, 3, 2, 2, 1),
         // 4:1:1 — width not divisible by 4.
@@ -274,6 +272,67 @@ fn subsampled_yuv_to_rgb_rejects_odd_dimensions() {
             "{fmt:?} {w}x{h} → Rgba must reject odd-subsample geometry",
         );
     }
+
+    // With the chroma planes sized to the rounded-up grid the same odd
+    // geometries convert — including the 1×1 corner, whose single
+    // chroma sample covers the lone luma sample.
+    for &(fmt, w, h, wsub, hsub) in cases {
+        if wsub == 4 {
+            continue; // 4:1:1 keeps its multiple-of-4 width rule
+        }
+        let (wu, hu) = (w as usize, h as usize);
+        let (cw, ch) = (wu.div_ceil(wsub), hu.div_ceil(hsub));
+        let good = VideoFrame {
+            pts: None,
+            planes: vec![
+                VideoPlane {
+                    stride: wu,
+                    data: vec![16u8; wu * hu],
+                },
+                VideoPlane {
+                    stride: cw,
+                    data: vec![128u8; cw * ch],
+                },
+                VideoPlane {
+                    stride: cw,
+                    data: vec![128u8; cw * ch],
+                },
+            ],
+        };
+        let info = FrameInfo::new(fmt, w, h);
+        let rgb = convert(&good, info, PixelFormat::Rgb24, &opts).expect("rounded-up grid");
+        // Limited-range black decodes to RGB (0, 0, 0).
+        assert_eq!(
+            rgb.planes[0].data,
+            vec![0u8; wu * hu * 3],
+            "{fmt:?} {w}x{h}"
+        );
+    }
+    let one = VideoFrame {
+        pts: None,
+        planes: vec![
+            VideoPlane {
+                stride: 1,
+                data: vec![235],
+            },
+            VideoPlane {
+                stride: 1,
+                data: vec![128],
+            },
+            VideoPlane {
+                stride: 1,
+                data: vec![128],
+            },
+        ],
+    };
+    let rgba = convert(
+        &one,
+        FrameInfo::new(PixelFormat::Yuv420P, 1, 1),
+        PixelFormat::Rgba,
+        &opts,
+    )
+    .expect("1×1 4:2:0");
+    assert_eq!(rgba.planes[0].data, vec![255, 255, 255, 255]);
 }
 
 // BT.2020 NCL matrix — kr = 0.2627, kb = 0.0593 from BT.2020-2 Table 4
