@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.8...v0.1.9) - 2026-09-27
+
+### Added
+
+- *(convert)* row-band YUV↔RGB engine, odd dimensions, colour signalling, convert_with
+
+### Other
+
+- odd-geometry closure over every supported pair + matrix × range × depth cross-product
+- README — 12 MP before/after table (serial + threaded), convert_with colour signalling, odd-dimension rule, fuzz coverage
+- *(deep)* banded Q30 decode for every family member → Rgb48Le / Rgba64Le; parallel narrowing
+- *(heif_12mp)* the production-HEIF conversion set at 4032×3024 through convert(), baseline recorded
+- migrate release-plz to the org-level reusable shim (fixes the standalone job's missing-secret publish failure)
+
 ### Added
 
 - *(convert)* `convert_with` + `ConvertContext` (`#[non_exhaustive]`, builder methods): a per-call colour-signal override (`oxideav_core::ColorSignal` range + matrix) and an `ExecutionContext` thread budget; `convert(..)` is `convert_with(.., &ConvertContext::default())`
