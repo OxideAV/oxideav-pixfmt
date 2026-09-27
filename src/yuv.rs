@@ -1596,11 +1596,12 @@ pub fn depth_down_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: u32
     debug_assert!((9..=16).contains(&bits), "depth_down: bits out of range");
     let shift = bits - 8;
     let mask: u32 = (1u32 << bits) - 1;
-    for i in 0..count {
-        let lo = src[i * 2] as u32;
-        let hi = src[i * 2 + 1] as u32;
-        let v = ((hi << 8) | lo) & mask;
-        dst[i] = (v >> shift) as u8;
+    for (d, w) in dst[..count]
+        .iter_mut()
+        .zip(src[..count * 2].chunks_exact(2))
+    {
+        let v = u16::from_le_bytes([w[0], w[1]]) as u32 & mask;
+        *d = (v >> shift) as u8;
     }
 }
 

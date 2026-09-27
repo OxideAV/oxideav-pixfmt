@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(convert)* colour signalling: the source frame's `VideoFrame::color_signal()` record (YUV sources) and the context override select the YUV range and the H.273 matrix (1 BT.709, 4 FCC, 5/6 BT.601, 7 SMPTE ST 240, 9 BT.2020 NCL; 0 identity routes the planes as G, B, R through the planar GBR family; other code points reject with `Error::Unsupported` on YUV ↔ RGB hops). Full range now reaches `Yuva*` and the 10/12/16-bit layouts; unsignalled frames convert exactly as before
 - *(convert)* odd dimensions on every subsampled planar / semi-planar layout, both directions: chroma planes are `ceil(w / wsub)` × `ceil(h / hsub)` (T.81 A.1.1), decode reuses the last chroma sample, encode / downsampling replicate the last column / row
 - *(yuv)* exact NEON RGB24 → 4:4:4 / 4:2:2 / 4:2:0 encoders
+- *(convert)* direct planar-family → `Rgb48Le` / `Rgba64Le` rows at every depth and siting (8 / 10 / 12 / 16 bits, alpha or not): one banded pass through the Q30 deep matrix instead of the staged widen-to-`Yuva444P16Le` route, byte-identical to it; the 16-bit table rows share the same engine
 
 ### Changed
 

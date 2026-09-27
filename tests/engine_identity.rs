@@ -70,17 +70,28 @@ const PLANAR8: &[(PixelFormat, usize, usize, bool, bool)] = &[
     (PixelFormat::Yuv440P, 1, 2, false, false),
 ];
 
-const GEOMETRIES: &[(usize, usize)] = &[
-    (1, 1),
-    (2, 2),
-    (3, 5),
-    (7, 3),
-    (16, 8),
-    (17, 9),
-    (33, 65),
-    (64, 70),
-    (5, 131),
-];
+/// Geometry sweep. Under Miri (the UB job interprets every test) the
+/// sweep keeps its odd, even and band-straddling representatives but
+/// drops the larger pictures, the crate's usual `cfg(miri)` shrink.
+const GEOMETRIES: &[(usize, usize)] = if cfg!(miri) {
+    &[(1, 1), (3, 5), (7, 3), (16, 8), (5, 67)]
+} else {
+    &[
+        (1, 1),
+        (2, 2),
+        (3, 5),
+        (7, 3),
+        (16, 8),
+        (17, 9),
+        (33, 65),
+        (64, 70),
+        (5, 131),
+    ]
+};
+
+/// Thread budgets exercised per case (serial, and enough workers to
+/// split every multi-band geometry above).
+const THREADS: &[usize] = if cfg!(miri) { &[1, 3] } else { &[1, 2, 3, 8] };
 
 fn source_frame(
     rng: &mut Rng,
@@ -210,7 +221,7 @@ fn planar8_to_packed_matches_the_per_pixel_oracle() {
                 let m = matrix_for(cs, full);
                 for (dst, bpp) in [(PixelFormat::Rgb24, 3), (PixelFormat::Rgba, 4)] {
                     let want = oracle_decode(&y, &u, &v, a.as_deref(), w, h, wsub, hsub, bpp, m);
-                    for threads in [1usize, 2, 3, 8] {
+                    for &threads in THREADS {
                         let ctx = ConvertContext::new().with_threads(threads);
                         let got = convert_with(&src, info, dst, &opts(cs), &ctx)
                             .unwrap_or_else(|e| panic!("{fmt:?} {w}x{h} → {dst:?}: {e:?}"));
@@ -246,7 +257,7 @@ fn packed_to_planar8_matches_the_per_pixel_oracle() {
                 let (wy, wu, wv, wa) =
                     oracle_encode(&rgb, bpp, w, h, wsub, hsub, matrix_for(cs, full));
                 let info = FrameInfo::new(src_fmt, w as u32, h as u32);
-                for threads in [1usize, 2, 5] {
+                for &threads in THREADS {
                     let ctx = ConvertContext::new().with_threads(threads);
                     let got = convert_with(&src, info, fmt, &opts(cs), &ctx)
                         .unwrap_or_else(|e| panic!("{src_fmt:?} {w}x{h} → {fmt:?}: {e:?}"));
@@ -362,9 +373,14 @@ fn deep_420_to_packed_matches_narrow_then_oracle() {
 /// decode and encode at 4:2:0, serial and threaded, checked against
 /// the oracle on the whole last row / column plus a sparse interior
 /// sample (the dense geometry sweep above covers the interior rules).
+/// Under Miri the same checks run on a 67×37 odd picture (two bands).
 #[test]
 fn twelve_megapixel_odd_geometry_matches_the_oracle() {
-    let (w, h) = (4031usize, 3023usize);
+    let (w, h) = if cfg!(miri) {
+        (67usize, 37usize)
+    } else {
+        (4031usize, 3023usize)
+    };
     let mut rng = Rng(0x0463_4031);
     let src = source_frame(&mut rng, w, h, 2, 2, false, 0);
     let info = FrameInfo::new(PixelFormat::Yuv420P, w as u32, h as u32);
@@ -402,8 +418,9 @@ fn twelve_megapixel_odd_geometry_matches_the_oracle() {
     for row in 0..h {
         check(row, w - 1);
     }
-    for row in (0..h).step_by(97) {
-        for col in (0..w).step_by(89) {
+    let (sy, sx) = if cfg!(miri) { (5, 7) } else { (97, 89) };
+    for row in (0..h).step_by(sy) {
+        for col in (0..w).step_by(sx) {
             check(row, col);
         }
     }
@@ -493,5 +510,113 @@ fn range_override_selects_the_matrix_range() {
         let want = oracle_decode(&y, &u, &v, Some(&a), w, h, 2, 2, 4, matrix_for(cs, true));
         assert!(full.planes[0].data == want, "{cs:?} full override");
         assert!(full.planes[0].data != base.planes[0].data);
+    }
+}
+
+/// Every planar family member → `Rgb48Le` / `Rgba64Le` now runs as one
+/// banded deep-matrix pass. Pin it to the two-step route it replaces —
+/// the exact widen to the 16-bit 4:4:4 alpha tier (`Yuva444P16Le`), then
+/// the deep matrix — at even, odd and band-straddling geometry and at
+/// several thread budgets.
+#[test]
+fn family_to_deep_packed_matches_the_staged_route() {
+    use oxideav_pixfmt::FormatInfo;
+    let members = [
+        PixelFormat::Yuv420P,
+        PixelFormat::Yuva420P,
+        PixelFormat::Yuv422P,
+        PixelFormat::Yuv444P,
+        PixelFormat::Yuv440P,
+        PixelFormat::Yuv420P10Le,
+        PixelFormat::Yuv422P10Le,
+        PixelFormat::Yuv444P10Le,
+        PixelFormat::Yuva420P10Le,
+        PixelFormat::Yuva444P12Le,
+        PixelFormat::Yuv420P12Le,
+        PixelFormat::Yuv440P12Le,
+        PixelFormat::Yuv420P16Le,
+        PixelFormat::Yuva422P16Le,
+        PixelFormat::Yuv444P16Le,
+    ];
+    let mut rng = Rng(0x0463_DEE9);
+    for fmt in members {
+        let info = FormatInfo::of(fmt);
+        let bits = info.bit_depth as u32;
+        let sb = if bits > 8 { 2 } else { 1 };
+        let (wsub, hsub) = (info.chroma_w_sub as usize, info.chroma_h_sub as usize);
+        let geoms: &[(usize, usize)] = if cfg!(miri) {
+            &[(7, 5), (1, 1)]
+        } else {
+            &[(4, 4), (7, 5), (3, 67), (1, 1)]
+        };
+        for &(w, h) in geoms {
+            let (cw, ch) = (w.div_ceil(wsub), h.div_ceil(hsub));
+            let mut mk = |pw: usize, ph: usize| {
+                let mut p = plane(&mut rng, pw * sb, ph, 1);
+                if sb == 2 {
+                    // Keep words in range for the declared depth, but
+                    // leave one stray high bit on 10/12-bit so the mask
+                    // is exercised too.
+                    for row in 0..ph {
+                        for x in 0..pw {
+                            let o = row * p.stride + x * 2;
+                            let v = u16::from_le_bytes([p.data[o], p.data[o + 1]]);
+                            let v = if bits < 16 && x == 0 {
+                                v
+                            } else {
+                                v & ((1u32 << bits) - 1) as u16
+                            };
+                            p.data[o..o + 2].copy_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                }
+                p
+            };
+            let mut planes = vec![mk(w, h), mk(cw, ch), mk(cw, ch)];
+            if info.has_alpha {
+                planes.push(mk(w, h));
+            }
+            let src = VideoFrame { pts: None, planes };
+            let si = FrameInfo::new(fmt, w as u32, h as u32);
+            let o = opts(ColorSpace::Bt709Limited);
+            let mid = convert(&src, si, PixelFormat::Yuva444P16Le, &o).expect("to 16-bit tier");
+            // The historical second leg, evaluated with the unchanged
+            // public 4:4:4 deep kernel on the widened planes.
+            let mut rgb48 = vec![0u8; w * h * 6];
+            yuv::yuv444p16_to_rgb48(
+                &mid.planes[0].data,
+                &mid.planes[1].data,
+                &mid.planes[2].data,
+                &mut rgb48,
+                w,
+                h,
+                YuvMatrix::BT709,
+            );
+            for dst in [PixelFormat::Rgb48Le, PixelFormat::Rgba64Le] {
+                let staged: Vec<u8> = if dst == PixelFormat::Rgb48Le {
+                    rgb48.clone()
+                } else {
+                    rgb48
+                        .chunks_exact(6)
+                        .zip(mid.planes[3].data.chunks_exact(2))
+                        .flat_map(|(c, a)| c.iter().chain(a.iter()).copied().collect::<Vec<u8>>())
+                        .collect()
+                };
+                for threads in [1usize, 4] {
+                    let direct = convert_with(
+                        &src,
+                        si,
+                        dst,
+                        &o,
+                        &ConvertContext::new().with_threads(threads),
+                    )
+                    .expect("direct");
+                    assert!(
+                        direct.planes[0].data == staged,
+                        "{fmt:?} {w}x{h} → {dst:?} ×{threads}"
+                    );
+                }
+            }
+        }
     }
 }

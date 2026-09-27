@@ -1036,6 +1036,14 @@ fn lookup_computed(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
                 alpha: false,
             }),
             P::Gray8 => Some(ConvertOp::PlanarFamilyToGray { src: s }),
+            P::Rgb48Le => Some(ConvertOp::FamilyToPacked16 {
+                src: s,
+                alpha: false,
+            }),
+            P::Rgba64Le => Some(ConvertOp::FamilyToPacked16 {
+                src: s,
+                alpha: true,
+            }),
             _ => None,
         },
         // Packed RGB / Gray8 → family member.
@@ -2139,6 +2147,16 @@ enum ConvertOp {
         hsub: usize,
         alpha: bool,
     },
+    /// Computed: any planar family member → `Rgb48Le` (`alpha == false`)
+    /// / `Rgba64Le` (`alpha == true`) through the deep matrix in one
+    /// banded pass — every sample widened to 16 bits (MSB replication),
+    /// chroma read nearest, alpha widened or synthesised opaque. The
+    /// same bytes as the widen-to-`Yuva444P16Le` staged route it
+    /// replaces.
+    FamilyToPacked16 {
+        src: PlanarYuv,
+        alpha: bool,
+    },
     /// Packed deep RGB → 16-bit planar YUV(A) at full precision: the
     /// inverse of [`Self::DeepYuvToRgb48`] — encode at 4:4:4, then
     /// downsample chroma at 16-bit precision; with `alpha` the packed
@@ -2525,7 +2543,10 @@ impl ConvertOp {
                 do_gray_depth_rescale(src, src_info, src_bits, dst_bits)
             }
             Self::DeepYuvToRgb48 { wsub, hsub, alpha } => {
-                do_deep_yuv_to_rgb48(src, src_info, matrix, wsub, hsub, alpha)
+                do_deep_yuv_to_rgb48(src, src_info, matrix, wsub, hsub, alpha, workers)
+            }
+            Self::FamilyToPacked16 { src: s, alpha } => {
+                deep_family_to_packed16(src, src_info, matrix, s, alpha, workers)
             }
             Self::Rgb48ToDeepYuv { wsub, hsub, alpha } => {
                 do_rgb48_to_deep_yuv(src, src_info, matrix, wsub, hsub, alpha)
@@ -3065,8 +3086,29 @@ fn do_deep_yuv_to_rgb48(
     wsub: usize,
     hsub: usize,
     alpha: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
-    let need = if alpha { 4 } else { 3 };
+    let s = PlanarYuv {
+        wsub,
+        hsub,
+        bits: 16,
+        alpha,
+    };
+    deep_family_to_packed16(src, src_info, matrix, s, alpha, workers)
+}
+
+/// Any planar family member (8 / 10 / 12 / 16 bits, any siting, alpha
+/// or not) → packed `Rgb48Le` / `Rgba64Le` through the full-precision
+/// deep matrix, in one banded pass (see [`planar8::decode_deep`]).
+fn deep_family_to_packed16(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    s: PlanarYuv,
+    alpha_out: bool,
+    workers: usize,
+) -> Result<VideoFrame> {
+    let need = if s.alpha { 4 } else { 3 };
     if src.planes.len() < need {
         return Err(Error::invalid(
             "pixfmt: deep YUV source needs Y, U, V(, A) planes",
@@ -3074,62 +3116,38 @@ fn do_deep_yuv_to_rgb48(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
-    let yp = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h)?;
-    let up = gather_tight(&src.planes[1].data, src.planes[1].stride, cw * 2, ch)?;
-    let vp = gather_tight(&src.planes[2].data, src.planes[2].stride, cw * 2, ch)?;
-    // Upsample chroma to 4:4:4 at 16-bit precision when subsampled.
-    let (u444, v444) = match (wsub, hsub) {
-        (1, 1) => (up, vp),
-        (2, 1) => {
-            let mut u = vec![0u8; w * h * 2];
-            let mut v = vec![0u8; w * h * 2];
-            yuv::chroma16le_422_to_444(&up, &mut u, w, h);
-            yuv::chroma16le_422_to_444(&vp, &mut v, w, h);
-            (u, v)
-        }
-        (2, 2) => {
-            let mut u = vec![0u8; w * h * 2];
-            let mut v = vec![0u8; w * h * 2];
-            yuv::chroma16le_420_to_444(&up, &mut u, w, h);
-            yuv::chroma16le_420_to_444(&vp, &mut v, w, h);
-            (u, v)
-        }
-        (1, 2) => {
-            let mut u = vec![0u8; w * h * 2];
-            let mut v = vec![0u8; w * h * 2];
-            yuv::chroma16le_440_to_444(&up, &mut u, w, h);
-            yuv::chroma16le_440_to_444(&vp, &mut v, w, h);
-            (u, v)
-        }
-        _ => {
-            return Err(Error::unsupported(
-                "pixfmt: unsupported deep YUV subsampling",
-            ))
-        }
+    let (cw, ch) = chroma_dims(w, h, s.wsub, s.hsub);
+    let sb = s.sample_bytes();
+    let yp = tight_plane(&src.planes[0], w * sb, h)?;
+    let up = tight_plane(&src.planes[1], cw * sb, ch)?;
+    let vp = tight_plane(&src.planes[2], cw * sb, ch)?;
+    let ap = if s.alpha && alpha_out {
+        Some(tight_plane(&src.planes[3], w * sb, h)?)
+    } else {
+        None
     };
-    let mut rgb = vec![0u8; w * h * 6];
-    yuv::yuv444p16_to_rgb48(&yp, &u444, &v444, &mut rgb, w, h, matrix);
-    if !alpha {
-        return Ok(make_frame(
-            src,
-            vec![VideoPlane {
-                stride: w * 6,
-                data: rgb,
-            }],
-        ));
-    }
-    let ap = gather_tight(&src.planes[3].data, src.planes[3].stride, w * 2, h)?;
-    let mut rgba = vec![0u8; w * h * 8];
-    for i in 0..w * h {
-        rgba[i * 8..i * 8 + 6].copy_from_slice(&rgb[i * 6..i * 6 + 6]);
-        rgba[i * 8 + 6..i * 8 + 8].copy_from_slice(&ap[i * 2..i * 2 + 2]);
-    }
+    let out = planar8::decode_deep(
+        &planar8::PlanarDeep {
+            y: &yp,
+            u: &up,
+            v: &vp,
+            a: ap.as_deref(),
+            w,
+            h,
+            wsub: s.wsub,
+            hsub: s.hsub,
+            bits: s.bits,
+        },
+        alpha_out,
+        matrix,
+        workers,
+    );
+    let bpp = if alpha_out { 8 } else { 6 };
     Ok(make_frame(
         src,
         vec![VideoPlane {
-            stride: w * 8,
-            data: rgba,
+            stride: w * bpp,
+            data: out,
         }],
     ))
 }
@@ -4324,12 +4342,12 @@ fn planar_family_to_rgb(
     let v_src = tight_plane(&src.planes[2], cw * sb, ch)?;
     // Deep planes are narrowed to bytes (crate depth policy); 8-bit
     // planes are borrowed as they are.
-    let yp = plane_to_depth_cow(y_src, w * h, s.bits);
-    let up = plane_to_depth_cow(u_src, cw * ch, s.bits);
-    let vp = plane_to_depth_cow(v_src, cw * ch, s.bits);
+    let yp = plane_to_depth_cow(y_src, w * h, s.bits, workers);
+    let up = plane_to_depth_cow(u_src, cw * ch, s.bits, workers);
+    let vp = plane_to_depth_cow(v_src, cw * ch, s.bits, workers);
     let ap = if alpha && s.alpha {
         let a_src = tight_plane(&src.planes[3], w * sb, h)?;
-        Some(plane_to_depth_cow(a_src, w * h, s.bits))
+        Some(plane_to_depth_cow(a_src, w * h, s.bits, workers))
     } else {
         None
     };
@@ -4364,9 +4382,10 @@ fn plane_to_depth_cow(
     src: std::borrow::Cow<'_, [u8]>,
     count: usize,
     src_bits: u32,
+    workers: usize,
 ) -> std::borrow::Cow<'_, [u8]> {
     if src_bits > 8 {
-        std::borrow::Cow::Owned(plane_to_depth(&src, count, src_bits, 8))
+        std::borrow::Cow::Owned(planar8::narrow_to_8(&src, count, src_bits, workers))
     } else {
         src
     }
@@ -6317,7 +6336,7 @@ fn deep_yuv_to_float(
     s: PlanarYuv,
     d: FloatLayout,
 ) -> Result<VideoFrame> {
-    let packed = do_deep_yuv_to_rgb48(src, src_info, matrix, s.wsub, s.hsub, s.alpha)?;
+    let packed = do_deep_yuv_to_rgb48(src, src_info, matrix, s.wsub, s.hsub, s.alpha, 1)?;
     let mid = if s.alpha {
         PixelFormat::Rgba64Le
     } else {

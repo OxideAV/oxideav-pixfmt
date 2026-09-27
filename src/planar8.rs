@@ -566,6 +566,137 @@ pub(crate) fn encode(
     Planar8Out { y, u, v, a, cw, ch }
 }
 
+/// Narrow a tight plane of `count` LE16 words at `bits` to bytes (the
+/// crate's truncating depth move, `yuv::depth_down_le16_plane`), split
+/// into up to `workers` chunks that run on scoped threads.
+pub(crate) fn narrow_to_8(src: &[u8], count: usize, bits: u32, workers: usize) -> Vec<u8> {
+    let mut out = vec![0u8; count];
+    let parts = workers.max(1).min(count.div_ceil(1 << 16)).max(1);
+    let per = count.div_ceil(parts).max(1);
+    let jobs: Vec<(usize, &mut [u8])> = out
+        .chunks_mut(per)
+        .enumerate()
+        .map(|(i, c)| (i * per, c))
+        .collect();
+    run_bands(jobs, |(start, chunk): (usize, &mut [u8])| {
+        let n = chunk.len();
+        yuv::depth_down_le16_plane(&src[start * 2..(start + n) * 2], chunk, n, bits);
+    });
+    out
+}
+
+// ---------------------------------------------------------------------
+// Deep planar YUV(A) → packed 16-bit RGB(A) (the Q30 deep matrix).
+
+/// Tight planar YUV(A) source for [`decode_deep`]: samples are bytes
+/// when `bits == 8`, else LE16 words with `bits` significant low bits.
+pub(crate) struct PlanarDeep<'a> {
+    pub y: &'a [u8],
+    pub u: &'a [u8],
+    pub v: &'a [u8],
+    pub a: Option<&'a [u8]>,
+    pub w: usize,
+    pub h: usize,
+    pub wsub: usize,
+    pub hsub: usize,
+    pub bits: u32,
+}
+
+/// Widen a row of `n` samples at `bits` to 16 bits by the crate's
+/// MSB-replicating rule (`×257` for bytes; `(v << d) | (v >> (bits − d))`
+/// for words), masking stray high bits first — the exact mapping of
+/// `yuv::depth_up_8_to_le16_plane` / `yuv::depth_rescale_le16_plane`.
+#[inline]
+fn widen_row16(src: &[u8], dst: &mut [u16], bits: u32) {
+    if bits <= 8 {
+        for (d, &v) in dst.iter_mut().zip(src.iter()) {
+            *d = ((v as u16) << 8) | v as u16;
+        }
+    } else if bits >= 16 {
+        for (d, b) in dst.iter_mut().zip(src.chunks_exact(2)) {
+            *d = u16::from_le_bytes([b[0], b[1]]);
+        }
+    } else {
+        let mask = (1u32 << bits) - 1;
+        let sh = 16 - bits;
+        let back = bits - sh;
+        for (d, b) in dst.iter_mut().zip(src.chunks_exact(2)) {
+            let v = u16::from_le_bytes([b[0], b[1]]) as u32 & mask;
+            *d = ((v << sh) | (v >> back)) as u16;
+        }
+    }
+}
+
+/// Planar YUV(A) at any family depth → tight packed `Rgb48Le`
+/// (`alpha_out == false`) or `Rgba64Le` through the full-precision Q30
+/// deep matrix, row-banded like [`decode`]. Every sample is widened to
+/// 16 bits (MSB replication), chroma is read nearest-neighbour at
+/// `(col / wsub, row / hsub)`, and alpha is the widened source plane or
+/// opaque 65535 — sample for sample what the historical route (widen to
+/// the 16-bit 4:4:4 tier, upsample, decode) produced, without the three
+/// whole-frame intermediates.
+pub(crate) fn decode_deep(
+    src: &PlanarDeep<'_>,
+    alpha_out: bool,
+    matrix: YuvMatrix,
+    workers: usize,
+) -> Vec<u8> {
+    let (w, h) = (src.w, src.h);
+    let bpp = if alpha_out { 8 } else { 6 };
+    let mut out = vec![0u8; w * h * bpp];
+    if w == 0 || h == 0 {
+        return out;
+    }
+    let (cw, _) = chroma_dims(w, h, src.wsub, src.hsub);
+    let d = matrix.decode_params16();
+    let row_bytes = w * bpp;
+    let bands = row_bands(h, src.hsub, workers);
+    let mut jobs = Vec::with_capacity(bands.len());
+    let mut rest: &mut [u8] = &mut out;
+    for &(r0, r1) in &bands {
+        let (band, tail) = rest.split_at_mut((r1 - r0) * row_bytes);
+        rest = tail;
+        jobs.push((r0, band));
+    }
+    let (wsub, hsub, bits) = (src.wsub, src.hsub, src.bits);
+    let sb = if bits > 8 { 2 } else { 1 };
+    run_bands(jobs, |(r0, band): (usize, &mut [u8])| {
+        // Per-row 16-bit staging: luma (and alpha) every row, chroma
+        // once per chroma row.
+        let mut y16 = vec![0u16; w];
+        let mut u16r = vec![0u16; cw];
+        let mut v16r = vec![0u16; cw];
+        let mut a16 = vec![u16::MAX; w];
+        let mut staged_cr = usize::MAX;
+        for (i, drow) in band.chunks_exact_mut(row_bytes).enumerate() {
+            let row = r0 + i;
+            widen_row16(&src.y[row * w * sb..(row + 1) * w * sb], &mut y16, bits);
+            let cr = row / hsub;
+            if cr != staged_cr {
+                widen_row16(&src.u[cr * cw * sb..(cr + 1) * cw * sb], &mut u16r, bits);
+                widen_row16(&src.v[cr * cw * sb..(cr + 1) * cw * sb], &mut v16r, bits);
+                staged_cr = cr;
+            }
+            if alpha_out {
+                if let Some(a) = src.a {
+                    widen_row16(&a[row * w * sb..(row + 1) * w * sb], &mut a16, bits);
+                }
+            }
+            for (col, px) in drow.chunks_exact_mut(bpp).enumerate() {
+                let ci = col / wsub;
+                let (r, g, b) = yuv::yuv16_to_rgb48_fp(y16[col], u16r[ci], v16r[ci], &d);
+                px[0..2].copy_from_slice(&r.to_le_bytes());
+                px[2..4].copy_from_slice(&g.to_le_bytes());
+                px[4..6].copy_from_slice(&b.to_le_bytes());
+                if alpha_out {
+                    px[6..8].copy_from_slice(&a16[col].to_le_bytes());
+                }
+            }
+        }
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
