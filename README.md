@@ -43,10 +43,11 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`, `Rgb48Le` ↔ `Rgba64Le` (colour words verbatim, opaque 65535 synthesis / drop) |
 | Deep matrix             | the 16-bit planar tier ({`Yuv`,`Yuva`} × {420,422,444} `P16Le` + `Yuv440P16Le`) ↔ `Rgb48Le` / `Rgba64Le` at **full 16-bit precision** (Q30 k-coefficient construction, chroma resampled at 16 bits, Yuva alpha word verbatim); the 10/12-bit family stages in losslessly via the exact widen |
 | Planar GBR              | the full ten-member ladder — `Gbrp8` / `Gbrap8` (byte planes) through `Gbrp10/12/14Le` to the full-width `Gbrp16Le` / `Gbrap16Le` — ↔ **both** `Rgb48Le` and `Rgba64Le` (alpha synthesised opaque / dropped when the shapes differ) and ↔ `Rgb24` / `Rgba`; plus `Gray8` interop (full-range luminance projection out, MSB-replicated broadcast in) and `Gbrp8` ↔ `Gbrap8` alpha append / drop |
-| YUV planar ↔ RGB        | `Yuv420P` / `Yuv422P` / `Yuv444P` ↔ `Rgb24` / `Rgba`, plus the full-range `YuvJ*` families direct ↔ RGB |
+| YUV planar ↔ RGB        | `Yuv420P` / `Yuv422P` / `Yuv444P` ↔ `Rgb24` / `Rgba`, plus the full-range `YuvJ*` families direct ↔ RGB; any width / height (chroma `ceil(w/2)` × `ceil(h/2)`); optional row-band threads via `convert_with` |
+| Colour signalling       | the frame's `ColorSignal` record / a `ConvertContext` override select range (full range on `Yuva*` and 10/12/16-bit layouts) and the H.273 matrix (1, 4, 5, 6, 7, 9; identity → planar GBR) |
 | Bit-depth ladder        | planar YUV 8 ↔ 10 ↔ 12 ↔ 16 bit (same layout, exact round-trips; `Yuv*P16Le` is full-scale 65535); `Gray8` ↔ `Gray10Le` ↔ `Gray12Le` ↔ `Gray16Le` |
 | Chroma subsampling      | `4:4:4` ↔ `4:2:2` ↔ `4:2:0` (SIMD-accelerated up- and down-sample); `4:4:0` (full-width, half-height chroma) ↔ every other siting via a vertical pair-average / row broadcast composed through 4:4:4 |
-| 4:4:0 planar            | `Yuv440P` / `Yuv440P10Le` / `Yuv440P12Le` / `Yuv440P16Le` are full members of the planar-family engine (direct to every planar YUV(A) member, `Rgb24` / `Rgba` / `Gray8`, `Yuv411P`, and `Yuv440P16Le` ↔ `Rgb48Le` on the deep matrix); odd widths legal, odd heights rejected like odd widths on 4:2:2 |
+| 4:4:0 planar            | `Yuv440P` / `Yuv440P10Le` / `Yuv440P12Le` / `Yuv440P16Le` are full members of the planar-family engine (direct to every planar YUV(A) member, `Rgb24` / `Rgba` / `Gray8`, `Yuv411P`, and `Yuv440P16Le` ↔ `Rgb48Le` on the deep matrix); odd widths and heights legal |
 | Scene-referred float    | `GrayF32Le` / `RgbF32Le` / `RgbaF32Le` / `GbrpF32Le` / `GbrapF32Le` (binary32 LE, linear light, no full-scale): all-to-all inside the family with **no clamping** (speculars above 1.0, negative excursions and NaN payloads survive), direct ↔ 18 integer shapes (`Gray8/10/12/16Le`, `Rgb24` / `Rgba` / `Rgb48Le` / `Rgba64Le`, the ten-member `Gbrp*`/`Gbrap*` ladder) by pure normalisation `code / (2^bits − 1)` in and saturating round-to-nearest out (NaN → 0; every integer code round-trips exactly; **no transfer function is applied** — use `transfer` for that), and direct ↔ the 16-bit planar YUV(A) tier through the deep matrix so 8/10/12-bit YUV stages in at full precision |
 | Direct planar ↔ planar  | `Yuv420P` / `Yuv422P` / `Yuv444P` all-to-all + same on `YuvJ*` and on the 16-bit `Yuv*P16Le` trio (no RGB hop) |
 | Semi-planar             | `NV12` / `NV21` ↔ `Yuv420P` / `Rgb24` / `Rgba`                              |
@@ -123,11 +124,13 @@ re-apply stride yourself if your frames carry one.
 ```rust
 use oxideav_pixfmt::yuv::{yuv420_to_rgb24, YuvMatrix};
 
-// Your decoded YUV planes. Y is full resolution, U/V are each w/2 × h/2.
+// Your decoded YUV planes. Y is full resolution, U/V are each
+// ceil(w/2) × ceil(h/2) (odd sizes are fine).
 let (w, h) = (1920, 1080);
+let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
 let y_plane: Vec<u8> = /* w * h bytes */ vec![0; w * h];
-let u_plane: Vec<u8> = /* (w/2) * (h/2) bytes */ vec![128; (w / 2) * (h / 2)];
-let v_plane: Vec<u8> = /* (w/2) * (h/2) bytes */ vec![128; (w / 2) * (h / 2)];
+let u_plane: Vec<u8> = /* cw * ch bytes */ vec![128; cw * ch];
+let v_plane: Vec<u8> = /* cw * ch bytes */ vec![128; cw * ch];
 
 let mut rgb = vec![0u8; w * h * 3];
 yuv420_to_rgb24(&y_plane, &u_plane, &v_plane, &mut rgb, w, h, YuvMatrix::BT709);
@@ -342,6 +345,63 @@ encodes to Y = 60160 exactly and `r = g = b` content pins chroma to
 32768. The Q30 kernels are verified against an independent f64 model
 to ±1 LSB at 16-bit scale across all six matrix variants.
 
+### Colour signalling, range and threads — `convert_with`
+
+`convert()` takes the range from the pixel format (`YuvJ*` full, every
+other YUV layout limited) and the matrix weights from
+`ConvertOptions::color_space`. `convert_with(src, info, dst, &opts,
+&ctx)` adds a `ConvertContext` (`#[non_exhaustive]`, builder methods —
+so `ConvertOptions` keeps its struct-literal shape and new knobs never
+break callers):
+
+* **Colour signal.** The source frame's
+  `VideoFrame::color_signal()` record (oxideav-core 0.1.37, read for YUV
+  sources only) and the `ConvertContext::signal` override
+  (`with_range` / `with_matrix` / `with_signal`) take precedence over
+  the format label and `color_space`, field by field (override, then
+  frame, then label). H.273 matrices 1 (BT.709), 4 (FCC), 5 / 6
+  (BT.601), 7 (SMPTE ST 240) and 9 (BT.2020 NCL) are applied through
+  the same Q15 / Q30 kernels; 0 (identity) routes the planes as G, B, R
+  through the planar GBR family (limited range scaled like luma, per
+  H.273 equations 27–29); other code points reject YUV ↔ RGB hops with
+  `Error::Unsupported`. This is how a full-range `Yuva420P` or
+  `Yuv420P10Le` HEIF payload (no `YuvJ*` label exists for those) is
+  decoded correctly. An unsignalled frame converts exactly as before.
+* **Threads.** `ConvertContext::execution` is an
+  `oxideav_core::ExecutionContext`; the default is serial (the core
+  threading contract), `with_threads(n)` / `ExecutionContext::auto()`
+  lets the row-band engine run bands of whole chroma rows on scoped
+  threads. Output is byte-identical at every budget.
+
+```rust
+use oxideav_core::{ColorRange, ExecutionContext, MatrixCoefficients};
+use oxideav_pixfmt::{convert_with, ConvertContext, ConvertOptions};
+
+let ctx = ConvertContext::new()
+    .with_range(ColorRange::Full)              // e.g. from the nclx box
+    .with_matrix(MatrixCoefficients::BT709)
+    .with_execution(ExecutionContext::auto());
+let rgba = convert_with(&frame, info, PixelFormat::Rgba, &ConvertOptions::default(), &ctx)?;
+```
+
+### Odd dimensions
+
+Every subsampled planar / semi-planar layout (4:2:0, 4:2:2, 4:4:0 at
+every depth, the `Yuva*` family, NV12 / NV21, `YuvJ*`) accepts any
+width and height in both directions. Chroma planes hold
+`ceil(w / wsub)` × `ceil(h / hsub)` samples — the component-dimension
+rule of ITU-T T.81 A.1.1 and oxideav-core's
+`PixelFormat::plane_dimensions`. Decoding maps luma `(x, y)` to chroma
+`(x / wsub, y / hsub)`, so a trailing odd column / row reuses the last
+chroma sample; encoding and chroma downsampling average each block with
+the missing positions replicating the last column / row. The staged
+signal texts (H.273 §8.7, the BT-series 4:2:0 definitions) place chroma
+samples for pictures whose luma dimensions are multiples of the
+subsampling and say nothing about a trailing partial block, so edge
+replication is this crate's documented choice. `Yuv411P` still needs a
+multiple-of-4 width and packed `Yuyv422` / `Uyvy422` an even width; a
+plane shorter than its geometry is `Error::Invalid`, never a panic.
+
 Range rescaling between `YuvJ*` (full) and `Yuv*` (limited) planes is
 exposed both through `convert()` and directly as
 `yuv::{limited_to_full_luma, limited_to_full_chroma, full_to_limited_luma, full_to_limited_chroma}`
@@ -371,9 +431,12 @@ display-light values.
 
 ## Performance
 
-Every converter has a scalar Q15 fixed-point reference; SIMD paths are
-validated against it to ±1 LSB in the test suite. Dispatch is lazy and
-cached on first call per process.
+Every converter has a scalar Q15 fixed-point reference. The YUV ↔ RGB
+SIMD paths (AVX2 and NEON, both directions) evaluate the same integer
+arithmetic and are byte-identical to it — `tests/engine_identity.rs`
+pins every `convert()` output byte of the YUV(A) ↔ RGB(A) rows to a
+per-pixel oracle. Dispatch is lazy and cached on first call per
+process.
 
 **1920×1080, single Intel i9-14900K core, AVX2 path:**
 
@@ -396,24 +459,32 @@ a fused 2-row luma + 2×2-chroma loop that does one `pshufb` deinterleave
 per 8 pixels and pair-sums the chroma via `pmaddubsw`.
 
 **12-megapixel still (4032×3024) through the high-level `convert()`,
-Apple M4 Max single core, NEON path (`cargo bench --features bench
---bench heif_12mp`).** Each row is the whole call — plane gathering,
-kernel, output allocation — i.e. what an image pipeline pays per
-decoded HEIF picture. "r462" is the pre-round baseline.
+Apple M4 Max, NEON path (`cargo bench --features bench --bench
+heif_12mp`).** Each row is the whole call — plane access, kernel, output
+allocation — i.e. what an image pipeline pays per decoded HEIF picture.
+"r462" is the pre-round baseline; "serial" is `convert()` (the default,
+one thread); "threaded" is `convert_with` with
+`ExecutionContext::auto()` (row bands on scoped threads, same bytes).
 
-| conversion                   | r462 baseline |
-| ---------------------------- | ------------- |
-| `Yuv420P → Rgb24`            | 4.48 ms       |
-| `YuvJ420P → Rgb24`           | 4.47 ms       |
-| `Yuv420P → Rgba`             | 15.2 ms       |
-| `Yuv420P10Le → Rgb24`        | 7.04 ms       |
-| `Yuv420P10Le → Rgb48Le`      | 34.9 ms       |
-| `Yuva420P → Rgba`            | 17.4 ms       |
-| `Yuv444P → Rgb24`            | 4.03 ms       |
-| `Rgb24 → Yuv420P`            | 8.12 ms       |
-| `Gray8 → Rgb24`              | 0.57 ms       |
-| `Yuv420P → Gray8`            | 1.39 ms       |
-| `Rgb24 → Gray8`              | 2.63 ms       |
+| conversion                   | r462 baseline | serial   | threaded |
+| ---------------------------- | ------------- | -------- | -------- |
+| `Yuv420P → Rgb24`            | 4.48 ms       | 4.01 ms  | 0.73 ms  |
+| `YuvJ420P → Rgb24`           | 4.47 ms       | 4.05 ms  | 0.76 ms  |
+| `Yuv420P → Rgba`             | 15.2 ms       | 6.26 ms  | 1.07 ms  |
+| `Yuv420P10Le → Rgb24`        | 7.04 ms       | 6.17 ms  | 1.39 ms  |
+| `Yuv420P10Le → Rgb48Le`      | 34.9 ms       | 25.3 ms  | 3.27 ms  |
+| `Yuva420P → Rgba`            | 17.4 ms       | 4.95 ms  | 0.96 ms  |
+| `Yuv444P → Rgb24`            | 4.03 ms       | 3.39 ms  | 0.60 ms  |
+| `Rgb24 → Yuv420P`            | 8.12 ms       | 3.87 ms  | 0.58 ms  |
+| `Gray8 → Rgb24`              | 0.57 ms       | 0.56 ms  | —        |
+| `Yuv420P → Gray8`            | 1.39 ms       | 1.34 ms  | —        |
+| `Rgb24 → Gray8`              | 2.63 ms       | 2.54 ms  | —        |
+
+The Gray rows are single-pass memory copies / projections and are not
+banded. The wins come from the row-band engine (tight planes borrowed
+instead of copied, RGBA interleaved in the decode pass, RGBA input
+split a few rows at a time), the exact NEON encoder, and the one-pass
+deep matrix for 10/12-bit sources.
 
 **Porter-Duff compositing (scalar, Apple M-series single core, indicative):**
 
@@ -439,7 +510,7 @@ the divide-by-`out.a` rebuild.
 | target         | path                                                             |
 | -------------- | ---------------------------------------------------------------- |
 | x86_64 + AVX2  | AVX2 intrinsics (`pshufb`, `pmaddubsw`, `vpermq`, …)             |
-| aarch64 + NEON | NEON decode (`vld3_u8`-style); encode falls back to scalar       |
+| aarch64 + NEON | NEON decode (`vst3_u8`) and encode (`vld3q_u8`, exact 32-bit lanes) |
 | nightly +      | `std::simd` path via the `nightly` feature (portable 8-wide)     |
 | everything     | scalar fixed-point — golden reference used by the SIMD tests     |
 
@@ -495,10 +566,16 @@ wrong lengths) and drives every
 `(src, dst)` conversion, direct and staged alike, asserting
 that none panics, integer-overflows, reads out of bounds, or aborts. A
 converter may legitimately return `Err` for geometry it cannot represent
-(e.g. an odd width on a 4:2:0 layout) or for an invalid record; only a
+(e.g. a chroma plane one sample short of its rounded-up grid, a 4:1:1
+width that is not a multiple of 4, an unimplemented signalled matrix)
+or for an invalid record; only a
 crash is a finding. This
 target's first run caught an out-of-bounds chroma read on subsampled
-YUV → RGB at odd dimensions.
+YUV → RGB at odd dimensions. Subsampled sources are built on either the
+legal rounded-up chroma grid (odd sizes must convert) or a truncated
+one (must be rejected), and the sweep also drives `convert_with` with
+fuzz-chosen thread budgets and colour-signal overrides (range, and
+matrix code points including identity and reserved values).
 
 ```sh
 cargo +nightly fuzz run convert_geometry
