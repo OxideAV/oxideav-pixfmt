@@ -46,3 +46,8 @@ required-features = ["bench"]
 name = "depth_gray"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "heif_12mp"
+harness = false
+required-features = ["bench"]

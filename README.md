@@ -395,6 +395,26 @@ The YUV decode path processes 16 pixels per AVX2 iteration; encode runs
 a fused 2-row luma + 2×2-chroma loop that does one `pshufb` deinterleave
 per 8 pixels and pair-sums the chroma via `pmaddubsw`.
 
+**12-megapixel still (4032×3024) through the high-level `convert()`,
+Apple M4 Max single core, NEON path (`cargo bench --features bench
+--bench heif_12mp`).** Each row is the whole call — plane gathering,
+kernel, output allocation — i.e. what an image pipeline pays per
+decoded HEIF picture. "r462" is the pre-round baseline.
+
+| conversion                   | r462 baseline |
+| ---------------------------- | ------------- |
+| `Yuv420P → Rgb24`            | 4.48 ms       |
+| `YuvJ420P → Rgb24`           | 4.47 ms       |
+| `Yuv420P → Rgba`             | 15.2 ms       |
+| `Yuv420P10Le → Rgb24`        | 7.04 ms       |
+| `Yuv420P10Le → Rgb48Le`      | 34.9 ms       |
+| `Yuva420P → Rgba`            | 17.4 ms       |
+| `Yuv444P → Rgb24`            | 4.03 ms       |
+| `Rgb24 → Yuv420P`            | 8.12 ms       |
+| `Gray8 → Rgb24`              | 0.57 ms       |
+| `Yuv420P → Gray8`            | 1.39 ms       |
+| `Rgb24 → Gray8`              | 2.63 ms       |
+
 **Porter-Duff compositing (scalar, Apple M-series single core, indicative):**
 
 | operation                           | scalar throughput |
@@ -446,6 +466,7 @@ cargo bench --features bench --bench yuv_rgb             # just YUV encode/decod
 cargo bench --features bench --bench pixel_ops          # RGB swizzle, NV12, chroma resample, gray, deep-RGB
 cargo bench --features bench --bench alpha              # Porter-Duff over/blit/premultiply
 cargo bench --features bench --bench depth_gray        # bit-depth ladder + RGB→Gray8 projection
+cargo bench --features bench --bench heif_12mp         # 12 MP still: the production-HEIF conversion set through convert()
 OXIDEAV_PIXFMT_FORCE_SCALAR=1 cargo bench --features bench  # scalar baseline for comparison
 ```
 

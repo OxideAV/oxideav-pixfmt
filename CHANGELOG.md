@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- *(heif_12mp)* bench: the production-HEIF conversion set at 4032×3024 through `convert()`, with the pre-round baseline recorded in the README
+
 ## [0.1.8](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.7...v0.1.8) - 2026-08-30
 
 ### Added
