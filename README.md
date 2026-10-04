@@ -126,7 +126,7 @@ use oxideav_pixfmt::yuv::{yuv420_to_rgb24, YuvMatrix};
 
 // Your decoded YUV planes. Y is full resolution, U/V are each
 // ceil(w/2) × ceil(h/2) (odd sizes are fine).
-let (w, h) = (1920, 1080);
+let (w, h) = (1920usize, 1080usize);
 let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
 let y_plane: Vec<u8> = /* w * h bytes */ vec![0; w * h];
 let u_plane: Vec<u8> = /* cw * ch bytes */ vec![128; cw * ch];
@@ -178,12 +178,14 @@ directions.
 
 ```rust
 use oxideav_pixfmt::pal8::quantise_rgb24_to_pal8;
-use oxideav_pixfmt::{generate_palette, Dither, PaletteGenOptions, PaletteStrategy};
+use oxideav_pixfmt::{generate_palette, Dither, FrameInfo, PaletteGenOptions, PaletteStrategy};
+# fn collect_reference_frames() -> Vec<(&'static oxideav_core::VideoFrame, FrameInfo)> { Vec::new() }
 
-// Build a palette from one or more reference frames. `generate_palette`
-// takes &[&VideoFrame]; see `palette::Palette` if you want to construct
-// one from a raw colour list instead.
-let frames: Vec<&oxideav_core::VideoFrame> = collect_reference_frames();
+// Build a palette from one or more Rgb24 / Rgba reference frames.
+// `generate_palette` takes &[(&VideoFrame, FrameInfo)] (format and size
+// live in FrameInfo, not on the frame); see `palette::Palette` if you
+// want to construct one from a raw colour list instead.
+let frames: Vec<(&oxideav_core::VideoFrame, FrameInfo)> = collect_reference_frames();
 let palette = generate_palette(
     &frames,
     &PaletteGenOptions {
@@ -374,14 +376,17 @@ break callers):
   threads. Output is byte-identical at every budget.
 
 ```rust
-use oxideav_core::{ColorRange, ExecutionContext, MatrixCoefficients};
-use oxideav_pixfmt::{convert_with, ConvertContext, ConvertOptions};
+use oxideav_core::{ColorRange, ExecutionContext, MatrixCoefficients, PixelFormat};
+use oxideav_pixfmt::{convert_with, ConvertContext, ConvertOptions, FrameInfo};
+# let frame = oxideav_core::VideoFrame { pts: None, planes: vec![] };
+# let info = FrameInfo::new(PixelFormat::Yuv420P, 1920, 1080);
 
 let ctx = ConvertContext::new()
     .with_range(ColorRange::Full)              // e.g. from the nclx box
     .with_matrix(MatrixCoefficients::BT709)
     .with_execution(ExecutionContext::auto());
 let rgba = convert_with(&frame, info, PixelFormat::Rgba, &ConvertOptions::default(), &ctx)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ### Odd dimensions
