@@ -730,6 +730,160 @@ pub(crate) fn decode_deep(
     out
 }
 
+// ---------------------------------------------------------------------
+// Packed 16-bit RGB(A) → 16-bit planar YUV(A) (the Q30 deep matrix).
+
+/// Tight packed 16-bit RGB(A) source for [`encode_deep`]: `comps` LE16
+/// words per pixel (3 or 4), R, G, B first.
+pub(crate) struct PackedDeep<'a> {
+    pub data: &'a [u8],
+    pub comps: usize,
+    pub w: usize,
+    pub h: usize,
+}
+
+/// One [`encode_deep`] band: `(first row, row count, Y band, U band, V
+/// band, alpha band)`.
+type EncodeBand<'a> = (
+    usize,
+    usize,
+    &'a mut [u8],
+    &'a mut [u8],
+    &'a mut [u8],
+    Option<&'a mut [u8]>,
+);
+
+/// Tight 16-bit planar output of [`encode_deep`].
+pub(crate) struct PlanarDeepOut {
+    pub y: Vec<u8>,
+    pub u: Vec<u8>,
+    pub v: Vec<u8>,
+    pub a: Option<Vec<u8>>,
+    pub cw: usize,
+    pub ch: usize,
+}
+
+/// Packed 16-bit RGB(A) → 16-bit planar YUV(A) at `wsub` × `hsub`
+/// siting through the full-precision Q30 deep matrix, row-banded like
+/// [`decode_deep`]. Each band encodes its rows at 4:4:4 into a band
+/// scratch and subsamples the chroma with the crate's 16-bit kernels
+/// (`yuv::chroma16le_444_to_*`), so the planes are sample-for-sample
+/// what a whole-frame encode followed by a whole-frame subsample
+/// produces: band boundaries fall on multiples of `hsub`, so every
+/// vertical chroma pair stays inside one band. A carried alpha word is
+/// copied verbatim into the alpha plane when `alpha_out` and the
+/// source has one; `alpha_out` without a source alpha word synthesises
+/// opaque 65535.
+pub(crate) fn encode_deep(
+    src: &PackedDeep<'_>,
+    wsub: usize,
+    hsub: usize,
+    alpha_out: bool,
+    matrix: YuvMatrix,
+    workers: usize,
+) -> PlanarDeepOut {
+    let (w, h, comps) = (src.w, src.h, src.comps);
+    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
+    let mut y = vec![0u8; w * h * 2];
+    let mut u = vec![0u8; cw * ch * 2];
+    let mut v = vec![0u8; cw * ch * 2];
+    let mut a = alpha_out.then(|| vec![0u8; w * h * 2]);
+    if w == 0 || h == 0 {
+        return PlanarDeepOut { y, u, v, a, cw, ch };
+    }
+    let p = matrix.encode_params16();
+    let bands = row_bands(h, hsub, workers);
+    let mut jobs = Vec::with_capacity(bands.len());
+    let (mut yr, mut ur, mut vr): (&mut [u8], &mut [u8], &mut [u8]) = (&mut y, &mut u, &mut v);
+    let mut ar: Option<&mut [u8]> = a.as_deref_mut();
+    for &(r0, r1) in &bands {
+        let n = r1 - r0;
+        let cn = r1.div_ceil(hsub) - r0 / hsub;
+        let (yb, yt) = yr.split_at_mut(n * w * 2);
+        yr = yt;
+        let (ub, ut) = ur.split_at_mut(cn * cw * 2);
+        ur = ut;
+        let (vb, vt) = vr.split_at_mut(cn * cw * 2);
+        vr = vt;
+        let ab = ar.take().map(|rest| {
+            let (band, tail) = rest.split_at_mut(n * w * 2);
+            ar = Some(tail);
+            band
+        });
+        jobs.push((r0, n, yb, ub, vb, ab));
+    }
+    let rowbytes = w * comps * 2;
+    run_bands(jobs, |(r0, n, yb, ub, vb, ab): EncodeBand<'_>| {
+        let full = wsub == 1 && hsub == 1;
+        // 4:4:4 chroma for the band: straight into the output when
+        // the target is 4:4:4, else into a band scratch.
+        let mut u444 = if full {
+            Vec::new()
+        } else {
+            vec![0u8; n * w * 2]
+        };
+        let mut v444 = if full {
+            Vec::new()
+        } else {
+            vec![0u8; n * w * 2]
+        };
+        let mut alpha_rows = ab;
+        for i in 0..n {
+            let row = &src.data[(r0 + i) * rowbytes..(r0 + i + 1) * rowbytes];
+            let yrow = &mut yb[i * w * 2..(i + 1) * w * 2];
+            let (urow, vrow) = if full {
+                (
+                    &mut ub[i * w * 2..(i + 1) * w * 2],
+                    &mut vb[i * w * 2..(i + 1) * w * 2],
+                )
+            } else {
+                (
+                    &mut u444[i * w * 2..(i + 1) * w * 2],
+                    &mut v444[i * w * 2..(i + 1) * w * 2],
+                )
+            };
+            for col in 0..w {
+                let px = &row[col * comps * 2..];
+                let r = u16::from_le_bytes([px[0], px[1]]);
+                let g = u16::from_le_bytes([px[2], px[3]]);
+                let b = u16::from_le_bytes([px[4], px[5]]);
+                let (yy, cb, cr) = yuv::rgb48_to_yuv16_fp(r, g, b, &p);
+                yrow[col * 2..col * 2 + 2].copy_from_slice(&yy.to_le_bytes());
+                urow[col * 2..col * 2 + 2].copy_from_slice(&cb.to_le_bytes());
+                vrow[col * 2..col * 2 + 2].copy_from_slice(&cr.to_le_bytes());
+            }
+            if let Some(arows) = alpha_rows.as_deref_mut() {
+                let arow = &mut arows[i * w * 2..(i + 1) * w * 2];
+                if comps == 4 {
+                    for col in 0..w {
+                        let px = &row[col * comps * 2 + 6..col * comps * 2 + 8];
+                        arow[col * 2..col * 2 + 2].copy_from_slice(px);
+                    }
+                } else {
+                    arow.fill(0xFF);
+                }
+            }
+        }
+        match (wsub, hsub) {
+            (1, 1) => {}
+            (2, 1) => {
+                yuv::chroma16le_444_to_422(&u444, ub, w, n);
+                yuv::chroma16le_444_to_422(&v444, vb, w, n);
+            }
+            (2, 2) => {
+                yuv::chroma16le_444_to_420(&u444, ub, w, n);
+                yuv::chroma16le_444_to_420(&v444, vb, w, n);
+            }
+            (1, 2) => {
+                yuv::chroma16le_444_to_440(&u444, ub, w, n);
+                yuv::chroma16le_444_to_440(&v444, vb, w, n);
+            }
+            _ => unreachable!("encode_deep: unsupported siting {wsub}x{hsub}"),
+        }
+    });
+    PlanarDeepOut { y, u, v, a, cw, ch }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

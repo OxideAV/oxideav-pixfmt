@@ -1051,6 +1051,11 @@ fn lookup_computed(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
                 alpha: false,
             }),
             P::Gray8 => Some(ConvertOp::PlanarFamilyToGray { src: s }),
+            // Deep grey words via the luma plane, at every family depth.
+            P::Gray10Le | P::Gray12Le | P::Gray16Le => Some(ConvertOp::PlanarFamilyToDeepGray {
+                src: s,
+                bits: deep_gray_bits(dst),
+            }),
             P::Rgb48Le => Some(ConvertOp::FamilyToPacked16 {
                 src: s,
                 alpha: false,
@@ -1072,6 +1077,18 @@ fn lookup_computed(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
                 alpha_in: false,
             }),
             P::Gray8 => Some(ConvertOp::GrayToPlanarFamily { dst: d }),
+            P::Gray10Le | P::Gray12Le | P::Gray16Le => Some(ConvertOp::DeepGrayToPlanarFamily {
+                bits: deep_gray_bits(src),
+                dst: d,
+            }),
+            P::Rgb48Le => Some(ConvertOp::Packed16ToFamily {
+                dst: d,
+                alpha_in: false,
+            }),
+            P::Rgba64Le => Some(ConvertOp::Packed16ToFamily {
+                dst: d,
+                alpha_in: true,
+            }),
             _ => None,
         },
         (None, None) => None,
@@ -2331,6 +2348,35 @@ enum ConvertOp {
     GrayToPlanarFamily {
         dst: PlanarYuv,
     },
+    /// Computed tier: packed `Rgb48Le` / `Rgba64Le` → any planar family
+    /// member. One banded 16-bit encode through the Q30 deep matrix
+    /// with the chroma subsampled at 16 bits, then every plane narrowed
+    /// to the member's depth (truncation). Alpha carried / dropped /
+    /// synthesised opaque full-scale.
+    Packed16ToFamily {
+        dst: PlanarYuv,
+        alpha_in: bool,
+    },
+    /// Computed tier: `Gray10Le` / `Gray12Le` / `Gray16Le` → any planar
+    /// family member. The grey plane becomes luma: widened to
+    /// the deeper of the two depths (exact ladder rule), moved full →
+    /// limited range there (H.273 equations 27–29 at that depth) unless
+    /// the signal is full range, then narrowed to the member's depth;
+    /// chroma is the exact neutral mid-code `1 << (bits − 1)`; alpha
+    /// (when carried) is opaque full-scale. No colour matrix.
+    DeepGrayToPlanarFamily {
+        bits: u32,
+        dst: PlanarYuv,
+    },
+    /// Computed tier: any planar family member → `Gray10Le` /
+    /// `Gray12Le` / `Gray16Le` via the luma plane: widened to the
+    /// deeper of the two depths, limited → full range there unless the
+    /// signal is full range, then narrowed to the grey width. Chroma
+    /// and alpha are never read.
+    PlanarFamilyToDeepGray {
+        src: PlanarYuv,
+        bits: u32,
+    },
     /// Computed tier: any ordered pair inside the scene-referred float
     /// family. Gray broadcasts to colour, colour projects to gray
     /// through the linear-light luminance row of the selected
@@ -2615,7 +2661,16 @@ impl ConvertOp {
                 deep_family_to_packed16(src, src_info, matrix, s, alpha, workers)
             }
             Self::Rgb48ToDeepYuv { wsub, hsub, alpha } => {
-                do_rgb48_to_deep_yuv(src, src_info, matrix, wsub, hsub, alpha)
+                do_rgb48_to_deep_yuv(src, src_info, matrix, wsub, hsub, alpha, workers)
+            }
+            Self::Packed16ToFamily { dst: d, alpha_in } => {
+                packed16_to_family(src, src_info, matrix, d, alpha_in, workers)
+            }
+            Self::DeepGrayToPlanarFamily { bits, dst: d } => {
+                deep_gray_to_planar_family(src, src_info, bits, d, ctx.limited(true), workers)
+            }
+            Self::PlanarFamilyToDeepGray { src: s, bits } => {
+                planar_family_to_deep_gray(src, src_info, s, bits, ctx.limited(true), workers)
             }
             Self::Rgb48ToRgba64 => packed_map(src, src_info, 6, 8, rgb::rgb48_to_rgba64),
             Self::Rgba64ToRgb48 => packed_map(src, src_info, 8, 6, rgb::rgba64_to_rgb48),
@@ -3234,7 +3289,8 @@ fn deep_family_to_packed16(
 /// Packed deep RGB → 16-bit planar YUV(A) at full precision: encode at
 /// 4:4:4 through the Q30 deep matrix, then downsample chroma at 16-bit
 /// precision; the packed alpha word (when present on both sides)
-/// becomes the full-resolution alpha plane verbatim.
+/// becomes the full-resolution alpha plane verbatim. The 16-bit case
+/// of [`packed16_to_family`].
 fn do_rgb48_to_deep_yuv(
     src: &VideoFrame,
     src_info: FrameInfo,
@@ -3242,76 +3298,79 @@ fn do_rgb48_to_deep_yuv(
     wsub: usize,
     hsub: usize,
     alpha: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
+    let d = PlanarYuv {
+        wsub,
+        hsub,
+        bits: 16,
+        alpha,
+    };
+    packed16_to_family(src, src_info, matrix, d, alpha, workers)
+}
+
+/// Computed `Packed16ToFamily` op: packed `Rgb48Le` / `Rgba64Le` → any
+/// planar family member. The picture is encoded at 16 bits through the
+/// Q30 deep matrix and the chroma subsampled at 16 bits (one banded
+/// pass, see [`planar8::encode_deep`]); every plane is then narrowed to
+/// the member's depth by the ladder rule (truncation; nothing to do at
+/// 16). Alpha is carried verbatim (narrowed with the rest), dropped, or
+/// synthesised opaque full-scale per the two shapes.
+fn packed16_to_family(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    d: PlanarYuv,
+    alpha_in: bool,
+    workers: usize,
+) -> Result<VideoFrame> {
+    if src.planes.is_empty() {
+        return Err(Error::invalid("pixfmt: packed RGB source needs a plane"));
+    }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    let (cw, ch) = chroma_dims(w, h, wsub, hsub);
-    let comps = if alpha { 4 } else { 3 };
-    let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h)?;
-    // Split out a tight 3-word RGB stream (and the alpha plane).
-    let (rgb, ap) = if alpha {
-        let mut rgb = vec![0u8; w * h * 6];
-        let mut ap = vec![0u8; w * h * 2];
-        for i in 0..w * h {
-            rgb[i * 6..i * 6 + 6].copy_from_slice(&packed[i * 8..i * 8 + 6]);
-            ap[i * 2..i * 2 + 2].copy_from_slice(&packed[i * 8 + 6..i * 8 + 8]);
-        }
-        (rgb, Some(ap))
-    } else {
-        (packed, None)
-    };
-    let mut yp = vec![0u8; w * h * 2];
-    let mut u444 = vec![0u8; w * h * 2];
-    let mut v444 = vec![0u8; w * h * 2];
-    yuv::rgb48_to_yuv444p16(&rgb, &mut yp, &mut u444, &mut v444, w, h, matrix);
-    let (up, vp) = match (wsub, hsub) {
-        (1, 1) => (u444, v444),
-        (2, 1) => {
-            let mut u = vec![0u8; cw * h * 2];
-            let mut v = vec![0u8; cw * h * 2];
-            yuv::chroma16le_444_to_422(&u444, &mut u, w, h);
-            yuv::chroma16le_444_to_422(&v444, &mut v, w, h);
-            (u, v)
-        }
-        (2, 2) => {
-            let mut u = vec![0u8; cw * ch * 2];
-            let mut v = vec![0u8; cw * ch * 2];
-            yuv::chroma16le_444_to_420(&u444, &mut u, w, h);
-            yuv::chroma16le_444_to_420(&v444, &mut v, w, h);
-            (u, v)
-        }
-        (1, 2) => {
-            let mut u = vec![0u8; cw * ch * 2];
-            let mut v = vec![0u8; cw * ch * 2];
-            yuv::chroma16le_444_to_440(&u444, &mut u, w, h);
-            yuv::chroma16le_444_to_440(&v444, &mut v, w, h);
-            (u, v)
-        }
-        _ => {
-            return Err(Error::unsupported(
-                "pixfmt: unsupported deep YUV subsampling",
-            ))
+    let comps = if alpha_in { 4 } else { 3 };
+    let packed = tight_plane(&src.planes[0], w * comps * 2, h)?;
+    let out = planar8::encode_deep(
+        &planar8::PackedDeep {
+            data: &packed,
+            comps,
+            w,
+            h,
+        },
+        d.wsub,
+        d.hsub,
+        d.alpha,
+        matrix,
+        workers,
+    );
+    let (cw, ch) = (out.cw, out.ch);
+    let sb = d.sample_bytes();
+    let narrow = |plane: Vec<u8>, count: usize| -> Vec<u8> {
+        if d.bits >= 16 {
+            plane
+        } else {
+            plane_to_depth(&plane, count, 16, d.bits)
         }
     };
     let mut planes = vec![
         VideoPlane {
-            stride: w * 2,
-            data: yp,
+            stride: w * sb,
+            data: narrow(out.y, w * h),
         },
         VideoPlane {
-            stride: cw * 2,
-            data: up,
+            stride: cw * sb,
+            data: narrow(out.u, cw * ch),
         },
         VideoPlane {
-            stride: cw * 2,
-            data: vp,
+            stride: cw * sb,
+            data: narrow(out.v, cw * ch),
         },
     ];
-    if let Some(ap) = ap {
+    if let Some(a) = out.a {
         planes.push(VideoPlane {
-            stride: w * 2,
-            data: ap,
+            stride: w * sb,
+            data: narrow(a, w * h),
         });
     }
     Ok(make_frame(src, planes))
@@ -3540,6 +3599,137 @@ fn do_deep_gray_to_ya16(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Res
     let g16 = do_gray_depth_rescale(src, src_info, bits, 16)?;
     let g16_info = FrameInfo::new(PixelFormat::Gray16Le, src_info.width, src_info.height);
     packed_map(&g16, g16_info, 2, 4, gray::gray16le_to_ya16le)
+}
+
+/// Significant bits of a deep grey word format.
+fn deep_gray_bits(f: PixelFormat) -> u32 {
+    match f {
+        PixelFormat::Gray10Le => 10,
+        PixelFormat::Gray12Le => 12,
+        _ => 16,
+    }
+}
+
+/// Move one luma plane between `src_bits` and `dst_bits` (bytes at 8,
+/// LE16 words above; at least one side is deep) with the range move
+/// (`limited`: full → limited when `to_yuv`, limited → full otherwise)
+/// applied at the deeper of the two depths, band by band. Widening
+/// before the move keeps every source code distinct through the
+/// rescale; narrowing after it is the ladder truncation.
+#[allow(clippy::too_many_arguments)]
+fn luma_depth_range_banded(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    src_bits: u32,
+    dst_bits: u32,
+    limited: bool,
+    to_yuv: bool,
+    workers: usize,
+) -> Vec<u8> {
+    let work = src_bits.max(dst_bits);
+    debug_assert!(work > 8);
+    let ssb = if src_bits > 8 { 2 } else { 1 };
+    let dsb = if dst_bits > 8 { 2 } else { 1 };
+    planar8::map_packed_banded(src, w * ssb, w * dsb, h, workers, |s, d| {
+        let n = d.len() / dsb;
+        let mut scratch = Vec::new();
+        // Stage at the work depth — straight into the output when that
+        // is the output's width, else in a band scratch.
+        let stage: &mut [u8] = if dst_bits == work {
+            d
+        } else {
+            scratch = vec![0u8; n * 2];
+            &mut scratch
+        };
+        if src_bits == work {
+            stage.copy_from_slice(s);
+        } else if src_bits > 8 {
+            yuv::depth_rescale_le16_plane(s, stage, n, src_bits, work);
+        } else {
+            yuv::depth_up_8_to_le16_plane(s, stage, n, work);
+        }
+        if limited {
+            if to_yuv {
+                range_full_to_limited(stage, work);
+            } else {
+                range_limited_to_full(stage, work);
+            }
+        }
+        if dst_bits != work {
+            if dst_bits > 8 {
+                yuv::depth_rescale_le16_plane(&scratch, d, n, work, dst_bits);
+            } else {
+                yuv::depth_down_le16_plane(&scratch, d, n, work);
+            }
+        }
+    })
+}
+
+/// Computed `DeepGrayToPlanarFamily` op (see the variant docs).
+fn deep_gray_to_planar_family(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    bits: u32,
+    d: PlanarYuv,
+    limited: bool,
+    workers: usize,
+) -> Result<VideoFrame> {
+    if src.planes.is_empty() {
+        return Err(Error::invalid("pixfmt: grey source needs a plane"));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let (cw, ch) = chroma_dims(w, h, d.wsub, d.hsub);
+    let sb = d.sample_bytes();
+    let tight = tight_plane(&src.planes[0], w * 2, h)?;
+    let luma = luma_depth_range_banded(&tight, w, h, bits, d.bits, limited, true, workers);
+    let mut planes = vec![
+        VideoPlane {
+            stride: w * sb,
+            data: luma,
+        },
+        VideoPlane {
+            stride: cw * sb,
+            data: neutral_chroma_plane(cw * ch, d.bits),
+        },
+        VideoPlane {
+            stride: cw * sb,
+            data: neutral_chroma_plane(cw * ch, d.bits),
+        },
+    ];
+    if d.alpha {
+        planes.push(VideoPlane {
+            stride: w * sb,
+            data: opaque_plane(w * h, d.bits),
+        });
+    }
+    Ok(make_frame(src, planes))
+}
+
+/// Computed `PlanarFamilyToDeepGray` op (see the variant docs).
+fn planar_family_to_deep_gray(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    s: PlanarYuv,
+    bits: u32,
+    limited: bool,
+    workers: usize,
+) -> Result<VideoFrame> {
+    if src.planes.is_empty() {
+        return Err(Error::invalid("pixfmt: YUV source needs a luma plane"));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let tight = tight_plane(&src.planes[0], w * s.sample_bytes(), h)?;
+    let out = luma_depth_range_banded(&tight, w, h, s.bits, bits, limited, false, workers);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: out,
+        }],
+    ))
 }
 
 // -------------------------------------------------------------------------
@@ -6498,7 +6688,7 @@ fn float_to_deep_yuv(
         PixelFormat::Rgb48Le
     };
     let mid_info = FrameInfo::new(mid, src_info.width, src_info.height);
-    do_rgb48_to_deep_yuv(&packed, mid_info, matrix, d.wsub, d.hsub, d.alpha)
+    do_rgb48_to_deep_yuv(&packed, mid_info, matrix, d.wsub, d.hsub, d.alpha, 1)
 }
 
 /// 16-bit planar YUV(A) → float: the full-precision deep matrix into a

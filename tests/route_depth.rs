@@ -14,12 +14,9 @@
 //! 4. **Float.** A float endpoint never pivots through a ≤ 16-bit
 //!    integer format unless the other endpoint is itself integer.
 //!
-//! The audit is a permanent test. While the known violations are being
-//! closed the test pins the exact list (`known::KNOWN`, which only ever
-//! shrinks); it tightens to empty once the list is.
-
-#[path = "route_depth/known.rs"]
-mod known;
+//! The audit is a permanent test: `violations()` must be empty. (Round
+//! 476 opened at 320 depth violations — every deep endpoint pivoting
+//! through `Gray8`, `Rgb24` or `Rgba` — and closed them all.)
 
 use oxideav_core::PixelFormat;
 use oxideav_pixfmt::{staged_pivot, supports, supports_direct, FormatInfo};
@@ -165,53 +162,21 @@ fn violations() -> Vec<Violation> {
     out
 }
 
-/// The route-depth invariants hold on every supported pair not in the
-/// pinned known list — and the known list never grows.
+/// The route-depth invariants hold on every supported pair.
 #[test]
 fn every_staged_route_preserves_depth_alpha_and_colour() {
     let found = violations();
     let mut report = String::new();
-    let mut unexpected = 0usize;
     for v in &found {
-        let pinned = known::KNOWN
-            .iter()
-            .any(|&(s, p, d)| s == v.src && p == v.pivot && d == v.dst);
-        if !pinned {
-            unexpected += 1;
-        }
         report.push_str(&format!(
-            "  {:?} → {:?} → {:?} [{}]{}\n",
-            v.src,
-            v.pivot,
-            v.dst,
-            v.rule,
-            if pinned { "" } else { " NEW" }
+            "  {:?} → {:?} → {:?} [{}]\n",
+            v.src, v.pivot, v.dst, v.rule
         ));
     }
-    eprintln!(
-        "route-depth audit: {} violations ({} pinned, {} new)\n{report}",
-        found.len(),
-        found.len() - unexpected,
-        unexpected
-    );
-    assert_eq!(
-        unexpected,
-        0,
-        "{} route-depth violations ({unexpected} not in the known list):\n{report}",
-        found.len()
-    );
-    // Closed pairs must leave the known list (it only shrinks).
-    let stale: Vec<_> = known::KNOWN
-        .iter()
-        .filter(|&&(s, p, d)| {
-            !found
-                .iter()
-                .any(|v| v.src == s && v.pivot == p && v.dst == d)
-        })
-        .collect();
     assert!(
-        stale.is_empty(),
-        "known-violation entries no longer observed (remove them): {stale:?}"
+        found.is_empty(),
+        "{} route-depth violations:\n{report}",
+        found.len()
     );
 }
 
