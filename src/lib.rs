@@ -183,7 +183,7 @@
 //! preferred where the endpoints call for them). [`supports`] /
 //! [`supports_direct`] report per-pair availability. The matrix is
 //! fully closed: **every ordered pair** of the 70 `PixelFormat`
-//! variants resolves — directly (1760 pairs) or through one staged
+//! variants resolves — directly (1820 pairs) or through one staged
 //! pivot (all 4830).
 //!
 //! # Bit-depth precision policy
