@@ -442,3 +442,61 @@ fn short_planes_are_invalid() {
         assert!(r.is_err(), "{sf:?} → {df:?}");
     }
 }
+
+/// Float ↔ 16-bit grey: every 16-bit code survives `Gray16Le → GrayF32Le
+/// → Gray16Le` exactly, random floats in [0, 1] quantise within 1 LSB
+/// of `round(v · 65535)`, and the 16-bit YUV luma reaches float and
+/// comes back within 1 LSB of the direct grey route.
+#[test]
+fn float_and_gray16_within_one_lsb() {
+    let ramp: Vec<u16> = (0..=u16::MAX).step_by(RAMP_STEP).collect();
+    let w = if RAMP_STEP == 1 { 256u32 } else { 16 };
+    let h = (ramp.len() as u32).div_ceil(w);
+    let mut ramp = ramp;
+    ramp.resize((w * h) as usize, 0);
+    let src = frame(w as usize * 2, le16(&ramp));
+    let f = conv(&src, PixelFormat::Gray16Le, w, h, PixelFormat::GrayF32Le);
+    let back = conv(&f, PixelFormat::GrayF32Le, w, h, PixelFormat::Gray16Le);
+    assert_eq!(rd16(&back.planes[0].data), ramp);
+    // Random floats.
+    let n = (w * h) as usize;
+    let mut rng = Rng(3);
+    let vals: Vec<f32> = (0..n).map(|_| (rng.u16() as f32) / 65535.0).collect();
+    let fsrc = frame(
+        w as usize * 4,
+        vals.iter().flat_map(|v| v.to_le_bytes()).collect(),
+    );
+    let q = conv(&fsrc, PixelFormat::GrayF32Le, w, h, PixelFormat::Gray16Le);
+    let qw = rd16(&q.planes[0].data);
+    for i in 0..n {
+        let want = (vals[i] as f64 * 65535.0).round();
+        assert!(
+            (qw[i] as f64 - want).abs() <= 1.0,
+            "pixel {i}: {} vs {want}",
+            qw[i]
+        );
+    }
+    // YUV luma → float → grey against the direct luma route.
+    let yuv = conv(&src, PixelFormat::Gray16Le, w, h, PixelFormat::Yuv444P16Le);
+    let direct = conv(&yuv, PixelFormat::Yuv444P16Le, w, h, PixelFormat::Gray16Le);
+    let via_float = conv(&yuv, PixelFormat::Yuv444P16Le, w, h, PixelFormat::GrayF32Le);
+    let via_float = conv(
+        &via_float,
+        PixelFormat::GrayF32Le,
+        w,
+        h,
+        PixelFormat::Gray16Le,
+    );
+    let (a, b) = (
+        rd16(&direct.planes[0].data),
+        rd16(&via_float.planes[0].data),
+    );
+    for i in 0..n {
+        assert!(
+            (a[i] as i32 - b[i] as i32).abs() <= 1,
+            "pixel {i}: {} vs {}",
+            a[i],
+            b[i]
+        );
+    }
+}
