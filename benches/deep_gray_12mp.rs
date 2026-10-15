@@ -78,6 +78,8 @@ fn bench_deep_gray_12mp(c: &mut Criterion) {
     let rgb48 = synth_rgb48(W, H);
     let yuv444p16 = staged_from(&rgb48, P::Rgb48Le, P::Yuv444P16Le);
     let yuv420p16 = staged_from(&rgb48, P::Rgb48Le, P::Yuv420P16Le);
+    let gbrp10 = staged_from(&rgb48, P::Rgb48Le, P::Gbrp10Le);
+    let gbrp16 = staged_from(&rgb48, P::Rgb48Le, P::Gbrp16Le);
 
     // (source frame, source format, destination, legacy pivot)
     let cases: Vec<(&VideoFrame, P, P, Option<P>)> = vec![
@@ -89,6 +91,9 @@ fn bench_deep_gray_12mp(c: &mut Criterion) {
         (&gray16, P::Gray16Le, P::Yuv420P10Le, Some(P::Gray8)),
         (&rgb48, P::Rgb48Le, P::Yuv420P16Le, None),
         (&rgb48, P::Rgb48Le, P::Yuv420P10Le, Some(P::Yuv444P16Le)),
+        (&gbrp16, P::Gbrp16Le, P::Gray16Le, Some(P::Rgb48Le)),
+        (&gray16, P::Gray16Le, P::Gbrp16Le, Some(P::Rgb48Le)),
+        (&gbrp10, P::Gbrp10Le, P::Yuv420P10Le, Some(P::Rgba64Le)),
     ];
     let mut group = c.benchmark_group("deep_gray_12mp");
     group.sample_size(10);

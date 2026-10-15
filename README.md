@@ -42,7 +42,7 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | RGB / BGR family        | `Rgb24`, `Bgr24`, `Rgba`, `Bgra`, `Argb`, `Abgr` — all-to-all swizzles      |
 | Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`, `Rgb48Le` ↔ `Rgba64Le` (colour words verbatim, opaque 65535 synthesis / drop); `Rgb48Le` / `Rgba64Le` → **every** planar YUV(A) member in one banded 16-bit encode (chroma subsampled at 16 bits, planes narrowed afterwards) |
 | Deep matrix             | the 16-bit planar tier ({`Yuv`,`Yuva`} × {420,422,444} `P16Le` + `Yuv440P16Le`) ↔ `Rgb48Le` / `Rgba64Le` at **full 16-bit precision** (Q30 k-coefficient construction, chroma resampled at 16 bits, Yuva alpha word verbatim); the 10/12-bit family stages in losslessly via the exact widen |
-| Planar GBR              | the full ten-member ladder — `Gbrp8` / `Gbrap8` (byte planes) through `Gbrp10/12/14Le` to the full-width `Gbrp16Le` / `Gbrap16Le` — ↔ **both** `Rgb48Le` and `Rgba64Le` (alpha synthesised opaque / dropped when the shapes differ) and ↔ `Rgb24` / `Rgba`; plus `Gray8` interop (full-range luminance projection out, MSB-replicated broadcast in) and `Gbrp8` ↔ `Gbrap8` alpha append / drop |
+| Planar GBR              | the full ten-member ladder — `Gbrp8` / `Gbrap8` (byte planes) through `Gbrp10/12/14Le` to the full-width `Gbrp16Le` / `Gbrap16Le` — ↔ **both** `Rgb48Le` and `Rgba64Le` (ladder widen / truncation; alpha synthesised opaque / dropped when the shapes differ) and ↔ `Rgb24` / `Rgba`; plus `Gray8` / `Gray10Le` / `Gray12Le` / `Gray16Le` interop (luminance projection out — at 16 bits for the deep words — and the rescaled broadcast in) and `Gbrp8` ↔ `Gbrap8` alpha append / drop |
 | YUV planar ↔ RGB        | `Yuv420P` / `Yuv422P` / `Yuv444P` ↔ `Rgb24` / `Rgba`, plus the full-range `YuvJ*` families direct ↔ RGB; any width / height (chroma `ceil(w/2)` × `ceil(h/2)`); optional row-band threads via `convert_with` |
 | Colour signalling       | the frame's `ColorSignal` record / a `ConvertContext` override select range (full range on `Yuva*` and 10/12/16-bit layouts) and the H.273 matrix (1, 4, 5, 6, 7, 9; identity → planar GBR) |
 | Bit-depth ladder        | planar YUV 8 ↔ 10 ↔ 12 ↔ 16 bit (same layout, exact round-trips; `Yuv*P16Le` is full-scale 65535); `Gray8` ↔ `Gray10Le` ↔ `Gray12Le` ↔ `Gray16Le` — see *Depth-preserving routes* for the widen / narrow rule |
@@ -66,7 +66,7 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Alpha / compositing     | Porter-Duff "over" (premul + straight), premul/unpremul, alpha-mask blit    |
 | Format introspection    | `FormatInfo::of(fmt)` → planes / bit-depth / `ChromaSubsampling` typed view |
 | Planar-family engine    | a computed dispatch tier makes *every* ordered pair inside the uniform planar YUV(A) family ({Yuv,Yuva} × {420,422,444} × {8,10,12,16}, plus `Yuv440P*` at the four depths) a direct single-step conversion: depth move + chroma resample (at the deeper of the two depths) + alpha handling fused in one op |
-| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier, alpha-carrying deep moves through `Yuva*P16Le`) — **all 4830 ordered format pairs convert** (1760 direct); `supports()` / `supports_direct()` / `staged_pivot()` report availability and the route; every staged route passes the depth / alpha / palette invariants below |
+| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier, alpha-carrying deep moves through `Yuva*P16Le`) — **all 4830 ordered format pairs convert** (1820 direct); `supports()` / `supports_direct()` / `staged_pivot()` report availability and the route; every staged route passes the depth / alpha / palette invariants below |
 
 ## Roadmap
 
@@ -74,7 +74,7 @@ The pixel-format universe used by general-purpose video tooling runs
 to roughly two hundred entries; this crate currently covers the 70
 `PixelFormat` variants oxideav-core defines, and the conversion
 matrix is **fully closed**: every one of the 70 × 69 = 4830 ordered
-pairs resolves — 1760 directly, the rest through one staged pivot. The
+pairs resolves — 1820 directly, the rest through one staged pivot. The
 formats below are *planned* — they're not implemented yet, but they
 have real callers in the codecs/containers we want to support, so the
 [`PixelFormat`](https://docs.rs/oxideav-core/latest/oxideav_core/enum.PixelFormat.html)
@@ -549,12 +549,17 @@ in the same binary; "serial" / "threaded" are the direct rows.
 | `Gray16Le → Yuv420P10Le`     | 3.29 ms         | 3.87 ms  | 0.80 ms  |
 | `Rgb48Le → Yuv420P16Le`      | —               | 25.1 ms  | 2.94 ms  |
 | `Rgb48Le → Yuv420P10Le`      | 29.4 ms         | 27.8 ms  | 5.78 ms  |
+| `Gbrp16Le → Gray16Le`        | 38.9 ms         | 10.4 ms  | 1.78 ms  |
+| `Gray16Le → Gbrp16Le`        | 16.0 ms         | 0.99 ms  | 0.98 ms  |
+| `Gbrp10Le → Yuv420P10Le`     | 57.7 ms (via `Rgba64Le`) | 55.2 ms (via `Rgb48Le`) | 31.7 ms |
 
 The "before" rows were 8-bit routes (cheap because they threw the low
 byte away before the range move); the direct rows keep all 16 bits —
 the luma move is one composed table lookup per sample, the packed rows
 run the Q30 matrix — on the row-band engine. The 8-bit headline rows
-above were re-measured in the same session and are unchanged.
+above were re-measured in the same session and are unchanged. The
+`Gbrp10Le → Yuv420P10Le` row is still staged (`Gbrp* → Rgb48Le` is a
+serial plane interleave; banding it is the next step for that family).
 
 **Porter-Duff compositing (scalar, Apple M-series single core, indicative):**
 

@@ -1222,28 +1222,30 @@ fn synth_gbr(w: u32, h: u32, bits: u32, alpha: bool) -> VideoFrame {
 #[test]
 fn gbr_to_packed_deep_known_values() {
     let opts = ConvertOptions::default();
-    // 10-bit Gbrp → Rgb48Le: a sample of value V<<6 must land in the
-    // packed word, with R G B byte order.
+    // 10-bit Gbrp → Rgb48Le: a sample V lands in the packed word
+    // widened by the ladder rule (MSB replication: V << 6 | V >> 4, so
+    // 1023 → 65535), with R G B byte order.
     let (w, h, bits) = (4u32, 2u32, 10u32);
     let src = synth_gbr(w, h, bits, false);
     let info = FrameInfo::new(PixelFormat::Gbrp10Le, w, h);
     let dst = convert(&src, info, PixelFormat::Rgb48Le, &opts).expect("gbrp10 → rgb48");
-    let shift = 16 - bits;
+    let widen = |v: u16| -> u16 { (v << (16 - bits)) | (v >> (2 * bits - 16)) };
+    assert_eq!(widen(1023), 65535);
     let g = &src.planes[0].data;
     let b = &src.planes[1].data;
     let r = &src.planes[2].data;
     let packed = &dst.planes[0].data;
     for i in 0..(w * h) as usize {
         let base = i * 6;
-        assert_eq!(read16le(packed, base), read16le(r, i * 2) << shift, "R {i}");
+        assert_eq!(read16le(packed, base), widen(read16le(r, i * 2)), "R {i}");
         assert_eq!(
             read16le(packed, base + 2),
-            read16le(g, i * 2) << shift,
+            widen(read16le(g, i * 2)),
             "G {i}"
         );
         assert_eq!(
             read16le(packed, base + 4),
-            read16le(b, i * 2) << shift,
+            widen(read16le(b, i * 2)),
             "B {i}"
         );
     }
@@ -1298,14 +1300,14 @@ fn gbrap_alpha_plane_reaches_packed_word() {
     let src = synth_gbr(w, h, bits, true);
     let info = FrameInfo::new(PixelFormat::Gbrap12Le, w, h);
     let dst = convert(&src, info, PixelFormat::Rgba64Le, &opts).expect("gbrap12 → rgba64");
-    let shift = 16 - bits;
+    let widen = |v: u16| -> u16 { (v << (16 - bits)) | (v >> (2 * bits - 16)) };
     let a = &src.planes[3].data;
     let packed = &dst.planes[0].data;
     for i in 0..(w * h) as usize {
-        // A is the 4th packed component (R G B A).
+        // A is the 4th packed component (R G B A), widened like colour.
         assert_eq!(
             read16le(packed, i * 8 + 6),
-            read16le(a, i * 2) << shift,
+            widen(read16le(a, i * 2)),
             "A {i}"
         );
     }

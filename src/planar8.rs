@@ -640,7 +640,7 @@ pub(crate) struct PlanarDeep<'a> {
 /// for words), masking stray high bits first — the exact mapping of
 /// `yuv::depth_up_8_to_le16_plane` / `yuv::depth_rescale_le16_plane`.
 #[inline]
-fn widen_row16(src: &[u8], dst: &mut [u16], bits: u32) {
+pub(crate) fn widen_row16(src: &[u8], dst: &mut [u16], bits: u32) {
     if bits <= 8 {
         for (d, &v) in dst.iter_mut().zip(src.iter()) {
             *d = ((v as u16) << 8) | v as u16;

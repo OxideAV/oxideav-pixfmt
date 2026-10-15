@@ -1125,6 +1125,14 @@ pub fn rgb48_to_yuv444p16(
     }
 }
 
+/// The Y' row of `p` for one 16-bit (R, G, B) sample: Q30, rounded
+/// once, clamped to the 16-bit code space.
+#[inline]
+pub(crate) fn rgb16_to_luma16_fp(r: u16, g: u16, b: u16, p: &EncodeParams16) -> u16 {
+    let y = (p.cy_r * r as i64 + p.cy_g * g as i64 + p.cy_b * b as i64 + p.y_bias) >> FP16_SHIFT;
+    clamp_u16_i64(y)
+}
+
 /// Project `pixels` packed 16-bit RGB(A) pixels of `comps` LE words
 /// each (R, G, B first) onto 16-bit luma words through the Q30 Y' row
 /// of `p`; the chroma rows are never evaluated.
