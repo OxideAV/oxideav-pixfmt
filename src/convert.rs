@@ -2710,12 +2710,12 @@ impl ConvertOp {
                 bits,
                 alpha_in,
                 alpha_out,
-            } => do_gbr_to_packed_deep(src, src_info, bits, alpha_in, alpha_out),
+            } => do_gbr_to_packed_deep(src, src_info, bits, alpha_in, alpha_out, workers),
             Self::PackedDeepToGbr {
                 bits,
                 alpha_in,
                 alpha_out,
-            } => do_packed_deep_to_gbr(src, src_info, bits, alpha_in, alpha_out),
+            } => do_packed_deep_to_gbr(src, src_info, bits, alpha_in, alpha_out, workers),
             Self::Gbr8ToPackedDeep {
                 alpha_in,
                 alpha_out,
@@ -6019,13 +6019,15 @@ fn wr16le(buf: &mut [u8], off: usize, v: u16) {
     buf[off + 1] = (v >> 8) as u8;
 }
 
-/// Planar GBR(A) → packed `Rgb48Le` / `Rgba64Le`.
+/// Planar GBR(A) → packed `Rgb48Le` / `Rgba64Le`, one row band at a
+/// time (see [`planar8::map_packed_banded`]).
 fn do_gbr_to_packed_deep(
     src: &VideoFrame,
     src_info: FrameInfo,
     bits: u8,
     alpha_in: bool,
     alpha_out: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
     let need = if alpha_in { 4 } else { 3 };
     if src.planes.len() < need {
@@ -6050,41 +6052,39 @@ fn do_gbr_to_packed_deep(
     };
     // GBR plane order: G=0, B=1, R=2, A=3. Each plane is `w` 16-bit words
     // per row (2 bytes each).
-    let g = gather_tight(&src.planes[0].data, src.planes[0].stride, w * 2, h)?;
-    let b = gather_tight(&src.planes[1].data, src.planes[1].stride, w * 2, h)?;
-    let r = gather_tight(&src.planes[2].data, src.planes[2].stride, w * 2, h)?;
+    let g = tight_plane(&src.planes[0], w * 2, h)?;
+    let b = tight_plane(&src.planes[1], w * 2, h)?;
+    let r = tight_plane(&src.planes[2], w * 2, h)?;
     // The alpha plane is only consulted when the packed target carries
     // it; a surplus source alpha is dropped.
     let a = if alpha_in && alpha_out {
-        Some(gather_tight(
-            &src.planes[3].data,
-            src.planes[3].stride,
-            w * 2,
-            h,
-        )?)
+        Some(tight_plane(&src.planes[3], w * 2, h)?)
     } else {
         None
     };
     let comps = if alpha_out { 4 } else { 3 };
-    let mut out = vec![0u8; w * h * comps * 2];
-    for i in 0..w * h {
-        let rv = widen(rd16le(&r, i * 2));
-        let gv = widen(rd16le(&g, i * 2));
-        let bv = widen(rd16le(&b, i * 2));
-        let base = i * comps * 2;
-        wr16le(&mut out, base, rv);
-        wr16le(&mut out, base + 2, gv);
-        wr16le(&mut out, base + 4, bv);
-        if alpha_out {
-            // Carry the source alpha (shifted like the colour words) or
-            // synthesise the packed format's true opaque full-scale.
-            let av = match &a {
-                Some(a) => widen(rd16le(a, i * 2)),
-                None => 0xFFFF,
-            };
-            wr16le(&mut out, base + 6, av);
+    let out = planar8::map_packed_banded(&r, w * 2, w * comps * 2, h, workers, |rb, d| {
+        let n = d.len() / (comps * 2);
+        // The band's byte offset inside the planes (same for G, B, A).
+        let off = rb.as_ptr() as usize - r.as_ptr() as usize;
+        let gb = &g[off..off + n * 2];
+        let bb = &b[off..off + n * 2];
+        let ab = a.as_deref().map(|a| &a[off..off + n * 2]);
+        for (i, px) in d.chunks_exact_mut(comps * 2).enumerate() {
+            wr16le(px, 0, widen(rd16le(rb, i * 2)));
+            wr16le(px, 2, widen(rd16le(gb, i * 2)));
+            wr16le(px, 4, widen(rd16le(bb, i * 2)));
+            if alpha_out {
+                // Carry the source alpha (widened like the colour words)
+                // or synthesise the packed format's opaque full-scale.
+                let av = match ab {
+                    Some(a) => widen(rd16le(a, i * 2)),
+                    None => 0xFFFF,
+                };
+                wr16le(px, 6, av);
+            }
         }
-    }
+    });
     Ok(make_frame(
         src,
         vec![VideoPlane {
@@ -6534,47 +6534,79 @@ fn do_gray_to_gbr(
     Ok(make_frame(src, planes))
 }
 
-/// Packed `Rgb48Le` / `Rgba64Le` → planar GBR(A).
+/// One [`do_packed_deep_to_gbr`] band: `(first row, G, B, R, A)`.
+type GbrBand<'a> = (
+    usize,
+    &'a mut [u8],
+    &'a mut [u8],
+    &'a mut [u8],
+    Option<&'a mut [u8]>,
+);
+
+/// Packed `Rgb48Le` / `Rgba64Le` → planar GBR(A), one row band at a
+/// time: each band owns a disjoint row range of every output plane.
 fn do_packed_deep_to_gbr(
     src: &VideoFrame,
     src_info: FrameInfo,
     bits: u8,
     alpha_in: bool,
     alpha_out: bool,
+    workers: usize,
 ) -> Result<VideoFrame> {
+    if src.planes.is_empty() {
+        return Err(Error::invalid("pixfmt: packed RGB source needs a plane"));
+    }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let shift = 16 - bits as u32;
     let comps = if alpha_in { 4 } else { 3 };
-    let in_plane = &src.planes[0];
-    let packed = gather_tight(&in_plane.data, in_plane.stride, w * comps * 2, h)?;
+    let packed = tight_plane(&src.planes[0], w * comps * 2, h)?;
     let mut g = vec![0u8; w * h * 2];
     let mut b = vec![0u8; w * h * 2];
     let mut r = vec![0u8; w * h * 2];
-    let mut a = if alpha_out {
-        vec![0u8; w * h * 2]
-    } else {
-        Vec::new()
-    };
+    let mut a = alpha_out.then(|| vec![0u8; w * h * 2]);
     // Synthesised opaque alpha at the planar depth (used when the
     // packed source has no alpha word to carry).
     let opaque = ((1u32 << bits) - 1) as u16;
-    for i in 0..w * h {
-        let base = i * comps * 2;
-        let rv = rd16le(&packed, base) >> shift;
-        let gv = rd16le(&packed, base + 2) >> shift;
-        let bv = rd16le(&packed, base + 4) >> shift;
-        wr16le(&mut r, i * 2, rv);
-        wr16le(&mut g, i * 2, gv);
-        wr16le(&mut b, i * 2, bv);
-        if alpha_out {
-            let av = if alpha_in {
-                rd16le(&packed, base + 6) >> shift
-            } else {
-                opaque
-            };
-            wr16le(&mut a, i * 2, av);
+    if w > 0 && h > 0 {
+        let bands = planar8::row_bands(h, 1, workers);
+        let mut jobs: Vec<GbrBand<'_>> = Vec::with_capacity(bands.len());
+        let (mut gr, mut br, mut rr): (&mut [u8], &mut [u8], &mut [u8]) = (&mut g, &mut b, &mut r);
+        let mut ar: Option<&mut [u8]> = a.as_deref_mut();
+        for &(r0, r1) in &bands {
+            let n = (r1 - r0) * w * 2;
+            let (gb, gt) = gr.split_at_mut(n);
+            gr = gt;
+            let (bb, bt) = br.split_at_mut(n);
+            br = bt;
+            let (rb, rt) = rr.split_at_mut(n);
+            rr = rt;
+            let ab = ar.take().map(|rest| {
+                let (band, tail) = rest.split_at_mut(n);
+                ar = Some(tail);
+                band
+            });
+            jobs.push((r0, gb, bb, rb, ab));
         }
+        let row_bytes = w * comps * 2;
+        planar8::run_bands(jobs, |(r0, gb, bb, rb, ab): GbrBand<'_>| {
+            let n = gb.len() / 2;
+            let band = &packed[r0 * row_bytes..r0 * row_bytes + n * comps * 2];
+            let mut ab = ab;
+            for (i, px) in band.chunks_exact(comps * 2).enumerate() {
+                wr16le(rb, i * 2, rd16le(px, 0) >> shift);
+                wr16le(gb, i * 2, rd16le(px, 2) >> shift);
+                wr16le(bb, i * 2, rd16le(px, 4) >> shift);
+                if let Some(a) = ab.as_deref_mut() {
+                    let av = if alpha_in {
+                        rd16le(px, 6) >> shift
+                    } else {
+                        opaque
+                    };
+                    wr16le(a, i * 2, av);
+                }
+            }
+        });
     }
     let mut planes = vec![
         VideoPlane {
@@ -6590,7 +6622,7 @@ fn do_packed_deep_to_gbr(
             data: r,
         },
     ];
-    if alpha_out {
+    if let Some(a) = a {
         planes.push(VideoPlane {
             stride: w * 2,
             data: a,

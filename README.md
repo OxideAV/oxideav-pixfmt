@@ -551,15 +551,15 @@ in the same binary; "serial" / "threaded" are the direct rows.
 | `Rgb48Le → Yuv420P10Le`      | 29.4 ms         | 27.8 ms  | 5.78 ms  |
 | `Gbrp16Le → Gray16Le`        | 38.9 ms         | 10.4 ms  | 1.78 ms  |
 | `Gray16Le → Gbrp16Le`        | 16.0 ms         | 0.99 ms  | 0.98 ms  |
-| `Gbrp10Le → Yuv420P10Le`     | 57.7 ms (via `Rgba64Le`) | 55.2 ms (via `Rgb48Le`) | 31.7 ms |
+| `Gbrp10Le → Yuv420P10Le`     | 49.9 ms (via `Rgba64Le`) | 47.9 ms (via `Rgb48Le`) | 8.96 ms |
 
 The "before" rows were 8-bit routes (cheap because they threw the low
 byte away before the range move); the direct rows keep all 16 bits —
 the luma move is one composed table lookup per sample, the packed rows
 run the Q30 matrix — on the row-band engine. The 8-bit headline rows
 above were re-measured in the same session and are unchanged. The
-`Gbrp10Le → Yuv420P10Le` row is still staged (`Gbrp* → Rgb48Le` is a
-serial plane interleave; banding it is the next step for that family).
+`Gbrp10Le → Yuv420P10Le` row is still staged (two banded legs through
+`Rgb48Le`); a fused GBR → YUV encode is the next step for that family.
 
 **Porter-Duff compositing (scalar, Apple M-series single core, indicative):**
 

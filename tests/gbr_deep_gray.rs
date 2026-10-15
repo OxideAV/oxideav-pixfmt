@@ -207,6 +207,43 @@ fn gbr_deep_gray_threaded_equals_serial() {
     }
 }
 
+/// The planar GBR(A) ↔ packed deep rows (now banded) are byte-identical
+/// serial vs threaded, alpha carried / synthesised / dropped.
+#[test]
+fn gbr_packed_deep_threaded_equals_serial() {
+    use PixelFormat as P;
+    let mt = ConvertContext::new().with_execution(ExecutionContext::with_threads(8));
+    let opts = ConvertOptions::default();
+    let sizes: &[(usize, usize)] = if cfg!(miri) {
+        &[(1, 1), (3, 33)]
+    } else {
+        &[(1, 1), (3, 33), (64, 70), (130, 97)]
+    };
+    for &(w, h) in sizes {
+        for &(f, bits, alpha) in GBR {
+            if bits == 8 {
+                continue;
+            }
+            let src = gbr_frame(w, h, bits, alpha, (w * 3 + h) as u64);
+            let info = FrameInfo::new(f, w as u32, h as u32);
+            for packed in [P::Rgb48Le, P::Rgba64Le] {
+                let a = convert(&src, info, packed, &opts).unwrap();
+                let b = convert_with(&src, info, packed, &opts, &mt).unwrap();
+                assert!(same_planes(&a, &b), "{f:?} → {packed:?} {w}×{h}");
+                let pinfo = FrameInfo::new(packed, w as u32, h as u32);
+                for &(back, bbits, _) in GBR {
+                    if bbits == 8 {
+                        continue;
+                    }
+                    let ia = convert(&a, pinfo, back, &opts).unwrap();
+                    let ib = convert_with(&a, pinfo, back, &opts, &mt).unwrap();
+                    assert!(same_planes(&ia, &ib), "{packed:?} → {back:?} {w}×{h}");
+                }
+            }
+        }
+    }
+}
+
 /// Alpha-less deep endpoints pivot through alpha-less deep members,
 /// with the same bytes the alpha-first order produced.
 #[test]

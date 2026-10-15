@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(convert)* `Gbrp10/12/14Le` / `Gbrap10/12/14Le` → `Rgb48Le` / `Rgba64Le` widen by the ladder rule (MSB replication, 10-bit peak 1023 → 65535) instead of a bare left shift (→ 65472); the way back is still truncation, so every round-trip stays exact and the rows now agree with every other widen in the crate (and with the new direct `Gbr* → Gray16Le` row)
 - *(convert)* when neither endpoint carries alpha, staged deep routes pivot through the alpha-less deep members (`Rgb48Le` before `Rgba64Le`, `Yuv444P16Le` before `Yuva444P16Le`) — same bytes, one plane / word less per pixel
+- *(convert)* the planar GBR(A) ↔ `Rgb48Le` / `Rgba64Le` rows run on the row-band engine (tight planes borrowed, bands on scoped threads): the staged `Gbrp10Le → Yuv420P10Le` route drops from 31.7 to 8.96 ms threaded at 12 MP
 - *(convert)* the deep luma range moves (identity-coded planes and the new grey ↔ YUV rows) read a per-process lookup table built from the exact rounded-division formula instead of dividing per sample — same bytes, a third of the time
 
 ### Other
