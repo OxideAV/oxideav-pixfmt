@@ -357,6 +357,32 @@ pub fn gray8_to_rgba64le(src: &[u8], dst: &mut [u8], pixels: usize) {
     }
 }
 
+/// Gray16Le → Rgb48Le: broadcast the grey word verbatim into the R, G
+/// and B words — bit-exact, and [`crate::yuv::rgb48le_to_gray16le`]
+/// recovers the original exactly (the full-range Y' row of every
+/// matrix sums to one, so `r = g = b = v` projects back to `v`).
+pub fn gray16le_to_rgb48le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let word = &src[i * 2..i * 2 + 2];
+        for c in 0..3 {
+            dst[i * 6 + c * 2..i * 6 + c * 2 + 2].copy_from_slice(word);
+        }
+    }
+}
+
+/// Gray16Le → Rgba64Le: the [`gray16le_to_rgb48le`] broadcast plus an
+/// opaque 65535 alpha word.
+pub fn gray16le_to_rgba64le(src: &[u8], dst: &mut [u8], pixels: usize) {
+    for i in 0..pixels {
+        let word = &src[i * 2..i * 2 + 2];
+        for c in 0..3 {
+            dst[i * 8 + c * 2..i * 8 + c * 2 + 2].copy_from_slice(word);
+        }
+        dst[i * 8 + 6] = 0xFF;
+        dst[i * 8 + 7] = 0xFF;
+    }
+}
+
 /// Gray8 → 1 bpp (MSB-first). A threshold of 128 decides bit value.
 pub fn gray8_to_mono(src: &[u8], dst: &mut [u8], w: usize, h: usize, black_is_zero: bool) {
     let stride = w.div_ceil(8);

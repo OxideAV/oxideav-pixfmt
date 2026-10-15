@@ -120,7 +120,7 @@ pub(crate) fn row_bands(h: usize, hsub: usize, workers: usize) -> Vec<(usize, us
 /// scoped threads, one per band, and joined before returning. The
 /// caller has already carved every band's output into disjoint `&mut`
 /// slices, so the closure receives only its own band's state.
-fn run_bands<T, F>(mut bands: Vec<T>, f: F)
+pub(crate) fn run_bands<T, F>(mut bands: Vec<T>, f: F)
 where
     T: Send,
     F: Fn(T) + Sync,
@@ -141,6 +141,39 @@ where
             f(b);
         }
     });
+}
+
+/// Map a tight packed buffer of `h` rows (`src_row` bytes each) to a
+/// tight packed output (`dst_row` bytes per row), splitting the rows
+/// into at most `workers` bands that run on scoped threads (see
+/// [`run_bands`]). `f(src_band, dst_band)` always receives whole rows
+/// — `dst_band.len() / dst_row` of them — so a per-pixel kernel can run
+/// over the band as one contiguous stretch of pixels.
+pub(crate) fn map_packed_banded<F>(
+    src: &[u8],
+    src_row: usize,
+    dst_row: usize,
+    h: usize,
+    workers: usize,
+    f: F,
+) -> Vec<u8>
+where
+    F: Fn(&[u8], &mut [u8]) + Sync,
+{
+    let mut out = vec![0u8; dst_row * h];
+    if h == 0 || dst_row == 0 {
+        return out;
+    }
+    let bands = row_bands(h, 1, workers);
+    let mut jobs = Vec::with_capacity(bands.len());
+    let mut rest: &mut [u8] = &mut out;
+    for &(r0, r1) in &bands {
+        let (band, tail) = rest.split_at_mut((r1 - r0) * dst_row);
+        rest = tail;
+        jobs.push((&src[r0 * src_row..r1 * src_row], band));
+    }
+    run_bands(jobs, |(s, d): (&[u8], &mut [u8])| f(s, d));
+    out
 }
 
 /// Interleave a tight RGB24 row with an alpha row (or opaque alpha)

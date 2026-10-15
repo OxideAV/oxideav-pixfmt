@@ -1743,6 +1743,30 @@ const TABLE: &[(PixelFormat, PixelFormat, ConvertOp)] = {
         (P::Gray16Le, P::Gray10Le, GrayDepthRescale { src_bits: 16, dst_bits: 10 }),
         (P::Gray12Le, P::Gray16Le, GrayDepthRescale { src_bits: 12, dst_bits: 16 }),
         (P::Gray16Le, P::Gray12Le, GrayDepthRescale { src_bits: 16, dst_bits: 12 }),
+
+        // Deep grey ↔ packed deep RGB (round 476, the route-depth
+        // audit): no 8-bit hop. Out: the grey word is widened to 16 bits
+        // by the exact ladder rule (verbatim at 16) and broadcast into
+        // R, G, B (+ opaque 65535). In: the Q30 full-range Y' row at
+        // 16 bits, then narrowed (truncation) to the target width.
+        (P::Gray16Le, P::Rgb48Le,  DeepGrayToPackedDeep { bits: 16, alpha_out: false }),
+        (P::Gray16Le, P::Rgba64Le, DeepGrayToPackedDeep { bits: 16, alpha_out: true }),
+        (P::Gray12Le, P::Rgb48Le,  DeepGrayToPackedDeep { bits: 12, alpha_out: false }),
+        (P::Gray12Le, P::Rgba64Le, DeepGrayToPackedDeep { bits: 12, alpha_out: true }),
+        (P::Gray10Le, P::Rgb48Le,  DeepGrayToPackedDeep { bits: 10, alpha_out: false }),
+        (P::Gray10Le, P::Rgba64Le, DeepGrayToPackedDeep { bits: 10, alpha_out: true }),
+        (P::Rgb48Le,  P::Gray16Le, PackedDeepToDeepGray { bits: 16, alpha_in: false }),
+        (P::Rgba64Le, P::Gray16Le, PackedDeepToDeepGray { bits: 16, alpha_in: true }),
+        (P::Rgb48Le,  P::Gray12Le, PackedDeepToDeepGray { bits: 12, alpha_in: false }),
+        (P::Rgba64Le, P::Gray12Le, PackedDeepToDeepGray { bits: 12, alpha_in: true }),
+        (P::Rgb48Le,  P::Gray10Le, PackedDeepToDeepGray { bits: 10, alpha_in: false }),
+        (P::Rgba64Le, P::Gray10Le, PackedDeepToDeepGray { bits: 10, alpha_in: true }),
+        // Ya16Le ↔ the 10 / 12-bit grey words: the Gray16Le rows plus
+        // the ladder move (alpha dropped / synthesised opaque).
+        (P::Ya16Le,   P::Gray12Le, Ya16ToDeepGray { bits: 12 }),
+        (P::Ya16Le,   P::Gray10Le, Ya16ToDeepGray { bits: 10 }),
+        (P::Gray12Le, P::Ya16Le,   DeepGrayToYa16 { bits: 12 }),
+        (P::Gray10Le, P::Ya16Le,   DeepGrayToYa16 { bits: 10 }),
     ]
 };
 
@@ -2208,6 +2232,33 @@ enum ConvertOp {
     GrayToPackedDeep {
         alpha_out: bool,
     },
+    /// `Gray10Le` / `Gray12Le` / `Gray16Le` → `Rgb48Le` / `Rgba64Le`:
+    /// the grey word widened to 16 bits by the exact ladder rule (MSB
+    /// replication; verbatim at 16) and broadcast into R, G, B, with an
+    /// opaque 65535 alpha word when the target carries one. Row-banded.
+    DeepGrayToPackedDeep {
+        bits: u32,
+        alpha_out: bool,
+    },
+    /// `Rgb48Le` / `Rgba64Le` → `Gray10Le` / `Gray12Le` / `Gray16Le`:
+    /// the Q30 full-range Y' row evaluated at 16 bits (within 1 LSB of
+    /// the f64 projection; `r = g = b = v` gives `v` exactly), then
+    /// narrowed to the target width by truncation. Alpha dropped.
+    /// Row-banded.
+    PackedDeepToDeepGray {
+        bits: u32,
+        alpha_in: bool,
+    },
+    /// `Ya16Le` → `Gray10Le` / `Gray12Le`: luma word narrowed
+    /// (truncation), alpha dropped.
+    Ya16ToDeepGray {
+        bits: u32,
+    },
+    /// `Gray10Le` / `Gray12Le` → `Ya16Le`: grey word widened to 16 bits
+    /// (MSB replication), alpha opaque 65535.
+    DeepGrayToYa16 {
+        bits: u32,
+    },
     /// `Cmyk` / `CmykInverted` → `Gray8`: device decode to RGB, then
     /// the full-range luminance projection.
     CmykToGray {
@@ -2581,6 +2632,19 @@ impl ConvertOp {
                     packed_map(src, src_info, 1, 6, gray::gray8_to_rgb48le)
                 }
             }
+            Self::DeepGrayToPackedDeep { bits, alpha_out } => {
+                do_deep_gray_to_packed_deep(src, src_info, bits, alpha_out, workers)
+            }
+            Self::PackedDeepToDeepGray { bits, alpha_in } => do_packed_deep_to_deep_gray(
+                src,
+                src_info,
+                matrix.with_range(false),
+                bits,
+                alpha_in,
+                workers,
+            ),
+            Self::Ya16ToDeepGray { bits } => do_ya16_to_deep_gray(src, src_info, bits),
+            Self::DeepGrayToYa16 { bits } => do_deep_gray_to_ya16(src, src_info, bits),
             Self::CmykToGray { inverted } => {
                 let f = if inverted {
                     cmyk::cmyk_inverted_to_rgb24
@@ -3379,6 +3443,103 @@ fn do_gray_to_packed422(
             data: out,
         }],
     ))
+}
+
+/// `Gray10Le` / `Gray12Le` / `Gray16Le` → packed `Rgb48Le` /
+/// `Rgba64Le`: widen to 16 bits (exact ladder rule, a copy at 16) and
+/// broadcast, one row band at a time.
+fn do_deep_gray_to_packed_deep(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    bits: u32,
+    alpha_out: bool,
+    workers: usize,
+) -> Result<VideoFrame> {
+    if src.planes.is_empty() {
+        return Err(Error::invalid("pixfmt: grey source needs a plane"));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let tight = tight_plane(&src.planes[0], w * 2, h)?;
+    let bpp = if alpha_out { 8 } else { 6 };
+    let kernel = if alpha_out {
+        gray::gray16le_to_rgba64le
+    } else {
+        gray::gray16le_to_rgb48le
+    };
+    let out = planar8::map_packed_banded(&tight, w * 2, w * bpp, h, workers, |s, d| {
+        let n = d.len() / bpp;
+        if bits >= 16 {
+            kernel(s, d, n);
+        } else {
+            let mut wide = vec![0u8; n * 2];
+            yuv::depth_rescale_le16_plane(s, &mut wide, n, bits, 16);
+            kernel(&wide, d, n);
+        }
+    });
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * bpp,
+            data: out,
+        }],
+    ))
+}
+
+/// Packed `Rgb48Le` / `Rgba64Le` → `Gray10Le` / `Gray12Le` /
+/// `Gray16Le`: the 16-bit Y' projection, then the ladder narrow when
+/// the target is shallower, one row band at a time.
+fn do_packed_deep_to_deep_gray(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    matrix: YuvMatrix,
+    bits: u32,
+    alpha_in: bool,
+    workers: usize,
+) -> Result<VideoFrame> {
+    if src.planes.is_empty() {
+        return Err(Error::invalid("pixfmt: packed RGB source needs a plane"));
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let bpp = if alpha_in { 8 } else { 6 };
+    let tight = tight_plane(&src.planes[0], w * bpp, h)?;
+    let kernel = if alpha_in {
+        yuv::rgba64le_to_gray16le
+    } else {
+        yuv::rgb48le_to_gray16le
+    };
+    let out = planar8::map_packed_banded(&tight, w * bpp, w * 2, h, workers, |s, d| {
+        let n = d.len() / 2;
+        if bits >= 16 {
+            kernel(s, d, n, matrix);
+        } else {
+            let mut luma = vec![0u8; n * 2];
+            kernel(s, &mut luma, n, matrix);
+            yuv::depth_rescale_le16_plane(&luma, d, n, 16, bits);
+        }
+    });
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: out,
+        }],
+    ))
+}
+
+/// `Ya16Le` → `Gray10Le` / `Gray12Le`: luma word, narrowed.
+fn do_ya16_to_deep_gray(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Result<VideoFrame> {
+    let g16 = packed_map(src, src_info, 4, 2, gray::ya16le_to_gray16le)?;
+    let g16_info = FrameInfo::new(PixelFormat::Gray16Le, src_info.width, src_info.height);
+    do_gray_depth_rescale(&g16, g16_info, 16, bits)
+}
+
+/// `Gray10Le` / `Gray12Le` → `Ya16Le`: widened grey word + opaque alpha.
+fn do_deep_gray_to_ya16(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Result<VideoFrame> {
+    let g16 = do_gray_depth_rescale(src, src_info, bits, 16)?;
+    let g16_info = FrameInfo::new(PixelFormat::Gray16Le, src_info.width, src_info.height);
+    packed_map(&g16, g16_info, 2, 4, gray::gray16le_to_ya16le)
 }
 
 // -------------------------------------------------------------------------

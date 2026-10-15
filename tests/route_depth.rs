@@ -189,7 +189,7 @@ fn every_staged_route_preserves_depth_alpha_and_colour() {
         ));
     }
     eprintln!(
-        "route-depth audit: {} violations ({} pinned, {} new)",
+        "route-depth audit: {} violations ({} pinned, {} new)\n{report}",
         found.len(),
         found.len() - unexpected,
         unexpected

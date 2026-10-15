@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - *(convert)* `staged_pivot(src, dst)`: the intermediate format `convert()` stages a pair through (`None` for direct pairs), so callers and tests can inspect the planner's route
+- *(convert)* deep grey ↔ packed deep RGB direct rows: `Gray10Le` / `Gray12Le` / `Gray16Le` → `Rgb48Le` / `Rgba64Le` (ladder widen to 16 bits, broadcast, opaque 65535 alpha) and `Rgb48Le` / `Rgba64Le` → `Gray10Le` / `Gray12Le` / `Gray16Le` (the Q30 full-range Y' row at 16 bits — within 1 LSB of the f64 projection, `r = g = b = v` gives `v` exactly — then truncation to the target width); `Ya16Le` ↔ `Gray10Le` / `Gray12Le`. Both packed rows run on the row-band engine. Closes 148 of the 320 audit violations (172 remain)
+- *(gray)* `gray16le_to_rgb48le` / `gray16le_to_rgba64le`; *(yuv)* `rgb48le_to_gray16le` / `rgba64le_to_gray16le`
 
 ### Other
 

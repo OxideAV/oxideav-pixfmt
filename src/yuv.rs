@@ -1125,6 +1125,37 @@ pub fn rgb48_to_yuv444p16(
     }
 }
 
+/// Project `pixels` packed 16-bit RGB(A) pixels of `comps` LE words
+/// each (R, G, B first) onto 16-bit luma words through the Q30 Y' row
+/// of `p`; the chroma rows are never evaluated.
+#[inline]
+fn packed16_to_luma16(src: &[u8], comps: usize, dst: &mut [u8], pixels: usize, p: &EncodeParams16) {
+    for i in 0..pixels {
+        let r = c16_get(src, i * comps) as i64;
+        let g = c16_get(src, i * comps + 1) as i64;
+        let b = c16_get(src, i * comps + 2) as i64;
+        let y = (p.cy_r * r + p.cy_g * g + p.cy_b * b + p.y_bias) >> FP16_SHIFT;
+        c16_put(dst, i, clamp_u16_i64(y) as u32);
+    }
+}
+
+/// Project a tightly-packed `Rgb48Le` buffer onto a `Gray16Le` luma
+/// plane using the Y' row of `matrix` evaluated in Q30 at 16-bit
+/// precision — the deep analogue of [`rgb24_to_gray8`]. `Gray16Le` is a
+/// full-range space, so callers converting *to* it should pass a
+/// full-range matrix. Each coefficient is within 2^-30 of its real
+/// value and the sum is rounded once, so the result is within 1 LSB of
+/// the f64 projection; for `r = g = b = v` the output is exactly `v`.
+pub fn rgb48le_to_gray16le(src: &[u8], dst: &mut [u8], pixels: usize, matrix: YuvMatrix) {
+    packed16_to_luma16(src, 3, dst, pixels, &matrix.encode_params16());
+}
+
+/// [`rgb48le_to_gray16le`] for a tightly-packed `Rgba64Le` buffer: the
+/// alpha word is skipped, never read into the projection.
+pub fn rgba64le_to_gray16le(src: &[u8], dst: &mut [u8], pixels: usize, matrix: YuvMatrix) {
+    packed16_to_luma16(src, 4, dst, pixels, &matrix.encode_params16());
+}
+
 /// Read the little-endian 16-bit sample at index `i` of `buf`.
 #[inline]
 fn c16_get(buf: &[u8], i: usize) -> u32 {
