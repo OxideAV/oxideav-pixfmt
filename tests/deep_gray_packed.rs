@@ -154,7 +154,7 @@ fn luma_ref(r: u16, g: u16, b: u16, cs: ColorSpace) -> f64 {
 }
 
 fn check_luma(pixels: &[(u16, u16, u16)], cs: ColorSpace, alpha: bool) {
-    let w = (pixels.len() as u32).min(1024).max(1);
+    let w = (pixels.len() as u32).clamp(1, 1024);
     let h = (pixels.len() as u32).div_ceil(w);
     let n = (w * h) as usize;
     let comps = if alpha { 4 } else { 3 };
