@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(convert)* computed rows `Gray10Le` / `Gray12Le` / `Gray16Le` ↔ **every** planar YUV(A) family member (8 / 10 / 12 / 16 bits, every siting, alpha or not) through the luma plane only: the luma is widened to the deeper of the two depths (exact ladder rule), range-moved there (H.273 equations 27–29 scaled by 2^(n−8); a full-range colour signal turns the move off) and narrowed to the target width; chroma is the exact neutral mid-code `1 << (bits − 1)`, alpha opaque full-scale. Row-banded. `Gray16Le ↔ Yuv444P16Le` rails: 0 ↔ 4096, 65535 ↔ 60160; every limited luma code round-trips exactly
 - *(convert)* computed rows `Rgb48Le` / `Rgba64Le` → every planar family member: one banded 16-bit encode through the Q30 deep matrix with the chroma subsampled at 16 bits, then every plane narrowed to the member's depth — byte-identical to the historical two-step route through the 16-bit 4:4:4 tier. The existing `Rgb48Le → Yuv*P16Le` / `Rgba64Le → Yuva*P16Le` table rows now run on the same banded engine (`planar8::encode_deep`)
 - *(route_depth)* the audit now asserts **zero** violations (320 → 0); direct pairs 1527 → 1760 of 4830
+- *(convert)* `Pal8 → Rgba` / `Bgra` / `Argb` / `Abgr` honour the palette-alpha side-channel (core 0.1.40 `VideoFrame::palette_alpha`): a transparent entry expands to alpha 0, entries the record does not cover (or a missing / malformed record) are opaque; `Pal8 → Rgb24` / `Bgr24` / `Gray8` drop alpha (documented rule). `Rgb(a) → Pal8` attaches the palette-alpha record next to the colour table when the `Palette` has non-opaque entries, so the frame stays self-describing. `oxideav-core` minimum is now `0.1.40` (same caret family)
+- *(bench)* `deep_gray_12mp`: the round-476 routes at 4032×3024 next to the pre-round two-step routes, serial and threaded
+
+### Changed
+
+- *(convert)* the deep luma range moves (identity-coded planes and the new grey ↔ YUV rows) read a per-process lookup table built from the exact rounded-division formula instead of dividing per sample — same bytes, a third of the time
 
 ### Other
 

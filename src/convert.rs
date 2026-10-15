@@ -531,44 +531,70 @@ fn identity_planes(
     Ok(out)
 }
 
+/// Per-process range tables for the deep luma moves, one per
+/// `(bits, direction)`: index `bits * 2 + to_full`. Built lazily with
+/// the exact rounded-division formulas below, so a table lookup is
+/// sample-for-sample the same as the division it replaces (which at
+/// 64 bits costs more than the rest of a luma row put together).
+static RANGE_TABLES: [std::sync::OnceLock<Box<[u16]>>; 34] =
+    [const { std::sync::OnceLock::new() }; 34];
+
+/// The `(bits, to_full)` range table: `2^bits` entries mapping every
+/// luma code of that width.
+fn range_table(bits: u32, to_full: bool) -> &'static [u16] {
+    debug_assert!((9..=16).contains(&bits));
+    RANGE_TABLES[bits as usize * 2 + to_full as usize].get_or_init(|| {
+        let s = 1i64 << (bits - 8);
+        let max = (1i64 << bits) - 1;
+        let den = 219 * s;
+        (0..=max)
+            .map(|v| {
+                if to_full {
+                    let num = (v - 16 * s) * max;
+                    if num <= 0 {
+                        0
+                    } else {
+                        ((num + den / 2) / den).min(max) as u16
+                    }
+                } else {
+                    ((219 * s * v + 16 * s * max + max / 2) / max).min(max) as u16
+                }
+            })
+            .collect()
+    })
+}
+
 /// Limited → full range on a luma-like plane at `bits` (H.273
 /// equations 27–29 inverted): `round((v − 16·2^(n−8)) · (2^n − 1) /
 /// (219·2^(n−8)))`, clamped. The 8-bit case is the crate's existing Q15
-/// luma rescale.
+/// luma rescale; the deep widths go through [`range_table`].
 fn range_limited_to_full(plane: &mut [u8], bits: u32) {
     if bits <= 8 {
         yuv::limited_to_full_luma(plane);
         return;
     }
-    let s = 1i64 << (bits - 8);
-    let max = (1i64 << bits) - 1;
-    let den = 219 * s;
+    let table = range_table(bits, true);
+    let mask = ((1u32 << bits) - 1) as u16;
     for word in plane.chunks_exact_mut(2) {
-        let v = u16::from_le_bytes([word[0], word[1]]) as i64 & max;
-        let num = (v - 16 * s) * max;
-        let out = if num <= 0 {
-            0
-        } else {
-            ((num + den / 2) / den).min(max)
-        };
-        word.copy_from_slice(&(out as u16).to_le_bytes());
+        let v = u16::from_le_bytes([word[0], word[1]]) & mask;
+        word.copy_from_slice(&table[v as usize].to_le_bytes());
     }
 }
 
 /// Full → limited range on a luma-like plane at `bits` (H.273
 /// equations 27–29): `round((219 · v / (2^n − 1) + 16) · 2^(n−8))`.
-/// The 8-bit case is the crate's existing Q15 luma rescale.
+/// The 8-bit case is the crate's existing Q15 luma rescale; the deep
+/// widths go through [`range_table`].
 fn range_full_to_limited(plane: &mut [u8], bits: u32) {
     if bits <= 8 {
         yuv::full_to_limited_luma(plane);
         return;
     }
-    let s = 1i64 << (bits - 8);
-    let max = (1i64 << bits) - 1;
+    let table = range_table(bits, false);
+    let mask = ((1u32 << bits) - 1) as u16;
     for word in plane.chunks_exact_mut(2) {
-        let v = u16::from_le_bytes([word[0], word[1]]) as i64 & max;
-        let out = ((219 * s * v + 16 * s * max + max / 2) / max).min(max);
-        word.copy_from_slice(&(out as u16).to_le_bytes());
+        let v = u16::from_le_bytes([word[0], word[1]]) & mask;
+        word.copy_from_slice(&table[v as usize].to_le_bytes());
     }
 }
 
@@ -1968,9 +1994,19 @@ enum ConvertOp {
         /// `true` if source is RGBA (alpha consumed by skipping the 4th byte).
         alpha_in: bool,
     },
+    /// `Pal8` → packed RGB(A): expansion through the frame-attached
+    /// palette (or `ConvertOptions::palette`). Per-entry alpha comes
+    /// from the palette-alpha side-channel — a transparent entry lands
+    /// as alpha 0 on the `Rgba` row, entries the record does not cover
+    /// are opaque — and is dropped on the `Rgb24` row.
     Pal8ToRgb {
+        /// `true` to emit RGBA, `false` to emit Rgb24.
         alpha: bool,
     },
+    /// Packed RGB(A) → `Pal8`: nearest-colour quantisation against
+    /// `ConvertOptions::palette`; the output carries the table as the
+    /// palette side-channel and, when any entry is not opaque, the
+    /// palette-alpha record.
     RgbToPal8 {
         alpha_in: bool,
     },
@@ -3616,6 +3652,12 @@ fn deep_gray_bits(f: PixelFormat) -> u32 {
 /// applied at the deeper of the two depths, band by band. Widening
 /// before the move keeps every source code distinct through the
 /// rescale; narrowing after it is the ladder truncation.
+///
+/// Every step is a per-sample function of the source code, so the
+/// whole move is composed once into a `2^src_bits`-entry table (by
+/// running the ladder and range primitives themselves over a ramp —
+/// the table is those primitives, not a re-derivation) and each band
+/// is one lookup per sample.
 #[allow(clippy::too_many_arguments)]
 fn luma_depth_range_banded(
     src: &[u8],
@@ -3631,36 +3673,46 @@ fn luma_depth_range_banded(
     debug_assert!(work > 8);
     let ssb = if src_bits > 8 { 2 } else { 1 };
     let dsb = if dst_bits > 8 { 2 } else { 1 };
-    planar8::map_packed_banded(src, w * ssb, w * dsb, h, workers, |s, d| {
-        let n = d.len() / dsb;
-        let mut scratch = Vec::new();
-        // Stage at the work depth — straight into the output when that
-        // is the output's width, else in a band scratch.
-        let stage: &mut [u8] = if dst_bits == work {
-            d
+    // Compose the table: ramp at the source width → widen → range →
+    // narrow, with the crate's own primitives.
+    let codes = 1usize << src_bits;
+    let ramp: Vec<u8> = if ssb == 1 {
+        (0..codes).map(|v| v as u8).collect()
+    } else {
+        (0..codes).flat_map(|v| (v as u16).to_le_bytes()).collect()
+    };
+    let mut wide = plane_to_depth(&ramp, codes, src_bits, work);
+    if limited {
+        if to_yuv {
+            range_full_to_limited(&mut wide, work);
         } else {
-            scratch = vec![0u8; n * 2];
-            &mut scratch
-        };
-        if src_bits == work {
-            stage.copy_from_slice(s);
-        } else if src_bits > 8 {
-            yuv::depth_rescale_le16_plane(s, stage, n, src_bits, work);
-        } else {
-            yuv::depth_up_8_to_le16_plane(s, stage, n, work);
+            range_limited_to_full(&mut wide, work);
         }
-        if limited {
-            if to_yuv {
-                range_full_to_limited(stage, work);
-            } else {
-                range_limited_to_full(stage, work);
+    }
+    let table = plane_to_depth(&wide, codes, work, dst_bits);
+    if dsb == 1 {
+        // Deep → byte: the table is bytes already.
+        return planar8::map_packed_banded(src, w * ssb, w, h, workers, |s, d| {
+            let n = d.len();
+            for (o, i) in d.iter_mut().zip(s[..n * 2].chunks_exact(2)) {
+                *o = table[u16::from_le_bytes([i[0], i[1]]) as usize];
             }
-        }
-        if dst_bits != work {
-            if dst_bits > 8 {
-                yuv::depth_rescale_le16_plane(&scratch, d, n, work, dst_bits);
-            } else {
-                yuv::depth_down_le16_plane(&scratch, d, n, work);
+        });
+    }
+    let table: Vec<u16> = table
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    planar8::map_packed_banded(src, w * ssb, w * 2, h, workers, |s, d| {
+        let n = d.len() / 2;
+        if ssb == 1 {
+            for (o, &v) in d.chunks_exact_mut(2).zip(s[..n].iter()) {
+                o.copy_from_slice(&table[v as usize].to_le_bytes());
+            }
+        } else {
+            for (o, i) in d.chunks_exact_mut(2).zip(s[..n * 2].chunks_exact(2)) {
+                let v = u16::from_le_bytes([i[0], i[1]]) as usize;
+                o.copy_from_slice(&table[v].to_le_bytes());
             }
         }
     })
@@ -5469,12 +5521,22 @@ fn pal8_to_rgb(
     alpha: bool,
 ) -> Result<VideoFrame> {
     // Frame-attached palette wins over the options bundle: it travels
-    // with the frame it describes.
-    let side_channel = src.palette().map(|raw| Palette {
-        colors: raw
-            .chunks_exact(3)
-            .map(|c| [c[0], c[1], c[2], 255])
-            .collect(),
+    // with the frame it describes. Per-entry alpha comes from the
+    // palette-alpha side-channel (core 0.1.40): a covered entry's byte,
+    // opaque 255 for every entry the record does not cover (or when
+    // there is no record / a malformed one, which core reads as none).
+    let side_channel = src.palette().map(|raw| {
+        let alpha = src.palette_alpha();
+        Palette {
+            colors: raw
+                .chunks_exact(3)
+                .enumerate()
+                .map(|(i, c)| {
+                    let a = alpha.and_then(|a| a.get(i).copied()).unwrap_or(255);
+                    [c[0], c[1], c[2], a]
+                })
+                .collect(),
+        }
     });
     let palette =
         match (&side_channel, &opts.palette) {
@@ -5543,22 +5605,33 @@ fn rgb_to_pal8(
         pal8::quantise_rgb24_to_pal8(&tight, &mut out, w, h, palette, opts.dither);
     }
     // Attach the table that was actually used so the frame carries its
-    // own colour meaning (side-channel format: 3-byte RGB per entry;
-    // the Palette's alpha column is not representable there and is
-    // dropped — consumers that need per-entry alpha keep the Palette).
+    // own colour meaning (side-channel format: 3-byte RGB per entry),
+    // plus the palette-alpha record when any entry is not opaque
+    // (one byte per entry up to the last non-opaque one; uncovered
+    // entries read as opaque), so a later `Pal8 → Rgba` expansion
+    // reproduces the Palette's alpha column without the options bundle.
     let side_channel: Vec<u8> = palette
         .colors
         .iter()
         .flat_map(|c| [c[0], c[1], c[2]])
         .collect();
-    Ok(make_frame(
+    let mut alpha: Vec<u8> = palette.colors.iter().map(|c| c[3]).collect();
+    while alpha.last() == Some(&255) {
+        alpha.pop();
+    }
+    let frame = make_frame(
         src,
         vec![VideoPlane {
             stride: w,
             data: out,
         }],
     )
-    .with_palette(side_channel))
+    .with_palette(side_channel);
+    Ok(if alpha.is_empty() {
+        frame
+    } else {
+        frame.with_palette_alpha(alpha)
+    })
 }
 
 // -------------------------------------------------------------------------

@@ -40,12 +40,12 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | category                | formats / operations                                                        |
 | ----------------------- | --------------------------------------------------------------------------- |
 | RGB / BGR family        | `Rgb24`, `Bgr24`, `Rgba`, `Bgra`, `Argb`, `Abgr` — all-to-all swizzles      |
-| Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`, `Rgb48Le` ↔ `Rgba64Le` (colour words verbatim, opaque 65535 synthesis / drop) |
+| Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`, `Rgb48Le` ↔ `Rgba64Le` (colour words verbatim, opaque 65535 synthesis / drop); `Rgb48Le` / `Rgba64Le` → **every** planar YUV(A) member in one banded 16-bit encode (chroma subsampled at 16 bits, planes narrowed afterwards) |
 | Deep matrix             | the 16-bit planar tier ({`Yuv`,`Yuva`} × {420,422,444} `P16Le` + `Yuv440P16Le`) ↔ `Rgb48Le` / `Rgba64Le` at **full 16-bit precision** (Q30 k-coefficient construction, chroma resampled at 16 bits, Yuva alpha word verbatim); the 10/12-bit family stages in losslessly via the exact widen |
 | Planar GBR              | the full ten-member ladder — `Gbrp8` / `Gbrap8` (byte planes) through `Gbrp10/12/14Le` to the full-width `Gbrp16Le` / `Gbrap16Le` — ↔ **both** `Rgb48Le` and `Rgba64Le` (alpha synthesised opaque / dropped when the shapes differ) and ↔ `Rgb24` / `Rgba`; plus `Gray8` interop (full-range luminance projection out, MSB-replicated broadcast in) and `Gbrp8` ↔ `Gbrap8` alpha append / drop |
 | YUV planar ↔ RGB        | `Yuv420P` / `Yuv422P` / `Yuv444P` ↔ `Rgb24` / `Rgba`, plus the full-range `YuvJ*` families direct ↔ RGB; any width / height (chroma `ceil(w/2)` × `ceil(h/2)`); optional row-band threads via `convert_with` |
 | Colour signalling       | the frame's `ColorSignal` record / a `ConvertContext` override select range (full range on `Yuva*` and 10/12/16-bit layouts) and the H.273 matrix (1, 4, 5, 6, 7, 9; identity → planar GBR) |
-| Bit-depth ladder        | planar YUV 8 ↔ 10 ↔ 12 ↔ 16 bit (same layout, exact round-trips; `Yuv*P16Le` is full-scale 65535); `Gray8` ↔ `Gray10Le` ↔ `Gray12Le` ↔ `Gray16Le` |
+| Bit-depth ladder        | planar YUV 8 ↔ 10 ↔ 12 ↔ 16 bit (same layout, exact round-trips; `Yuv*P16Le` is full-scale 65535); `Gray8` ↔ `Gray10Le` ↔ `Gray12Le` ↔ `Gray16Le` — see *Depth-preserving routes* for the widen / narrow rule |
 | Chroma subsampling      | `4:4:4` ↔ `4:2:2` ↔ `4:2:0` (SIMD-accelerated up- and down-sample); `4:4:0` (full-width, half-height chroma) ↔ every other siting via a vertical pair-average / row broadcast composed through 4:4:4 |
 | 4:4:0 planar            | `Yuv440P` / `Yuv440P10Le` / `Yuv440P12Le` / `Yuv440P16Le` are full members of the planar-family engine (direct to every planar YUV(A) member, `Rgb24` / `Rgba` / `Gray8`, `Yuv411P`, and `Yuv440P16Le` ↔ `Rgb48Le` on the deep matrix); odd widths and heights legal |
 | Scene-referred float    | `GrayF32Le` / `RgbF32Le` / `RgbaF32Le` / `GbrpF32Le` / `GbrapF32Le` (binary32 LE, linear light, no full-scale): all-to-all inside the family with **no clamping** (speculars above 1.0, negative excursions and NaN payloads survive), direct ↔ 18 integer shapes (`Gray8/10/12/16Le`, `Rgb24` / `Rgba` / `Rgb48Le` / `Rgba64Le`, the ten-member `Gbrp*`/`Gbrap*` ladder) by pure normalisation `code / (2^bits − 1)` in and saturating round-to-nearest out (NaN → 0; every integer code round-trips exactly; **no transfer function is applied** — use `transfer` for that), and direct ↔ the 16-bit planar YUV(A) tier through the deep matrix so 8/10/12-bit YUV stages in at full precision |
@@ -53,20 +53,20 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Semi-planar             | `NV12` / `NV21` ↔ `Yuv420P` / `Rgb24` / `Rgba`                              |
 | Packed 4:2:2            | `Yuyv422` / `Uyvy422` ↔ `Yuv422P` / `Rgb24` / `Rgba` + Yuyv ↔ Uyvy swap     |
 | Full ↔ limited range    | `YuvJ420P` / `YuvJ422P` / `YuvJ444P` ↔ `Yuv*`                               |
-| Gray ↔ YUV              | `Gray8` ↔ every YUV family (luma extraction / neutral-chroma synthesis)     |
-| Gray ↔ RGB              | `Gray8` → all six packed RGB orders; `Rgb24` / `Rgba` → `Gray8` (luminance) |
+| Gray ↔ YUV              | `Gray8` ↔ every YUV family (luma extraction / neutral-chroma synthesis); `Gray10Le` / `Gray12Le` / `Gray16Le` ↔ every planar YUV(A) member through the luma plane only, range-moved at the deeper of the two depths (`Gray16Le ↔ Yuv444P16Le`: 0 ↔ 4096, 65535 ↔ 60160) |
+| Gray ↔ RGB              | `Gray8` → all six packed RGB orders; `Rgb24` / `Rgba` → `Gray8` (luminance); `Gray10Le` / `Gray12Le` / `Gray16Le` ↔ `Rgb48Le` / `Rgba64Le` (bit-exact broadcast out, the 16-bit Y' row in — a 65536-code ramp round-trips exactly) |
 | Grayscale / mono        | `Gray8` / `Gray16Le`, `MonoBlack` / `MonoWhite` ↔ `Gray8`                   |
 | Grey + alpha            | `Ya8` ↔ `Gray8` / `Rgb24` / `Rgba` (luma broadcast, alpha carried through); `Ya16Le` ↔ `Ya8` (exact ×257 / high-byte), `Gray16Le` (luma word verbatim), `Gray8`, `Rgba64Le` (bit-exact broadcast + alpha carry) and `Rgb24` / `Rgba` |
 | CMYK                    | `Cmyk` and `CmykInverted` ↔ `Rgb24` / `Rgba` (uncalibrated device formula, lossless RGB round-trip); `Cmyk` ↔ `CmykInverted` exact per-byte complement |
 | YUV + alpha             | the full 12-member Yuva family — `Yuva420P` / `Yuva422P` / `Yuva444P` plus the deep 10/12/16-bit members at **all three** chroma sitings — ↔ siblings / each other / `Rgb24` / `Rgba` / `Gray8`; every ordered pair inside the family is direct; alpha bit-exact at same depth, MSB-widened / truncated across depths |
 | Significant bits        | source frames may carry the per-plane significant-bits side-channel (e.g. 12-bit luma + 10-bit chroma on a `P16Le` surface): `convert()` treats marked planes at their recorded depth, rejects invalid records with `Error::Invalid`, and never propagates a stale record |
-| Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither; frames carry their table in-band via the `VideoFrame` palette side-channel |
+| Palette                 | `Pal8` ↔ `Rgb24` / `Rgba`, nearest-colour quantisation with optional dither; frames carry their table in-band via the `VideoFrame` palette side-channel, and per-entry alpha via the palette-alpha record (`Pal8 → Rgba*` honours it: transparent entry → alpha 0, uncovered entries opaque; `Pal8 → Rgb*` / `Gray8` drop it) |
 | Colour matrices         | BT.601 / BT.709 / BT.2020, limited (studio) / full (JPEG) range             |
 | Dither strategies       | None, 8×8 ordered Bayer, Floyd–Steinberg                                    |
 | Alpha / compositing     | Porter-Duff "over" (premul + straight), premul/unpremul, alpha-mask blit    |
 | Format introspection    | `FormatInfo::of(fmt)` → planes / bit-depth / `ChromaSubsampling` typed view |
 | Planar-family engine    | a computed dispatch tier makes *every* ordered pair inside the uniform planar YUV(A) family ({Yuv,Yuva} × {420,422,444} × {8,10,12,16}, plus `Yuv440P*` at the four depths) a direct single-step conversion: depth move + chroma resample (at the deeper of the two depths) + alpha handling fused in one op |
-| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier, alpha-carrying deep moves through `Yuva*P16Le`) — **all 4830 ordered format pairs convert** (1478 direct); `supports()` / `supports_direct()` report availability |
+| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier, alpha-carrying deep moves through `Yuva*P16Le`) — **all 4830 ordered format pairs convert** (1760 direct); `supports()` / `supports_direct()` / `staged_pivot()` report availability and the route; every staged route passes the depth / alpha / palette invariants below |
 
 ## Roadmap
 
@@ -74,7 +74,7 @@ The pixel-format universe used by general-purpose video tooling runs
 to roughly two hundred entries; this crate currently covers the 70
 `PixelFormat` variants oxideav-core defines, and the conversion
 matrix is **fully closed**: every one of the 70 × 69 = 4830 ordered
-pairs resolves — 1478 directly, the rest through one staged pivot. The
+pairs resolves — 1760 directly, the rest through one staged pivot. The
 formats below are *planned* — they're not implemented yet, but they
 have real callers in the codecs/containers we want to support, so the
 [`PixelFormat`](https://docs.rs/oxideav-core/latest/oxideav_core/enum.PixelFormat.html)
@@ -412,6 +412,48 @@ exposed both through `convert()` and directly as
 `yuv::{limited_to_full_luma, limited_to_full_chroma, full_to_limited_luma, full_to_limited_chroma}`
 so callers can flip range without going through RGB.
 
+### Depth-preserving routes
+
+Three rulings govern every route the planner picks; `tests/route_depth.rs`
+checks them over all 4830 ordered pairs and asserts zero violations.
+
+**Route-depth invariant.** When both endpoints carry more than 8 bits
+per channel (10 / 12 / 14 / 16-bit integer or binary32 float), every
+intermediate format on the route carries at least
+`min(depth(src), depth(dst))` bits per channel; when both endpoints
+carry alpha, no intermediate drops it; no route pivots through `Pal8`;
+float ↔ float never pivots through an integer format. `staged_pivot(src,
+dst)` reports the pivot a staged pair takes (`None` for direct pairs).
+Before round 476 the deep grey words, `Ya16Le` and the planar GBR ladder
+reached the 10 / 12-bit YUV family through `Gray8` / `Rgb24` / `Rgba` —
+320 pairs silently lost 8 bits mid-route; all of them are direct now.
+
+**Matrix selection at depth.** `Rgb48Le` / `Rgba64Le` → `Gray10Le` /
+`Gray12Le` / `Gray16Le` evaluate the Y' row of the selected primaries
+(BT.601 / BT.709 / BT.2020 through `ConvertOptions::color_space`, the
+same rule the 8-bit `Rgb24 → Gray8` row follows: the range half of the
+variant is ignored because the grey words are a full-range space) in
+Q30 at 16-bit scale, rounded once, then narrowed to the target width.
+The result is within 1 LSB of the f64 projection (pinned over a
+4096-sample structured sweep and 10^6 random samples) and exact for
+`r = g = b`. Grey ↔ YUV never touches a matrix: the luma plane moves
+alone, the chroma planes are the exact neutral mid-code
+`1 << (bits − 1)` and alpha is opaque full-scale.
+
+**Rescale convention.** Moving a sample between widths widens by MSB
+replication — `v << d | v >> (bits − d)`, i.e. `×257` from 8 to 16 — so
+zero maps to zero and peak to peak, and narrows by truncation (drop the
+low bits), which is the exact inverse: widen → narrow and narrow → widen
+→ narrow round-trips are lossless at every rung of the ladder (8 / 10 /
+12 / 14 / 16). A route that both rescales and range-moves (grey ↔ YUV
+across depths) widens first, applies the range move at the deeper of
+the two depths (H.273 equations 27–29 scaled by `2^(n−8)`: limited luma
+is `16·2^(n−8) .. 235·2^(n−8)`), then narrows — so no source code is
+merged before the rescale. A full-range colour signal (the frame's
+record or a `ConvertContext` override) turns the range move off and
+the luma move becomes the bare ladder move (`Gray16Le ↔ Yuv*P16Le` is a
+verbatim copy). The 8-bit grey ↔ 8-bit YUV rows keep their Q15 kernels.
+
 ### Transfer functions
 
 The `transfer` module exposes opto-electronic and electro-optical
@@ -491,6 +533,29 @@ instead of copied, RGBA interleaved in the decode pass, RGBA input
 split a few rows at a time), the exact NEON encoder, and the one-pass
 deep matrix for 10/12-bit sources.
 
+**Depth-preserving routes, 12-megapixel still (4032×3024), Apple M4
+Max (`cargo bench --features bench --bench deep_gray_12mp`).** "before"
+is the route the planner took before round 476 — two `convert` calls
+staged through `Gray8` (or `Yuv444P16Le` for the last row) — measured
+in the same binary; "serial" / "threaded" are the direct rows.
+
+| conversion                   | before (staged) | serial   | threaded |
+| ---------------------------- | --------------- | -------- | -------- |
+| `Gray16Le → Rgb48Le`         | 2.54 ms         | 1.05 ms  | 0.70 ms  |
+| `Rgb48Le → Gray16Le`         | 19.0 ms         | 13.7 ms  | 1.84 ms  |
+| `Yuv444P16Le → Gray16Le`     | 3.18 ms         | 3.30 ms  | 0.61 ms  |
+| `Yuv420P16Le → Gray16Le`     | 3.25 ms         | 3.56 ms  | 0.76 ms  |
+| `Gray16Le → Yuv444P16Le`     | 3.87 ms         | 4.67 ms  | 1.71 ms  |
+| `Gray16Le → Yuv420P10Le`     | 3.29 ms         | 3.87 ms  | 0.80 ms  |
+| `Rgb48Le → Yuv420P16Le`      | —               | 25.1 ms  | 2.94 ms  |
+| `Rgb48Le → Yuv420P10Le`      | 29.4 ms         | 27.8 ms  | 5.78 ms  |
+
+The "before" rows were 8-bit routes (cheap because they threw the low
+byte away before the range move); the direct rows keep all 16 bits —
+the luma move is one composed table lookup per sample, the packed rows
+run the Q30 matrix — on the row-band engine. The 8-bit headline rows
+above were re-measured in the same session and are unchanged.
+
 **Porter-Duff compositing (scalar, Apple M-series single core, indicative):**
 
 | operation                           | scalar throughput |
@@ -543,6 +608,7 @@ cargo bench --features bench --bench pixel_ops          # RGB swizzle, NV12, chr
 cargo bench --features bench --bench alpha              # Porter-Duff over/blit/premultiply
 cargo bench --features bench --bench depth_gray        # bit-depth ladder + RGB→Gray8 projection
 cargo bench --features bench --bench heif_12mp         # 12 MP still: the production-HEIF conversion set through convert()
+cargo bench --features bench --bench deep_gray_12mp    # 12 MP still: the depth-preserving grey / packed-16 / 16-bit YUV routes, before and after
 OXIDEAV_PIXFMT_FORCE_SCALAR=1 cargo bench --features bench  # scalar baseline for comparison
 ```
 
