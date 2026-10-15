@@ -80,10 +80,25 @@ fn deep_gray_packed_rows_are_direct() {
 
 /// Every one of the 65536 grey codes survives the broadcast and the
 /// projection, on every matrix.
+/// Miri interprets every instruction: the corpora below shrink there
+/// (the crate's usual `cfg(miri)` rule) while the native run keeps
+/// the full sweep.
+#[cfg(miri)]
+const RAMP_STEP: usize = 257;
+#[cfg(not(miri))]
+const RAMP_STEP: usize = 1;
+#[cfg(miri)]
+const RANDOM_SAMPLES: usize = 2_000;
+#[cfg(not(miri))]
+const RANDOM_SAMPLES: usize = 1_000_000;
+
 #[test]
 fn gray16_ramp_round_trips_through_rgb48_bit_exact() {
-    let (w, h) = (256u32, 256u32);
-    let ramp: Vec<u16> = (0..=u16::MAX).collect();
+    let ramp: Vec<u16> = (0..=u16::MAX).step_by(RAMP_STEP).collect();
+    let w = if RAMP_STEP == 1 { 256u32 } else { 16 };
+    let h = (ramp.len() as u32).div_ceil(w);
+    let mut ramp = ramp;
+    ramp.resize((w * h) as usize, 0);
     let src = frame(w as usize * 2, le16(&ramp));
     for cs in [
         ColorSpace::Bt601Limited,
@@ -139,7 +154,7 @@ fn luma_ref(r: u16, g: u16, b: u16, cs: ColorSpace) -> f64 {
 }
 
 fn check_luma(pixels: &[(u16, u16, u16)], cs: ColorSpace, alpha: bool) {
-    let w = 1024u32;
+    let w = (pixels.len() as u32).min(1024).max(1);
     let h = (pixels.len() as u32).div_ceil(w);
     let n = (w * h) as usize;
     let comps = if alpha { 4 } else { 3 };
@@ -220,7 +235,10 @@ fn structured_sweep() -> Vec<(u16, u16, u16)> {
 
 #[test]
 fn rgb48_to_gray16_matches_f64_luma_structured() {
-    let sweep = structured_sweep();
+    let mut sweep = structured_sweep();
+    if cfg!(miri) {
+        sweep.truncate(512);
+    }
     for cs in [
         ColorSpace::Bt601Limited,
         ColorSpace::Bt709Limited,
@@ -234,7 +252,7 @@ fn rgb48_to_gray16_matches_f64_luma_structured() {
 #[test]
 fn rgb48_to_gray16_matches_f64_luma_random_million() {
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let samples: Vec<(u16, u16, u16)> = (0..1_000_000)
+    let samples: Vec<(u16, u16, u16)> = (0..RANDOM_SAMPLES)
         .map(|_| (rng.u16(), rng.u16(), rng.u16()))
         .collect();
     for cs in [
@@ -365,7 +383,12 @@ fn deep_gray_packed_rows_threaded_equals_serial() {
     use PixelFormat as P;
     let mt = ConvertContext::new().with_execution(ExecutionContext::with_threads(8));
     let opts = ConvertOptions::default();
-    for (w, h) in [(1u32, 1u32), (7, 3), (64, 33), (300, 200)] {
+    let sizes: &[(u32, u32)] = if cfg!(miri) {
+        &[(1, 1), (7, 3), (16, 33)]
+    } else {
+        &[(1, 1), (7, 3), (64, 33), (300, 200)]
+    };
+    for &(w, h) in sizes {
         let n = (w * h) as usize;
         let mut rng = Rng(w as u64 * 1000 + h as u64);
         for (sf, comps) in [

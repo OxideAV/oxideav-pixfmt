@@ -373,8 +373,13 @@ fn deep_family_to_deep_gray_luma_range_at_depth() {
 /// within 1 LSB and back within 1 LSB.
 #[test]
 fn gray16_yuv444p16_rails_and_round_trip() {
-    let (w, h) = (256u32, 256u32);
-    let ramp: Vec<u16> = (0..=u16::MAX).collect();
+    // Full ramp natively; every 257th code (and the rails) under miri.
+    let step = if cfg!(miri) { 257 } else { 1 };
+    let mut ramp: Vec<u16> = (0..=u16::MAX).step_by(step).collect();
+    let w = if step == 1 { 256u32 } else { 16 };
+    let h = (ramp.len() as u32).div_ceil(w);
+    ramp.resize((w * h) as usize, u16::MAX);
+    let last = ramp.len() - 1;
     let src = one_plane(w as usize * 2, le16(&ramp));
     let yuv = convert(
         &src,
@@ -385,7 +390,7 @@ fn gray16_yuv444p16_rails_and_round_trip() {
     .unwrap();
     let y = rd16(&yuv.planes[0].data);
     assert_eq!(y[0], 4096);
-    assert_eq!(y[65535], 60160);
+    assert_eq!(y[last], 60160);
     assert!(y.windows(2).all(|p| p[0] <= p[1]), "monotonic");
     let back = convert(
         &yuv,
@@ -404,7 +409,7 @@ fn gray16_yuv444p16_rails_and_round_trip() {
     }
     // Every limited code survives YUV → grey → YUV exactly (the full
     // space is wider than the limited span).
-    let limited: Vec<u16> = (4096u16..=60160).collect();
+    let limited: Vec<u16> = (4096u16..=60160).step_by(step).collect();
     let lw = 256u32;
     let lh = (limited.len() as u32).div_ceil(lw);
     let mut padded = limited.clone();
@@ -504,7 +509,12 @@ fn full_range_signal_makes_the_luma_move_verbatim() {
 /// planar-family engine), at even and odd sizes.
 #[test]
 fn packed16_to_family_matches_the_staged_route() {
-    for (w, h) in [(8usize, 8usize), (3, 5), (7, 3), (1, 1), (17, 2)] {
+    let sizes: &[(usize, usize)] = if cfg!(miri) {
+        &[(3, 5), (1, 1)]
+    } else {
+        &[(8, 8), (3, 5), (7, 3), (1, 1), (17, 2)]
+    };
+    for &(w, h) in sizes {
         let n = w * h;
         for (src_fmt, comps) in [(PixelFormat::Rgb48Le, 3usize), (PixelFormat::Rgba64Le, 4)] {
             let mut rng = Rng((w * 31 + h) as u64 * comps as u64);
@@ -601,7 +611,12 @@ fn packed16_to_family_alpha_rules() {
 fn new_rows_threaded_equals_serial() {
     let mt = ConvertContext::new().with_execution(ExecutionContext::with_threads(8));
     let opts = ConvertOptions::default();
-    for (w, h) in [(1usize, 1usize), (5, 3), (64, 33), (130, 97)] {
+    let sizes: &[(usize, usize)] = if cfg!(miri) {
+        &[(1, 1), (5, 3), (8, 33)]
+    } else {
+        &[(1, 1), (5, 3), (64, 33), (130, 97)]
+    };
+    for &(w, h) in sizes {
         let n = w * h;
         let mut rng = Rng((w * 1000 + h) as u64);
         for &(g, gbits) in DEEP_GRAY {
