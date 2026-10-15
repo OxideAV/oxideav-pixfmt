@@ -682,6 +682,21 @@ pub fn supports_direct(src: PixelFormat, dst: PixelFormat) -> bool {
     src == dst || lookup_any(src, dst).is_some()
 }
 
+/// The intermediate format `convert()` stages `src → dst` through, or
+/// `None` when the pair converts directly (including `src == dst`) or
+/// is not supported at all. The planner is deterministic, so this is
+/// exactly the route a `convert()` call takes; it is what the
+/// route-depth audit in the test suite inspects (every intermediate
+/// must carry at least `min(src, dst)` bits per channel when both
+/// endpoints are deeper than 8 bits, keep alpha when both endpoints
+/// have it, and never be a palette).
+pub fn staged_pivot(src: PixelFormat, dst: PixelFormat) -> Option<PixelFormat> {
+    if supports_direct(src, dst) {
+        return None;
+    }
+    lookup_staged(src, dst).map(|(_, pivot, _)| pivot)
+}
+
 /// Pivot preference for staged conversions. YUV carriage pivots keep
 /// YUV → YUV moves free of any colour matrix; the RGB list is ordered
 /// alpha-capable first (so alpha survives whenever both endpoints carry

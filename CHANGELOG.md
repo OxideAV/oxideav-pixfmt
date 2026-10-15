@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(convert)* `staged_pivot(src, dst)`: the intermediate format `convert()` stages a pair through (`None` for direct pairs), so callers and tests can inspect the planner's route
+
+### Other
+
+- *(route_depth)* route-depth audit over all 4830 ordered pairs: when both endpoints carry more than 8 bits per channel every intermediate must carry at least `min(src, dst)` bits, alpha must survive when both endpoints have it, no route may pivot through `Pal8`, and float ↔ float never pivots through an integer format. Census at the start of round 476: 1527 direct / 3303 staged pairs, **320 depth violations** (every one a deep endpoint pivoting through `Gray8`, `Rgb24` or `Rgba`), pinned as the known list while they are closed
+
 ## [0.1.10](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.9...v0.1.10) - 2026-10-04
 
 ### Other
