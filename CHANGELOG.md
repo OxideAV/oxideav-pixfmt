@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.10...v0.1.11) - 2026-10-17
+
+### Added
+
+- *(convert)* planar GBR(A) ↔ deep grey direct rows, alpha-less deep pivots, ladder-rule widen on GBR → packed-16
+- *(convert)* palette alpha on Pal8 expansion, composed-lookup luma moves, 12 MP deep-grey bench, README rulings
+- *(convert)* deep grey ↔ planar YUV(A) via the luma plane, packed-16 → family on a banded encoder; route-depth audit at zero
+- *(convert)* deep grey ↔ packed deep RGB direct rows on the row-band engine
+
+### Fixed
+
+- *(convert)* mask over-range words before the composed luma lookup; miri-sized corpora for the round-476 suites
+
+### Other
+
+- *(lib)* the crate doc counts 1820 direct pairs after the GBR ↔ deep grey rows
+- *(convert)* planar GBR(A) ↔ packed deep RGB rows on the row-band engine
+- *(deep_gray)* float ↔ 16-bit grey gate (ramp exact, random within 1 LSB, YUV luma via float within 1 LSB of the direct route)
+- *(deep_gray)* clippy manual_clamp on the luma-check width
+- *(deep_gray)* shrink the round-476 corpora under miri
+- *(route_depth)* route-depth audit over every ordered pair + `staged_pivot` route inspector
+
 ### Added
 
 - *(convert)* `staged_pivot(src, dst)`: the intermediate format `convert()` stages a pair through (`None` for direct pairs), so callers and tests can inspect the planner's route
