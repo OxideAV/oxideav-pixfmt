@@ -88,7 +88,7 @@ const RAMP_STEP: usize = 257;
 #[cfg(not(miri))]
 const RAMP_STEP: usize = 1;
 #[cfg(miri)]
-const RANDOM_SAMPLES: usize = 2_000;
+const RANDOM_SAMPLES: usize = 64;
 #[cfg(not(miri))]
 const RANDOM_SAMPLES: usize = 1_000_000;
 
@@ -237,7 +237,7 @@ fn structured_sweep() -> Vec<(u16, u16, u16)> {
 fn rgb48_to_gray16_matches_f64_luma_structured() {
     let mut sweep = structured_sweep();
     if cfg!(miri) {
-        sweep.truncate(512);
+        sweep.truncate(64);
     }
     for cs in [
         ColorSpace::Bt601Limited,
@@ -269,7 +269,7 @@ fn rgb48_to_gray16_matches_f64_luma_random_million() {
 /// convention of the variant (the 8-bit rule, at depth).
 #[test]
 fn gray16_projection_ignores_the_range_half() {
-    let (w, h) = (64u32, 64u32);
+    let (w, h) = if cfg!(miri) { (4u32, 4u32) } else { (64, 64) };
     let mut rng = Rng(7);
     let words: Vec<u16> = (0..(w * h * 3) as usize).map(|_| rng.u16()).collect();
     let src = frame(w as usize * 6, le16(&words));
@@ -303,7 +303,7 @@ fn gray16_projection_ignores_the_range_half() {
 /// `Gray12Le`: the 16-bit projection truncated to the target width.
 #[test]
 fn ten_and_twelve_bit_ends_follow_the_ladder_convention() {
-    let (w, h) = (64u32, 16u32);
+    let (w, h) = if cfg!(miri) { (4u32, 2u32) } else { (64, 16) };
     let n = (w * h) as usize;
     for (bits, fmt) in [(10u32, PixelFormat::Gray10Le), (12, PixelFormat::Gray12Le)] {
         let mask = (1u16 << bits) - 1;
@@ -355,7 +355,7 @@ fn ten_and_twelve_bit_ends_follow_the_ladder_convention() {
 /// alpha dropped / opaque.
 #[test]
 fn ya16_and_deep_gray_words() {
-    let (w, h) = (32u32, 8u32);
+    let (w, h) = if cfg!(miri) { (4u32, 2u32) } else { (32, 8) };
     let n = (w * h) as usize;
     let mut rng = Rng(99);
     let ya: Vec<u16> = (0..n * 2).map(|_| rng.u16()).collect();
@@ -384,7 +384,7 @@ fn deep_gray_packed_rows_threaded_equals_serial() {
     let mt = ConvertContext::new().with_execution(ExecutionContext::with_threads(8));
     let opts = ConvertOptions::default();
     let sizes: &[(u32, u32)] = if cfg!(miri) {
-        &[(1, 1), (7, 3), (16, 33)]
+        &[(2, 33)]
     } else {
         &[(1, 1), (7, 3), (64, 33), (300, 200)]
     };

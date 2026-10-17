@@ -3721,6 +3721,30 @@ fn deep_gray_bits(f: PixelFormat) -> u32 {
     }
 }
 
+/// One luma code through the grey ↔ YUV move: masked to `src_bits`
+/// (samples above the nominal depth are legal input — padding bits,
+/// hostile frames — and are masked, never trusted as an index), widened
+/// to the deeper of the two depths by the ladder rule, range-moved
+/// there through the static [`range_table`] when `limited`, then
+/// narrowed to `dst_bits` by truncation. Exactly the composition of
+/// `plane_to_depth` / `range_*_to_*` the planes went through before.
+#[inline]
+fn luma_move_code(v: u32, src_bits: u32, dst_bits: u32, limited: bool, to_yuv: bool) -> u32 {
+    let work = src_bits.max(dst_bits);
+    let v = v & ((1u32 << src_bits) - 1);
+    let wide = if work == src_bits {
+        v
+    } else {
+        widen_bits(v, src_bits, work)
+    };
+    let moved = if limited {
+        range_table(work, !to_yuv)[wide as usize] as u32
+    } else {
+        wide
+    };
+    moved >> (work - dst_bits)
+}
+
 /// Move one luma plane between `src_bits` and `dst_bits` (bytes at 8,
 /// LE16 words above; at least one side is deep) with the range move
 /// (`limited`: full → limited when `to_yuv`, limited → full otherwise)
@@ -3728,11 +3752,10 @@ fn deep_gray_bits(f: PixelFormat) -> u32 {
 /// before the move keeps every source code distinct through the
 /// rescale; narrowing after it is the ladder truncation.
 ///
-/// Every step is a per-sample function of the source code, so the
-/// whole move is composed once into a `2^src_bits`-entry table (by
-/// running the ladder and range primitives themselves over a ramp —
-/// the table is those primitives, not a re-derivation) and each band
-/// is one lookup per sample.
+/// Every sample goes through [`luma_move_code`]; a picture with at
+/// least as many samples as source codes composes it once into a
+/// `2^src_bits`-entry table (one masked lookup per sample), a smaller
+/// picture evaluates it per sample — same bytes either way.
 #[allow(clippy::too_many_arguments)]
 fn luma_depth_range_banded(
     src: &[u8],
@@ -3744,50 +3767,43 @@ fn luma_depth_range_banded(
     to_yuv: bool,
     workers: usize,
 ) -> Vec<u8> {
-    let work = src_bits.max(dst_bits);
-    debug_assert!(work > 8);
+    debug_assert!(src_bits.max(dst_bits) > 8);
     let ssb = if src_bits > 8 { 2 } else { 1 };
     let dsb = if dst_bits > 8 { 2 } else { 1 };
-    // Compose the table: ramp at the source width → widen → range →
-    // narrow, with the crate's own primitives.
     let codes = 1usize << src_bits;
-    let ramp: Vec<u8> = if ssb == 1 {
-        (0..codes).map(|v| v as u8).collect()
+    let mask = (codes - 1) as u32;
+    let table: Vec<u16> = if w * h >= codes {
+        (0..codes as u32)
+            .map(|v| luma_move_code(v, src_bits, dst_bits, limited, to_yuv) as u16)
+            .collect()
     } else {
-        (0..codes).flat_map(|v| (v as u16).to_le_bytes()).collect()
+        Vec::new()
     };
-    let mut wide = plane_to_depth(&ramp, codes, src_bits, work);
-    if limited {
-        if to_yuv {
-            range_full_to_limited(&mut wide, work);
+    let map = |v: u32| -> u16 {
+        if table.is_empty() {
+            luma_move_code(v, src_bits, dst_bits, limited, to_yuv) as u16
         } else {
-            range_limited_to_full(&mut wide, work);
+            table[(v & mask) as usize]
         }
-    }
-    let table = plane_to_depth(&wide, codes, work, dst_bits);
-    if dsb == 1 {
-        // Deep → byte: the table is bytes already.
-        return planar8::map_packed_banded(src, w * ssb, w, h, workers, |s, d| {
-            let n = d.len();
-            for (o, i) in d.iter_mut().zip(s[..n * 2].chunks_exact(2)) {
-                *o = table[u16::from_le_bytes([i[0], i[1]]) as usize];
+    };
+    planar8::map_packed_banded(src, w * ssb, w * dsb, h, workers, |s, d| {
+        let n = d.len() / dsb;
+        match (ssb, dsb) {
+            (1, 2) => {
+                for (o, &v) in d.chunks_exact_mut(2).zip(s[..n].iter()) {
+                    o.copy_from_slice(&map(v as u32).to_le_bytes());
+                }
             }
-        });
-    }
-    let table: Vec<u16> = table
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    planar8::map_packed_banded(src, w * ssb, w * 2, h, workers, |s, d| {
-        let n = d.len() / 2;
-        if ssb == 1 {
-            for (o, &v) in d.chunks_exact_mut(2).zip(s[..n].iter()) {
-                o.copy_from_slice(&table[v as usize].to_le_bytes());
+            (2, 1) => {
+                for (o, i) in d.iter_mut().zip(s[..n * 2].chunks_exact(2)) {
+                    *o = map(u16::from_le_bytes([i[0], i[1]]) as u32) as u8;
+                }
             }
-        } else {
-            for (o, i) in d.chunks_exact_mut(2).zip(s[..n * 2].chunks_exact(2)) {
-                let v = u16::from_le_bytes([i[0], i[1]]) as usize;
-                o.copy_from_slice(&table[v].to_le_bytes());
+            _ => {
+                for (o, i) in d.chunks_exact_mut(2).zip(s[..n * 2].chunks_exact(2)) {
+                    let v = u16::from_le_bytes([i[0], i[1]]) as u32;
+                    o.copy_from_slice(&map(v).to_le_bytes());
+                }
             }
         }
     })
@@ -3860,7 +3876,9 @@ fn deep_gray_to_gbr(
     let h = src_info.height as usize;
     let tight = tight_plane(&src.planes[0], w * 2, h)?;
     let sb = il.sample_bytes();
-    let plane = if il.bits == bits {
+    // The equal-width case is still a masked copy (`depth_rescale` with
+    // equal widths), so over-range source words never reach the planes.
+    let plane = if il.bits == bits && bits == 16 {
         tight.into_owned()
     } else {
         planar8::map_packed_banded(&tight, w * 2, w * sb, h, workers, |s, d| {

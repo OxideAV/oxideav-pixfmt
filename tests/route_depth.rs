@@ -162,8 +162,12 @@ fn violations() -> Vec<Violation> {
     out
 }
 
-/// The route-depth invariants hold on every supported pair.
+/// The route-depth invariants hold on every supported pair. (The audit
+/// drives the planner only — no sample is converted — so it has nothing
+/// to prove under miri and is skipped there, where the 4830-pair table
+/// walk would cost tens of minutes.)
 #[test]
+#[cfg_attr(miri, ignore = "planner-only audit; no memory to check")]
 fn every_staged_route_preserves_depth_alpha_and_colour() {
     let found = violations();
     let mut report = String::new();
@@ -183,6 +187,7 @@ fn every_staged_route_preserves_depth_alpha_and_colour() {
 /// The full matrix stays closed and `staged_pivot` agrees with
 /// `supports_direct` on every pair.
 #[test]
+#[cfg_attr(miri, ignore = "planner-only census; no memory to check")]
 fn staged_pivot_agrees_with_supports_direct() {
     let mut direct = 0usize;
     let mut staged = 0usize;

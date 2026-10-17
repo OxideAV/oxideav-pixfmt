@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(convert)* `Pal8 → Rgba` / `Bgra` / `Argb` / `Abgr` honour the palette-alpha side-channel (core 0.1.40 `VideoFrame::palette_alpha`): a transparent entry expands to alpha 0, entries the record does not cover (or a missing / malformed record) are opaque; `Pal8 → Rgb24` / `Bgr24` / `Gray8` drop alpha (documented rule). `Rgb(a) → Pal8` attaches the palette-alpha record next to the colour table when the `Palette` has non-opaque entries, so the frame stays self-describing. `oxideav-core` minimum is now `0.1.40` (same caret family)
 - *(bench)* `deep_gray_12mp`: the round-476 routes at 4032×3024 next to the pre-round two-step routes, serial and threaded
 
+### Fixed
+
+- *(convert)* the deep grey ↔ YUV luma move indexed its composed lookup table with the raw source word, so a 10 / 12-bit sample with dirty padding bits (legal input: hostile frames, containers that leave the high bits set) panicked with an out-of-bounds index (found by the `convert_geometry` fuzz target on 2026-10-16). Every sample is now masked to the declared depth before the lookup, and the table is only composed for pictures with at least `2^bits` samples — smaller pictures evaluate the move per sample (same bytes). `tests/over_range.rs` pins all-`0xFFFF` pictures on every new deep route, both directions, serial and threaded
+- *(tests)* the round-476 suites keep their full corpora natively and run a few pixels per representative member under miri; the all-pairs route-depth audit (planner only, no memory to check) is skipped there — the strict-provenance job had overrun GitHub's 6 h limit
+
 ### Changed
 
 - *(convert)* `Gbrp10/12/14Le` / `Gbrap10/12/14Le` → `Rgb48Le` / `Rgba64Le` widen by the ladder rule (MSB replication, 10-bit peak 1023 → 65535) instead of a bare left shift (→ 65472); the way back is still truncation, so every round-trip stays exact and the rows now agree with every other widen in the crate (and with the new direct `Gbr* → Gray16Le` row)

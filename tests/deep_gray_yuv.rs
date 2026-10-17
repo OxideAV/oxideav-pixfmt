@@ -94,6 +94,13 @@ const BYTE_FAMILY: &[(PixelFormat, usize, usize, bool)] = &[
     (PixelFormat::Yuva444P, 1, 1, true),
 ];
 
+/// Under miri (every instruction interpreted) the member loops below
+/// keep one representative per depth / siting class and a few pixels;
+/// natively every member runs at the full sizes.
+fn miri_thin(i: usize) -> bool {
+    cfg!(miri) && i % 4 != 0
+}
+
 const DEEP_GRAY: &[(PixelFormat, u32)] = &[
     (PixelFormat::Gray10Le, 10),
     (PixelFormat::Gray12Le, 12),
@@ -186,7 +193,7 @@ fn deep_gray_and_deep_family_are_direct_both_ways() {
 /// truncation to bytes; chroma 128, alpha 255.
 #[test]
 fn deep_gray_to_byte_family_luma_range_at_depth() {
-    let (w, h) = (9usize, 6usize);
+    let (w, h) = if cfg!(miri) { (3usize, 2usize) } else { (9, 6) };
     let n = w * h;
     for &(g, gbits) in DEEP_GRAY {
         let gmask = (1u32 << gbits) - 1;
@@ -251,7 +258,11 @@ fn deep_gray_to_byte_family_luma_range_at_depth() {
 /// planes have core's geometry.
 #[test]
 fn deep_gray_to_deep_family_luma_range_at_depth() {
-    let (w, h) = (37usize, 11usize);
+    let (w, h) = if cfg!(miri) {
+        (3usize, 2usize)
+    } else {
+        (37, 11)
+    };
     let n = w * h;
     for &(g, gbits) in DEEP_GRAY {
         let gmask = (1u32 << gbits) - 1;
@@ -260,7 +271,10 @@ fn deep_gray_to_deep_family_luma_range_at_depth() {
         let mut codes: Vec<u16> = vec![0, gmask as u16, (gmask / 2) as u16, 1, (gmask - 1) as u16];
         codes.extend((5..n).map(|_| (rng.u16() as u32 & gmask) as u16));
         let src = one_plane(w * 2, le16(&codes));
-        for &(f, wsub, hsub, bits, alpha) in DEEP_FAMILY {
+        for (fi, &(f, wsub, hsub, bits, alpha)) in DEEP_FAMILY.iter().enumerate() {
+            if miri_thin(fi) {
+                continue;
+            }
             let out = convert(
                 &src,
                 FrameInfo::new(g, w as u32, h as u32),
@@ -319,9 +333,16 @@ fn deep_gray_to_deep_family_luma_range_at_depth() {
 /// influence the result.
 #[test]
 fn deep_family_to_deep_gray_luma_range_at_depth() {
-    let (w, h) = (23usize, 9usize);
+    let (w, h) = if cfg!(miri) {
+        (3usize, 2usize)
+    } else {
+        (23, 9)
+    };
     let n = w * h;
-    for &(f, wsub, hsub, bits, alpha) in DEEP_FAMILY {
+    for (fi, &(f, wsub, hsub, bits, alpha)) in DEEP_FAMILY.iter().enumerate() {
+        if miri_thin(fi) {
+            continue;
+        }
         let src = family_frame(w, h, wsub, hsub, bits, alpha, bits as u64 * 7 + wsub as u64);
         let y_in = rd16(&src.planes[0].data);
         for &(g, gbits) in DEEP_GRAY {
@@ -453,14 +474,21 @@ fn gray16_yuv444p16_rails_and_round_trip() {
 /// bare ladder move, and `Gray16Le ↔ Yuv*P16Le` is a verbatim copy.
 #[test]
 fn full_range_signal_makes_the_luma_move_verbatim() {
-    let (w, h) = (16usize, 8usize);
+    let (w, h) = if cfg!(miri) {
+        (2usize, 2usize)
+    } else {
+        (16, 8)
+    };
     let n = w * h;
     let full = ConvertContext::new().with_range(ColorRange::Full);
     for &(g, gbits) in DEEP_GRAY {
         let mask = (1u32 << gbits) - 1;
         let codes: Vec<u16> = (0..n).map(|i| ((i * 2731) as u32 & mask) as u16).collect();
         let src = one_plane(w * 2, le16(&codes));
-        for &(f, _, _, bits, _) in DEEP_FAMILY {
+        for (fi, &(f, _, _, bits, _)) in DEEP_FAMILY.iter().enumerate() {
+            if miri_thin(fi) {
+                continue;
+            }
             let out = convert_with(
                 &src,
                 FrameInfo::new(g, w as u32, h as u32),
@@ -530,7 +558,10 @@ fn packed16_to_family_matches_the_staged_route() {
             let mid_info = FrameInfo::new(tier, w as u32, h as u32);
             let mut targets: Vec<PixelFormat> = DEEP_FAMILY.iter().map(|t| t.0).collect();
             targets.extend(BYTE_FAMILY.iter().map(|t| t.0));
-            for dst in targets {
+            for (ti, dst) in targets.into_iter().enumerate() {
+                if miri_thin(ti) {
+                    continue;
+                }
                 let direct = convert(&src, info, dst, &ConvertOptions::default()).unwrap();
                 let staged = convert(&mid, mid_info, dst, &ConvertOptions::default()).unwrap();
                 assert_eq!(
@@ -552,7 +583,7 @@ fn packed16_to_family_matches_the_staged_route() {
 /// `Rgb48Le` source synthesises opaque; a non-alpha member drops it.
 #[test]
 fn packed16_to_family_alpha_rules() {
-    let (w, h) = (6usize, 4usize);
+    let (w, h) = if cfg!(miri) { (2usize, 2usize) } else { (6, 4) };
     let n = w * h;
     let mut rng = Rng(42);
     let words: Vec<u16> = (0..n * 4).map(|_| rng.u16()).collect();
@@ -565,7 +596,10 @@ fn packed16_to_family_alpha_rules() {
                 .collect::<Vec<_>>(),
         ),
     );
-    for &(f, _, _, bits, alpha) in DEEP_FAMILY {
+    for (fi, &(f, _, _, bits, alpha)) in DEEP_FAMILY.iter().enumerate() {
+        if miri_thin(fi) {
+            continue;
+        }
         let from_rgba = convert(
             &rgba,
             FrameInfo::new(PixelFormat::Rgba64Le, w as u32, h as u32),
@@ -612,7 +646,7 @@ fn new_rows_threaded_equals_serial() {
     let mt = ConvertContext::new().with_execution(ExecutionContext::with_threads(8));
     let opts = ConvertOptions::default();
     let sizes: &[(usize, usize)] = if cfg!(miri) {
-        &[(1, 1), (5, 3), (8, 33)]
+        &[(2, 33)]
     } else {
         &[(1, 1), (5, 3), (64, 33), (130, 97)]
     };
@@ -628,7 +662,10 @@ fn new_rows_threaded_equals_serial() {
                 .iter()
                 .map(|t| t.0)
                 .chain(BYTE_FAMILY.iter().map(|t| t.0));
-            for f in targets {
+            for (ti, f) in targets.enumerate() {
+                if miri_thin(ti) {
+                    continue;
+                }
                 let a = convert(&src, info, f, &opts).unwrap();
                 let b = convert_with(&src, info, f, &opts, &mt).unwrap();
                 assert!(same_planes(&a, &b), "{g:?} → {f:?} {w}×{h}");
@@ -638,7 +675,10 @@ fn new_rows_threaded_equals_serial() {
                 assert!(same_planes(&ia, &ib), "{f:?} → {g:?} {w}×{h}");
             }
         }
-        for &(f, wsub, hsub, bits, alpha) in DEEP_FAMILY {
+        for (fi, &(f, wsub, hsub, bits, alpha)) in DEEP_FAMILY.iter().enumerate() {
+            if miri_thin(fi) {
+                continue;
+            }
             let src = family_frame(w, h, wsub, hsub, bits, alpha, (w + h) as u64);
             let info = FrameInfo::new(f, w as u32, h as u32);
             for &(g, _) in DEEP_GRAY {
@@ -655,7 +695,10 @@ fn new_rows_threaded_equals_serial() {
                 .iter()
                 .map(|t| t.0)
                 .chain(BYTE_FAMILY.iter().map(|t| t.0));
-            for f in targets {
+            for (ti, f) in targets.enumerate() {
+                if miri_thin(ti) {
+                    continue;
+                }
                 let a = convert(&src, info, f, &opts).unwrap();
                 let b = convert_with(&src, info, f, &opts, &mt).unwrap();
                 assert!(same_planes(&a, &b), "{p:?} → {f:?} {w}×{h}");

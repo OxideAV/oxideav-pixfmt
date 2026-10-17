@@ -120,7 +120,11 @@ fn gbr_and_deep_gray_are_direct() {
 /// → GBR.
 #[test]
 fn gbr_deep_gray_matches_the_packed_route() {
-    let (w, h) = (13usize, 7usize);
+    let (w, h) = if cfg!(miri) {
+        (3usize, 2usize)
+    } else {
+        (13, 7)
+    };
     for &(f, bits, alpha) in GBR {
         let src = gbr_frame(w, h, bits, alpha, bits as u64);
         let packed = if alpha {
@@ -186,7 +190,7 @@ fn gbr_deep_gray_threaded_equals_serial() {
     let mt = ConvertContext::new().with_execution(ExecutionContext::with_threads(8));
     let opts = ConvertOptions::default();
     let sizes: &[(usize, usize)] = if cfg!(miri) {
-        &[(1, 1), (5, 33)]
+        &[(2, 33)]
     } else {
         &[(1, 1), (5, 33), (70, 97)]
     };
@@ -215,13 +219,13 @@ fn gbr_packed_deep_threaded_equals_serial() {
     let mt = ConvertContext::new().with_execution(ExecutionContext::with_threads(8));
     let opts = ConvertOptions::default();
     let sizes: &[(usize, usize)] = if cfg!(miri) {
-        &[(1, 1), (3, 33)]
+        &[(2, 33)]
     } else {
         &[(1, 1), (3, 33), (64, 70), (130, 97)]
     };
     for &(w, h) in sizes {
-        for &(f, bits, alpha) in GBR {
-            if bits == 8 {
+        for (fi, &(f, bits, alpha)) in GBR.iter().enumerate() {
+            if bits == 8 || (cfg!(miri) && fi % 3 != 0) {
                 continue;
             }
             let src = gbr_frame(w, h, bits, alpha, (w * 3 + h) as u64);
@@ -249,7 +253,7 @@ fn gbr_packed_deep_threaded_equals_serial() {
 #[test]
 fn alpha_less_deep_pairs_pivot_without_alpha() {
     use PixelFormat as P;
-    let (w, h) = (6usize, 4usize);
+    let (w, h) = if cfg!(miri) { (2usize, 2usize) } else { (6, 4) };
     let cases: &[(P, P, P)] = &[
         // (src, dst, the alpha pivot the old order picked)
         (P::Gbrp10Le, P::Yuv420P10Le, P::Rgba64Le),
