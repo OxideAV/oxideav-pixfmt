@@ -3510,10 +3510,22 @@ fn packed_to_p16(
         return Err(Error::invalid("pixfmt: packed source needs a plane"));
     };
     let tight = tight_plane(plane, w * src_bpp, h)?;
-    let mut out = vec![0u8; w * h * 2];
-    packed16::quantise_rows(
-        &tight, src_bpp, pos[0], pos[1], pos[2], w, h, l, &mut out, dither,
-    );
+    let out = if dither == Dither::Bayer8x8 {
+        // The ordered threshold is a function of the picture position
+        // only, so the bands tile exactly like the whole picture.
+        planar8::map_packed_banded_rows(&tight, w * src_bpp, w * 2, h, workers, |s, d, y0| {
+            let rows = d.len() / (w * 2);
+            packed16::quantise_rows_at(
+                s, src_bpp, pos[0], pos[1], pos[2], w, rows, y0, l, d, dither,
+            )
+        })
+    } else {
+        let mut out = vec![0u8; w * h * 2];
+        packed16::quantise_rows(
+            &tight, src_bpp, pos[0], pos[1], pos[2], w, h, l, &mut out, dither,
+        );
+        out
+    };
     Ok(make_frame(
         src,
         vec![VideoPlane {

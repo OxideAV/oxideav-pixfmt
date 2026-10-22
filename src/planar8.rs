@@ -176,6 +176,36 @@ where
     out
 }
 
+/// [`map_packed_banded`] whose kernel also receives the band's first
+/// row index — for per-pixel maps that depend on the row (an ordered
+/// dither threshold) but not on neighbouring rows.
+pub(crate) fn map_packed_banded_rows<F>(
+    src: &[u8],
+    src_row: usize,
+    dst_row: usize,
+    h: usize,
+    workers: usize,
+    f: F,
+) -> Vec<u8>
+where
+    F: Fn(&[u8], &mut [u8], usize) + Sync,
+{
+    let mut out = vec![0u8; dst_row * h];
+    if h == 0 || dst_row == 0 {
+        return out;
+    }
+    let bands = row_bands(h, 1, workers);
+    let mut jobs = Vec::with_capacity(bands.len());
+    let mut rest: &mut [u8] = &mut out;
+    for &(r0, r1) in &bands {
+        let (band, tail) = rest.split_at_mut((r1 - r0) * dst_row);
+        rest = tail;
+        jobs.push((&src[r0 * src_row..r1 * src_row], band, r0));
+    }
+    run_bands(jobs, |(s, d, r0): (&[u8], &mut [u8], usize)| f(s, d, r0));
+    out
+}
+
 /// Interleave a tight RGB24 row with an alpha row (or opaque alpha)
 /// into an RGBA row of `w` pixels.
 #[inline]

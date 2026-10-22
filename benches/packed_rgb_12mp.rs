@@ -6,8 +6,8 @@
 //!
 //! Every case runs serial (`convert`) and with the host's thread budget
 //! (`convert_with` + `ExecutionContext::auto()`, suffix `_mt`); the
-//! dithered quantisers (`Bayer8x8`, `FloydSteinberg`) are single-pass
-//! by construction and run serial only.
+//! ordered dither runs on row bands too, error diffusion is a single
+//! sequential pass by construction and runs serial only.
 //!
 //! Run with `cargo bench --features bench --bench packed_rgb_12mp`.
 
@@ -97,6 +97,15 @@ fn bench_packed_rgb_12mp(c: &mut Criterion) {
         group.bench_function(format!("Rgb24_to_Rgb565Le_{dither:?}"), |b| {
             b.iter(|| convert(&rgb24, info, PixelFormat::Rgb565Le, &opts).expect("convert"))
         });
+        if dither == Dither::Bayer8x8 {
+            // The ordered threshold depends on the picture position
+            // only, so the quantiser runs on row bands.
+            group.bench_function(format!("Rgb24_to_Rgb565Le_{dither:?}_mt"), |b| {
+                b.iter(|| {
+                    convert_with(&rgb24, info, PixelFormat::Rgb565Le, &opts, &mt).expect("convert")
+                })
+            });
+        }
     }
     group.finish();
 }

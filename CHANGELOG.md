@@ -15,12 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(rgb)* `swizzle4_fill` / `rgb3_to_rgba4_fill` (constant fourth lane; AVX2 twins of the permutation paths) and the `RGBX_POS` / `BGRX_POS` / `XRGB_POS` / `XBGR_POS` positions; `Rgb3` / `Rgba4` derive `Debug` / `PartialEq` / `Eq`. The padding byte is written 0 and never read; a padded → alpha move synthesises opaque alpha
 - *(format_info)* descriptors for the twelve (`bit_depth` 5 / 6 for the words — the widest component — and 8 for the padded four; no alpha)
 - *(fuzz)* the geometry harness builds the twelve as sources (words at odd offsets on padded strides, junk padding bytes)
+- *(tests)* `packed16_words` (16 tests: bit-layout pins against the core variant table, every word round-tripping through `Rgb24`, relayout parity with staging, the four-byte orders, `Gray8` / `Pal8` hops, both dither pins, odd widths on odd strides, thread parity, short planes), `padded_rgb` (9 tests), and two black-box validator crosschecks: the eight words widened to `rgb24` by both sides within ±2 with the pure-component words exact, and the padded layouts exact in both directions
 
 ### Performance
 
 - *(packed16)* the word kernels are monomorphised on the green width, the word's byte order and the 8-bit side's byte order (`Rgb24` / `Bgr24`; `Rgba` / `Bgra` / `Argb` / `Abgr` positions, shared by the padded layouts), so the interleaved loads / stores vectorise: 12 MP `Rgb565Le → Rgb24` 7.8 → 1.2 ms serial (0.51 ms on the row bands), `→ Bgra` 8.7 → 1.6 ms, `Rgb24 → Rgb565Le` 1.9 → 1.3 ms (Apple M4 Max; `cargo bench --features bench --bench packed_rgb_12mp`)
 - *(rgb)* the scalar 3 → 4 promote and the fill swizzles select the constant lane instead of branching per lane: 12 MP `Rgb24 → Bgrx` / `Rgb24 → Rgba` 10.1 → 1.2 ms serial on aarch64
 - *(convert)* the historical swizzle / promote / demote / grey-broadcast rows and every `packed_map` row (Ya8 / Ya16Le / CMYK / deep packed) now run on the row-band driver: byte-identical, and threaded under a `ConvertContext` execution budget (`Bgrx → Rgb24` 2.6 → 0.57 ms at 12 MP with the host budget)
+- *(packed16)* the ordered dither runs on row bands (its threshold is a function of the picture position only): 12 MP `Rgb24 → Rgb565Le` under `Bayer8x8` 13.7 ms serial → 1.8 ms with the host budget, same bytes; `quantise_rows_at` takes the band's first row
 - *(convert)* an 8-bit RGB pivot order for alpha-less endpoints (`Rgb24` before `Rgba`): `Yuv420P → Rgb565Le` 10.3 → 4.8 ms serial / 1.0 ms threaded, same bytes (the synthesised alpha never reached the output)
 
 ### Fixed

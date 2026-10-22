@@ -685,6 +685,28 @@ pub fn quantise_rows(
     dst: &mut [u8],
     dither: Dither,
 ) {
+    quantise_rows_at(src, src_bpp, r, g, b, w, h, 0, l, dst, dither);
+}
+
+/// [`quantise_rows`] for a band of `h` rows whose first row is row
+/// `y0` of the picture: the ordered dither reads the threshold at the
+/// picture's `(x, y)`, so bands tile exactly like the whole picture.
+/// Error diffusion carries no state across bands and must be called
+/// with `y0 == 0` on the whole picture.
+#[allow(clippy::too_many_arguments)]
+pub fn quantise_rows_at(
+    src: &[u8],
+    src_bpp: usize,
+    r: usize,
+    g: usize,
+    b: usize,
+    w: usize,
+    h: usize,
+    y0: usize,
+    l: Packed16Layout,
+    dst: &mut [u8],
+    dither: Dither,
+) {
     let src = &src[..w * h * src_bpp];
     let dst = &mut dst[..w * h * 2];
     match dither {
@@ -700,14 +722,20 @@ pub fn quantise_rows(
                 .zip(dst.chunks_exact_mut(w * 2))
                 .enumerate()
             {
+                // The row's eight thresholds per component, hoisted.
+                let y = y0 + y;
+                let tr: [u8; 8] = std::array::from_fn(|x| bayer_threshold(x, y, widths[0]));
+                let tg: [u8; 8] = std::array::from_fn(|x| bayer_threshold(x, y, widths[1]));
+                let tb: [u8; 8] = std::array::from_fn(|x| bayer_threshold(x, y, widths[2]));
+                let (sr, sg, sb) = (8 - widths[0], 8 - widths[1], 8 - widths[2]);
                 for (x, (s, d)) in srow
                     .chunks_exact(src_bpp)
                     .zip(drow.chunks_exact_mut(2))
                     .enumerate()
                 {
-                    let rq = quantise_ordered(s[r], x, y, widths[0]);
-                    let gq = quantise_ordered(s[g], x, y, widths[1]);
-                    let bq = quantise_ordered(s[b], x, y, widths[2]);
+                    let rq = s[r].saturating_add(tr[x & 7]) >> sr;
+                    let gq = s[g].saturating_add(tg[x & 7]) >> sg;
+                    let bq = s[b].saturating_add(tb[x & 7]) >> sb;
                     l.write_word(d, l.join(rq, gq, bq));
                 }
             }

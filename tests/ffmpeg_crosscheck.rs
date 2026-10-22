@@ -847,3 +847,127 @@ fn ya16le_to_gray16le_bit_exact_vs_validator() {
     .expect("convert");
     assert_eq!(ours.planes[0].data, theirs, "ya16le → gray16le");
 }
+
+/// The eight packed 16-bit word layouts (core 0.1.41) against the
+/// validator's `rgb565le` / `rgb565be` / `rgb555le` / `rgb555be` /
+/// `bgr565le` / `bgr565be` / `bgr555le` / `bgr555be`: a picture of
+/// words covering every component code (the pure red / green / blue
+/// words first) is widened to `rgb24` by both sides and compared
+/// within ±2 — each side widens 5 / 6 → 8 bits by its own rule, both
+/// within a code of the ideal rescale, so the bit positions and the
+/// byte order are what the comparison pins. Only this direction is
+/// compared: fed `rgb24` at this picture size, the validator's output
+/// words were observed (black-box) to mix neighbouring pixels, so its
+/// 8 → 16-bit path is not a per-pixel quantiser to compare against.
+#[test]
+fn packed16_words_match_validator_layouts() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: no ffmpeg binary on PATH");
+        return;
+    }
+    let cases = [
+        (PixelFormat::Rgb565Le, "rgb565le"),
+        (PixelFormat::Rgb565Be, "rgb565be"),
+        (PixelFormat::Rgb555Le, "rgb555le"),
+        (PixelFormat::Rgb555Be, "rgb555be"),
+        (PixelFormat::Bgr565Le, "bgr565le"),
+        (PixelFormat::Bgr565Be, "bgr565be"),
+        (PixelFormat::Bgr555Le, "bgr555le"),
+        (PixelFormat::Bgr555Be, "bgr555be"),
+    ];
+    for (fmt, name) in cases {
+        let layout = oxideav_pixfmt::packed16::Packed16Layout::of(fmt).expect("word layout");
+        let gmax = if layout.g_bits == 6 { 63 } else { 31 };
+        // Pure components, full scale, black, then a ramp over the
+        // component codes.
+        let mut words: Vec<u16> = vec![
+            layout.join(31, 0, 0),
+            layout.join(0, gmax, 0),
+            layout.join(0, 0, 31),
+            layout.join(31, gmax, 31),
+            0,
+        ];
+        for i in 0..W * H - words.len() {
+            words.push(layout.join(
+                (i % 32) as u8,
+                ((i * 7 + 3) % (gmax as usize + 1)) as u8,
+                ((i * 13 + 5) % 32) as u8,
+            ));
+        }
+        let mut raw = vec![0u8; W * H * 2];
+        for (px, &word) in raw.chunks_exact_mut(2).zip(&words) {
+            layout.write_word(px, word);
+        }
+        let ours = convert(
+            &planar_frame(vec![(W * 2, raw.clone())]),
+            FrameInfo::new(fmt, W as u32, H as u32),
+            PixelFormat::Rgb24,
+            &ConvertOptions::default(),
+        )
+        .expect("word → Rgb24");
+        let theirs = ffmpeg_convert(&raw, name, "rgb24", "null");
+        assert_eq!(theirs.len(), W * H * 3, "{name}: validator output size");
+        // The pure words come out pure on both sides.
+        assert_eq!(
+            &theirs[..15],
+            &[255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0]
+        );
+        assert_eq!(
+            &ours.planes[0].data[..15],
+            &theirs[..15],
+            "{name}: pure words"
+        );
+        let d = max_abs_diff(&ours.planes[0].data, &theirs);
+        assert!(d <= 2, "{name} → rgb24: max diff {d}");
+    }
+}
+
+/// The padded 32-bit layouts (core 0.1.41) against the validator's
+/// `rgb0` / `bgr0` / `0rgb` / `0bgr`: the colour bytes must be exact
+/// both ways. The padding byte is unspecified on the validator's side
+/// and is masked out of the comparison; ours is always 0.
+#[test]
+fn padded_layouts_match_validator_byte_positions() {
+    if !ffmpeg_available() {
+        eprintln!("skipping: no ffmpeg binary on PATH");
+        return;
+    }
+    let rgb = ramp(W * H * 3, 0, 255, 53, 7);
+    let frame = planar_frame(vec![(W * 3, rgb.clone())]);
+    let cases = [
+        (PixelFormat::Rgbx, "rgb0", 3usize),
+        (PixelFormat::Bgrx, "bgr0", 3),
+        (PixelFormat::Xrgb, "0rgb", 0),
+        (PixelFormat::Xbgr, "0bgr", 0),
+    ];
+    for (fmt, name, pad) in cases {
+        let ours = convert(
+            &frame,
+            FrameInfo::new(PixelFormat::Rgb24, W as u32, H as u32),
+            fmt,
+            &ConvertOptions::default(),
+        )
+        .expect("Rgb24 → padded");
+        let theirs = ffmpeg_convert(&rgb, "rgb24", name, "null");
+        assert_eq!(theirs.len(), W * H * 4, "{name}: validator output size");
+        for (i, (a, b)) in ours.planes[0]
+            .data
+            .chunks_exact(4)
+            .zip(theirs.chunks_exact(4))
+            .enumerate()
+        {
+            assert_eq!(a[pad], 0, "{name}: pixel {i} padding byte");
+            for j in (0..4).filter(|&j| j != pad) {
+                assert_eq!(a[j], b[j], "{name}: pixel {i} byte {j}");
+            }
+        }
+        let back_ours = convert(
+            &planar_frame(vec![(W * 4, theirs.clone())]),
+            FrameInfo::new(fmt, W as u32, H as u32),
+            PixelFormat::Rgb24,
+            &ConvertOptions::default(),
+        )
+        .expect("padded → Rgb24");
+        assert_eq!(back_ours.planes[0].data, rgb, "{name} → rgb24");
+    }
+}

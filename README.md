@@ -613,8 +613,9 @@ above were re-measured in the same session and are unchanged. The
 kernels are monomorphised on the green width and both byte orders so
 the interleaved loads / stores vectorise; "serial" is `convert()`,
 "threaded" is `convert_with` + `ExecutionContext::auto()`; the staged
-rows pivot through `Rgb24`. The dithered quantisers are a single
-sequential pass.
+rows pivot through `Rgb24`. The ordered dither runs on row bands too
+(its threshold depends on the picture position only); error diffusion
+is a single sequential pass by construction.
 
 | conversion                       | serial   | threaded |
 | -------------------------------- | -------- | -------- |
@@ -632,7 +633,7 @@ sequential pass.
 | `Rgb24 → Bgrx`                   | 1.21 ms  | 0.52 ms  |
 | `Bgrx → Yuv420P`                 | 6.48 ms  | 1.40 ms  |
 | `Yuv420P → Bgrx`                 | 4.88 ms  | 1.23 ms  |
-| `Rgb24 → Rgb565Le`, `Bayer8x8`   | 12.6 ms  | —        |
+| `Rgb24 → Rgb565Le`, `Bayer8x8`   | 13.7 ms  | 1.82 ms  |
 | `Rgb24 → Rgb565Le`, `FloydSteinberg` | 72.4 ms | —      |
 
 The same pass moved the historical packed rows (swizzles, 3 ↔ 4
