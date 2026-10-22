@@ -40,6 +40,8 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | category                | formats / operations                                                        |
 | ----------------------- | --------------------------------------------------------------------------- |
 | RGB / BGR family        | `Rgb24`, `Bgr24`, `Rgba`, `Bgra`, `Argb`, `Abgr` — all-to-all swizzles      |
+| Padded 32-bit RGB       | `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr` (core 0.1.41: the alpha twins' byte positions with a padding byte, written 0 and never read) — direct ↔ every single-plane 8-bit order, each other, the 16-bit words, `Gray8`, `Pal8` and **every planar YUV(A) family member** (through the `Rgb24` engine; alpha destinations get opaque alpha); a padded → alpha move synthesises opaque alpha |
+| Packed 16-bit RGB       | `Rgb555Le/Be` / `Bgr555Le/Be` / `Rgb565Le/Be` / `Bgr565Le/Be` (core 0.1.41: one word per pixel, the 5-5-5 top bit is padding written 0) — direct ↔ `Rgb24` / `Bgr24` / `Rgba` / `Bgra` / `Argb` / `Abgr`, the padded four, each other, `Gray8` and `Pal8`; 5 / 6 → 8 bits by replication (`(v << 3) \| (v >> 2)`, `(v << 2) \| (v >> 4)`), 8 → 5 / 6 by truncation — exact round trips, and a 5-5-5 ↔ 5-6-5 relayout byte-identical to staging through 8 bits; the quantiser honours `ConvertOptions::dither` (ordered Bayer and integer Floyd–Steinberg, both pinned bit-for-bit) — see *Packed 16-bit words* below |
 | Deep RGB                | `Rgb48Le` ↔ `Rgb24`, `Rgba64Le` ↔ `Rgba`, `Rgb48Le` ↔ `Rgba64Le` (colour words verbatim, opaque 65535 synthesis / drop); `Rgb48Le` / `Rgba64Le` → **every** planar YUV(A) member in one banded 16-bit encode (chroma subsampled at 16 bits, planes narrowed afterwards) |
 | Deep matrix             | the 16-bit planar tier ({`Yuv`,`Yuva`} × {420,422,444} `P16Le` + `Yuv440P16Le`) ↔ `Rgb48Le` / `Rgba64Le` at **full 16-bit precision** (Q30 k-coefficient construction, chroma resampled at 16 bits, Yuva alpha word verbatim); the 10/12-bit family stages in losslessly via the exact widen |
 | Planar GBR              | the full ten-member ladder — `Gbrp8` / `Gbrap8` (byte planes) through `Gbrp10/12/14Le` to the full-width `Gbrp16Le` / `Gbrap16Le` — ↔ **both** `Rgb48Le` and `Rgba64Le` (ladder widen / truncation; alpha synthesised opaque / dropped when the shapes differ) and ↔ `Rgb24` / `Rgba`; plus `Gray8` / `Gray10Le` / `Gray12Le` / `Gray16Le` interop (luminance projection out — at 16 bits for the deep words — and the rescaled broadcast in) and `Gbrp8` ↔ `Gbrap8` alpha append / drop |
@@ -66,15 +68,15 @@ oxideav-pixfmt = { version = "0.1", features = ["nightly"] }
 | Alpha / compositing     | Porter-Duff "over" (premul + straight), premul/unpremul, alpha-mask blit    |
 | Format introspection    | `FormatInfo::of(fmt)` → planes / bit-depth / `ChromaSubsampling` typed view |
 | Planar-family engine    | a computed dispatch tier makes *every* ordered pair inside the uniform planar YUV(A) family ({Yuv,Yuva} × {420,422,444} × {8,10,12,16}, plus `Yuv440P*` at the four depths) a direct single-step conversion: depth move + chroma resample (at the deeper of the two depths) + alpha handling fused in one op |
-| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier, alpha-carrying deep moves through `Yuva*P16Le`) — **all 4830 ordered format pairs convert** (1820 direct); `supports()` / `supports_direct()` / `staged_pivot()` report availability and the route; every staged route passes the depth / alpha / palette invariants below |
+| Staged fallback         | pairs without a direct entry route through ONE fidelity-chosen pivot (deep YUV moves pivot through the 16-bit tier, alpha-carrying deep moves through `Yuva*P16Le`, alpha-less 8-bit moves through `Rgb24` before `Rgba`) — **all 6642 ordered format pairs convert** (2368 direct); `supports()` / `supports_direct()` / `staged_pivot()` report availability and the route; every staged route passes the depth / alpha / palette invariants below |
 
 ## Roadmap
 
 The pixel-format universe used by general-purpose video tooling runs
-to roughly two hundred entries; this crate currently covers the 70
+to roughly two hundred entries; this crate currently covers the 82
 `PixelFormat` variants oxideav-core defines, and the conversion
-matrix is **fully closed**: every one of the 70 × 69 = 4830 ordered
-pairs resolves — 1820 directly, the rest through one staged pivot. The
+matrix is **fully closed**: every one of the 82 × 81 = 6642 ordered
+pairs resolves — 2368 directly, the rest through one staged pivot. The
 formats below are *planned* — they're not implemented yet, but they
 have real callers in the codecs/containers we want to support, so the
 [`PixelFormat`](https://docs.rs/oxideav-core/latest/oxideav_core/enum.PixelFormat.html)
@@ -84,8 +86,8 @@ variants and `convert()` paths will land over time.
 
 | family                   | additions                                                                  |
 | ------------------------ | -------------------------------------------------------------------------- |
-| 16-bit packed RGB        | `Rgb565Le/Be`, `Rgb555Le/Be`, `Rgb444Le/Be` (+ BGR mirrors)                |
-| Padded 4-byte packed RGB | `0Rgb`, `Rgb0`, `0Bgr`, `Bgr0` (no-alpha 32-bit, alignment-friendly)       |
+| 16-bit packed RGB        | `Rgb565Le/Be`, `Rgb555Le/Be` (+ BGR mirrors) shipped (see table above); `Rgb444Le/Be` still pending a core variant |
+| Padded 4-byte packed RGB | shipped as `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr` (see table above)             |
 | GBR planar               | shipped in full — the ten-member ladder (`Gbrp8` / `Gbrap8` through `Gbrap16Le`) with alpha-crossing deep-packed hops and `Gray8` interop (see table above) |
 | Legacy planar YUV        | `Yuv440P` shipped at 8/10/12/16 bits (see table above); `Yuv410P` and the `YuvJ440P` full-range mirror still pending a core variant |
 | 4:2:2 / 4:4:4 NV         | `Nv16`, `Nv24` — common on Android / embedded                              |
@@ -415,7 +417,7 @@ so callers can flip range without going through RGB.
 ### Depth-preserving routes
 
 Three rulings govern every route the planner picks; `tests/route_depth.rs`
-checks them over all 4830 ordered pairs and asserts zero violations.
+checks them over all 6642 ordered pairs and asserts zero violations.
 
 **Route-depth invariant.** When both endpoints carry more than 8 bits
 per channel (10 / 12 / 14 / 16-bit integer or binary32 float), every
@@ -453,6 +455,51 @@ merged before the rescale. A full-range colour signal (the frame's
 record or a `ConvertContext` override) turns the range move off and
 the luma move becomes the bare ladder move (`Gray16Le ↔ Yuv*P16Le` is a
 verbatim copy). The 8-bit grey ↔ 8-bit YUV rows keep their Q15 kernels.
+
+### Packed 16-bit words
+
+The `Rgb555*` / `Bgr555*` / `Rgb565*` / `Bgr565*` layouts (core 0.1.41)
+hold three sub-byte components in one 16-bit word; the format name
+lists them from the word's most significant bits down and the suffix
+is the byte order in memory. The core variant docs fix the layout and
+leave the widening to the consumer, so this crate applies its standing
+rescale convention: **5 / 6 → 8 bits by replication** (`(v << 3) | (v
+>> 2)`, `(v << 2) | (v >> 4)`: 0 → 0, full scale → 255, monotonic,
+within one code of the ideal rescale) and **8 → 5 / 6 by truncation**
+(`v >> 3`, `v >> 2`) — the exact inverse, so a word widened and packed
+again is bit-identical, and a 5-5-5 ↔ 5-6-5 relayout (`(g << 1) | (g >>
+4)` up, `g >> 1` down on green alone) equals staging through `Rgb24`.
+The unused top bit of a 5-5-5 word is written 0 and ignored on read; it
+is never alpha (a format that uses it as a one-bit attribute says so in
+its own header and decodes to an alpha-bearing layout).
+
+The way *in* is the one quantisation in this crate that honours
+`ConvertOptions::dither` (the depth ladder stays undithered):
+
+| `dither`          | rule                                                                 |
+| ----------------- | -------------------------------------------------------------------- |
+| `None` (default)  | truncation, as above                                                 |
+| `Bayer8x8`        | `q = min(v + t, 255) >> (8 − bits)` with `t = (BAYER8[y & 7][x & 7] · (256 >> bits)) >> 6` — a pure function of `(v, x, y)` |
+| `FloydSteinberg`  | integer error diffusion: residual `e = v′ − widen(q)` of the clamped, error-corrected sample, split `e·7/16` right, `e·3/16` below-left, `e·5/16` below and the exact remainder below-right (division truncating toward zero, shares leaving the picture dropped), rows left → right, top → bottom |
+
+Both are pinned bit-for-bit in `tests/packed16_words.rs` (a flat
+`[100, 100, 100]` tile under the ordered dither lifts red / blue to 13
+exactly where the matrix entry is ≥ 32; a hand-walked `[128, 128, 128]`
+row under error diffusion alternates `0x8410, 0x7C0F`). A relayout that
+narrows green 6 → 5 under a dither quantises green alone through its
+8-bit widening; red and blue are copied. The way *out* is a widen, so
+the setting has no effect there. `Gray8` and `Pal8` reach the words
+through the same quantiser (`Pal8` expands its palette first, alpha
+column dropped), and the words reach YUV carriage through an `Rgb24`
+pivot (`Rgba` when the other endpoint carries alpha).
+
+The padded `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr` layouts share the byte
+positions of `Rgba` / `Bgra` / `Argb` / `Abgr`; the fourth byte is
+padding, written 0 by every route and never read (a junk padding byte
+changes nothing). A padded → alpha move synthesises opaque 255, an
+alpha → padded move drops alpha, and the planar YUV(A) family reaches
+them directly through the `Rgb24` engine (alpha destinations get opaque
+alpha, exactly as from `Rgb24`).
 
 ### Transfer functions
 
@@ -561,6 +608,39 @@ above were re-measured in the same session and are unchanged. The
 `Gbrp10Le → Yuv420P10Le` row is still staged (two banded legs through
 `Rgb48Le`); a fused GBR → YUV encode is the next step for that family.
 
+**Packed RGB tier, 12-megapixel still (4032×3024), Apple M4 Max
+(`cargo bench --features bench --bench packed_rgb_12mp`).** The word
+kernels are monomorphised on the green width and both byte orders so
+the interleaved loads / stores vectorise; "serial" is `convert()`,
+"threaded" is `convert_with` + `ExecutionContext::auto()`; the staged
+rows pivot through `Rgb24`. The dithered quantisers are a single
+sequential pass.
+
+| conversion                       | serial   | threaded |
+| -------------------------------- | -------- | -------- |
+| `Rgb565Le → Rgb24`               | 1.22 ms  | 0.51 ms  |
+| `Rgb565Le → Rgba`                | 1.58 ms  | 0.60 ms  |
+| `Rgb565Le → Bgra`                | 1.63 ms  | 0.58 ms  |
+| `Rgb565Le → Rgb555Be`            | 2.13 ms  | 0.55 ms  |
+| `Rgb24 → Rgb565Le`               | 1.30 ms  | 0.56 ms  |
+| `Rgba → Rgb565Le`                | 4.28 ms  | 0.84 ms  |
+| `Rgb565Le → Yuv420P` (staged)    | 4.81 ms  | 1.02 ms  |
+| `Yuv420P → Rgb565Le` (staged)    | 4.84 ms  | 1.04 ms  |
+| `Bgrx → Rgba`                    | 3.08 ms  | 0.71 ms  |
+| `Bgrx → Rgb24`                   | 2.57 ms  | 0.57 ms  |
+| `Rgba → Bgrx`                    | 2.86 ms  | 0.67 ms  |
+| `Rgb24 → Bgrx`                   | 1.21 ms  | 0.52 ms  |
+| `Bgrx → Yuv420P`                 | 6.48 ms  | 1.40 ms  |
+| `Yuv420P → Bgrx`                 | 4.88 ms  | 1.23 ms  |
+| `Rgb24 → Rgb565Le`, `Bayer8x8`   | 12.6 ms  | —        |
+| `Rgb24 → Rgb565Le`, `FloydSteinberg` | 72.4 ms | —      |
+
+The same pass moved the historical packed rows (swizzles, 3 ↔ 4
+promote / demote, grey broadcast, every `packed_map` row) onto the
+banded driver — byte-identical, threaded under an execution budget —
+and made the scalar 3 → 4 promote branch-free (`Rgb24 → Rgba` 10.1 →
+1.2 ms serial on aarch64).
+
 **Porter-Duff compositing (scalar, Apple M-series single core, indicative):**
 
 | operation                           | scalar throughput |
@@ -634,7 +714,8 @@ A [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) harness lives
 under [`fuzz/`](fuzz/) and runs daily in CI. The `convert_geometry`
 target does not feed arbitrary bytes at a parser — there is none. It
 instead *constructs* a structurally-valid source frame from the fuzzer's
-input (a source pixel format — all 70 enum variants are buildable,
+input (a source pixel format — all 82 enum variants are buildable,
+the 16-bit words at odd offsets on padded strides,
 small / odd dimensions, extra stride padding, and optional hostile
 side-channel records: fuzz-length palettes on `Pal8` and
 significant-bits records with zero bits, above-nominal values, and

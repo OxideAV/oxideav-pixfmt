@@ -69,6 +69,14 @@
 //! is supported; the first-tier matrix is:
 //!
 //! - RGB family (Rgb24/Bgr24/Rgba/Bgra/Argb/Abgr) all-to-all.
+//! - **Packed 16-bit RGB words** (`Rgb555Le/Be` / `Bgr555Le/Be` /
+//!   `Rgb565Le/Be` / `Bgr565Le/Be`, core 0.1.41) and the **padded
+//!   32-bit** `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr`: direct ↔ the six 8-bit
+//!   orders, each other, `Gray8` and `Pal8`; the padded four also direct
+//!   ↔ every planar YUV(A) family member. 5 / 6 → 8 bits by replication,
+//!   8 → 5 / 6 by truncation (exact round trips), the 5-5-5 top bit and
+//!   the padding byte written 0 and never read; the way into a word
+//!   honours [`ConvertOptions::dither`]. See [`packed16`].
 //! - Yuv420P/422P/444P ↔ Rgb24 / Rgba under BT.601 / BT.709 / BT.2020
 //!   (limited range), plus the full-range YuvJ420P/422P/444P families
 //!   directly ↔ Rgb24 / Rgba (the format pins the matrix range; the
@@ -182,9 +190,9 @@
 //! alpha-capable / deep RGB pivots
 //! preferred where the endpoints call for them). [`supports`] /
 //! [`supports_direct`] report per-pair availability. The matrix is
-//! fully closed: **every ordered pair** of the 70 `PixelFormat`
-//! variants resolves — directly (1820 pairs) or through one staged
-//! pivot (all 4830).
+//! fully closed: **every ordered pair** of the 82 `PixelFormat`
+//! variants resolves — directly (2368 pairs) or through one staged
+//! pivot (all 6642).
 //!
 //! # Bit-depth precision policy
 //!
@@ -206,7 +214,9 @@
 //! codec pipelines feeding this crate (lossless intermediates,
 //! reference comparisons, bit-exact round-trip tests) need
 //! deterministic, invertible mappings. `Dither` applies only to the
-//! palette quantisation path (`Rgb24`/`Rgba` → `Pal8`).
+//! palette quantisation path (`Rgb24`/`Rgba` → `Pal8`) and to the
+//! 8 → 5 / 6-bit quantiser of the packed 16-bit words (see
+//! [`packed16`]); its default `None` keeps both deterministic.
 //!
 //! # Integer ↔ float
 //!
