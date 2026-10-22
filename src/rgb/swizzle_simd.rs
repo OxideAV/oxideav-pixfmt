@@ -158,13 +158,13 @@ unsafe fn avx2_swizzle4_fill(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u
     for lane in 0..2 {
         for pix in 0..4 {
             let base = pix * 4;
-            for j in 0..4 {
+            for (j, &p) in perm.iter().enumerate() {
                 let idx = lane * 16 + base + j;
-                if perm[j] == 0xFF {
+                if p == 0xFF {
                     mask_bytes[idx] = 0x80;
                     fill_or[idx] = fill;
                 } else {
-                    mask_bytes[idx] = (base as u8) + perm[j];
+                    mask_bytes[idx] = (base as u8) + p;
                 }
             }
         }
