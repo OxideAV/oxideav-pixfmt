@@ -132,12 +132,17 @@ pub(crate) fn swizzle4_fill_perm(
 
 #[inline(always)]
 fn scalar_swizzle4_fill(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 4], fill: u8) {
+    // Loop-invariant lane plan: a gather index per lane (a constant
+    // lane reads any byte, then is overwritten by `fill` through a
+    // select rather than a branch).
+    let idx = perm.map(|p| (p & 3) as usize);
+    let is_fill = perm.map(|p| p == 0xFF);
     let src = &src[..pixels * 4];
     let dst = &mut dst[..pixels * 4];
     for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
         for j in 0..4 {
-            let p = perm[j];
-            d[j] = if p == 0xFF { fill } else { s[(p & 3) as usize] };
+            let v = s[idx[j]];
+            d[j] = if is_fill[j] { fill } else { v };
         }
     }
 }
@@ -245,16 +250,17 @@ pub(crate) fn rgb3_to_rgba4_fill_perm(
 
 #[inline(always)]
 fn scalar_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4], fill: u8) {
-    for i in 0..pixels {
-        let s = i * 3;
-        let d = i * 4;
+    // Loop-invariant lane plan (see `scalar_swizzle4_fill`): the
+    // constant lane gathers a byte inside the 3-byte group and is then
+    // replaced by `fill` through a select.
+    let idx = perm3.map(|p| ((p & 3) as usize).min(2));
+    let is_fill = perm3.map(|p| p == 0xFF);
+    let src = &src[..pixels * 3];
+    let dst = &mut dst[..pixels * 4];
+    for (s, d) in src.chunks_exact(3).zip(dst.chunks_exact_mut(4)) {
         for j in 0..4 {
-            let p = perm3[j];
-            dst[d + j] = if p == 0xFF {
-                fill
-            } else {
-                src[s + (p & 3) as usize]
-            };
+            let v = s[idx[j]];
+            d[j] = if is_fill[j] { fill } else { v };
         }
     }
 }

@@ -56,3 +56,8 @@ required-features = ["bench"]
 name = "deep_gray_12mp"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "packed_rgb_12mp"
+harness = false
+required-features = ["bench"]

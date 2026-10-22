@@ -256,17 +256,209 @@ const fn expand(v: u8, bits: u8) -> u8 {
 
 // -------------------------------------------------------------------------
 // Row kernels (tight buffers, `pixels` pixels).
+//
+// Every kernel is monomorphised on what would otherwise be a per-pixel
+// branch or a scattered store: the green width (`G6`), the byte order
+// of the word (`BE`) and the byte order of the 8-bit side (`ORDER`:
+// `Rgb24` / `Bgr24`, or `Rgba` / `Bgra` / `Argb` / `Abgr` positions —
+// the padded layouts share the alpha twins' positions). With the byte
+// indices constant the compiler emits the interleaved loads / stores
+// as vector groups; an `Rgb3` / `Rgba4` outside the six canonical
+// orders falls back to a generic scatter.
+
+macro_rules! specialise {
+    ($l:expr, $f:ident, $o:literal, ($($arg:expr),*)) => {
+        match ($l.g_bits == 6, $l.big_endian) {
+            (false, false) => $f::<false, false, $o>($($arg),*),
+            (false, true) => $f::<false, true, $o>($($arg),*),
+            (true, false) => $f::<true, false, $o>($($arg),*),
+            (true, true) => $f::<true, true, $o>($($arg),*),
+        }
+    };
+}
+
+/// Decode one word to 8-bit `(r, g, b)`.
+#[inline(always)]
+fn decode_px<const G6: bool, const BE: bool>(px: &[u8], rs: u32, gs: u32, bs: u32) -> (u8, u8, u8) {
+    let w = if BE {
+        u16::from_be_bytes([px[0], px[1]])
+    } else {
+        u16::from_le_bytes([px[0], px[1]])
+    };
+    let r = expand5(((w >> rs) & 0x1F) as u8);
+    let b = expand5(((w >> bs) & 0x1F) as u8);
+    let g = if G6 {
+        expand6(((w >> gs) & 0x3F) as u8)
+    } else {
+        expand5(((w >> gs) & 0x1F) as u8)
+    };
+    (r, g, b)
+}
+
+/// Encode 8-bit `(r, g, b)` to one word (truncating quantiser).
+#[inline(always)]
+fn encode_px<const G6: bool, const BE: bool>(
+    r: u8,
+    g: u8,
+    b: u8,
+    rs: u32,
+    gs: u32,
+    bs: u32,
+) -> [u8; 2] {
+    let gq = if G6 { quantise6(g) } else { quantise5(g) } as u16;
+    let w = ((quantise5(r) as u16) << rs) | (gq << gs) | ((quantise5(b) as u16) << bs);
+    if BE {
+        w.to_be_bytes()
+    } else {
+        w.to_le_bytes()
+    }
+}
+
+#[inline(always)]
+fn shifts(l: Packed16Layout) -> (u32, u32, u32) {
+    (l.r_shift as u32, l.g_shift as u32, l.b_shift as u32)
+}
+
+/// Canonical 3-byte orders: 0 = R, G, B; 1 = B, G, R; `None` otherwise.
+#[inline(always)]
+fn order3(pos: Rgb3) -> Option<usize> {
+    if pos == crate::rgb::RGB_POS {
+        Some(0)
+    } else if pos == crate::rgb::BGR_POS {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// Canonical 4-byte orders: 0 = R, G, B, X; 1 = B, G, R, X; 2 = X, R,
+/// G, B; 3 = X, B, G, R; `None` otherwise.
+#[inline(always)]
+fn order4(pos: Rgba4) -> Option<usize> {
+    use crate::rgb::{ABGR_POS, ARGB_POS, BGRA_POS, RGBA_POS};
+    if pos == RGBA_POS {
+        Some(0)
+    } else if pos == BGRA_POS {
+        Some(1)
+    } else if pos == ARGB_POS {
+        Some(2)
+    } else if pos == ABGR_POS {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+/// Write `(r, g, b)` (and `x`) into a 3- or 4-byte group in `ORDER`
+/// (see [`order3`] / [`order4`]); constant indices per monomorph.
+#[inline(always)]
+fn put3<const ORDER: usize>(d: &mut [u8], r: u8, g: u8, b: u8) {
+    if ORDER == 1 {
+        d[0] = b;
+        d[1] = g;
+        d[2] = r;
+    } else {
+        d[0] = r;
+        d[1] = g;
+        d[2] = b;
+    }
+}
+
+#[inline(always)]
+fn put4<const ORDER: usize>(d: &mut [u8], r: u8, g: u8, b: u8, x: u8) {
+    match ORDER {
+        1 => {
+            d[0] = b;
+            d[1] = g;
+            d[2] = r;
+            d[3] = x;
+        }
+        2 => {
+            d[0] = x;
+            d[1] = r;
+            d[2] = g;
+            d[3] = b;
+        }
+        3 => {
+            d[0] = x;
+            d[1] = b;
+            d[2] = g;
+            d[3] = r;
+        }
+        _ => {
+            d[0] = r;
+            d[1] = g;
+            d[2] = b;
+            d[3] = x;
+        }
+    }
+}
+
+#[inline(always)]
+fn get3<const ORDER: usize>(s: &[u8]) -> (u8, u8, u8) {
+    if ORDER == 1 {
+        (s[2], s[1], s[0])
+    } else {
+        (s[0], s[1], s[2])
+    }
+}
+
+#[inline(always)]
+fn get4<const ORDER: usize>(s: &[u8]) -> (u8, u8, u8) {
+    match ORDER {
+        1 => (s[2], s[1], s[0]),
+        2 => (s[1], s[2], s[3]),
+        3 => (s[3], s[2], s[1]),
+        _ => (s[0], s[1], s[2]),
+    }
+}
 
 /// Packed 16-bit words → a 3-byte packed order (`Rgb24` / `Bgr24`
 /// positions in `pos`).
 pub fn to_packed3(src: &[u8], l: Packed16Layout, dst: &mut [u8], pos: Rgb3, pixels: usize) {
+    match order3(pos) {
+        Some(0) => specialise!(l, to_packed3_impl, 0, (src, l, dst, pixels)),
+        Some(_) => specialise!(l, to_packed3_impl, 1, (src, l, dst, pixels)),
+        None => {
+            let (rs, gs, bs) = shifts(l);
+            let (pr, pg, pb) = (pos.r.min(2), pos.g.min(2), pos.b.min(2));
+            for (s, d) in src[..pixels * 2]
+                .chunks_exact(2)
+                .zip(dst[..pixels * 3].chunks_exact_mut(3))
+            {
+                let (r, g, b) = decode_generic(s, l, rs, gs, bs);
+                d[pr] = r;
+                d[pg] = g;
+                d[pb] = b;
+            }
+        }
+    }
+}
+
+/// Un-specialised decode for the generic fallbacks.
+#[inline(always)]
+fn decode_generic(px: &[u8], l: Packed16Layout, rs: u32, gs: u32, bs: u32) -> (u8, u8, u8) {
+    match (l.g_bits == 6, l.big_endian) {
+        (false, false) => decode_px::<false, false>(px, rs, gs, bs),
+        (false, true) => decode_px::<false, true>(px, rs, gs, bs),
+        (true, false) => decode_px::<true, false>(px, rs, gs, bs),
+        (true, true) => decode_px::<true, true>(px, rs, gs, bs),
+    }
+}
+
+#[inline(always)]
+fn to_packed3_impl<const G6: bool, const BE: bool, const ORDER: usize>(
+    src: &[u8],
+    l: Packed16Layout,
+    dst: &mut [u8],
+    pixels: usize,
+) {
+    let (rs, gs, bs) = shifts(l);
     let src = &src[..pixels * 2];
     let dst = &mut dst[..pixels * 3];
     for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(3)) {
-        let (r, g, b) = l.unpack(l.read_word(s));
-        d[pos.r] = r;
-        d[pos.g] = g;
-        d[pos.b] = b;
+        let (r, g, b) = decode_px::<G6, BE>(s, rs, gs, bs);
+        put3::<ORDER>(d, r, g, b);
     }
 }
 
@@ -281,33 +473,111 @@ pub fn to_packed4(
     fill: u8,
     pixels: usize,
 ) {
+    match order4(pos) {
+        Some(0) => specialise!(l, to_packed4_impl, 0, (src, l, dst, fill, pixels)),
+        Some(1) => specialise!(l, to_packed4_impl, 1, (src, l, dst, fill, pixels)),
+        Some(2) => specialise!(l, to_packed4_impl, 2, (src, l, dst, fill, pixels)),
+        Some(_) => specialise!(l, to_packed4_impl, 3, (src, l, dst, fill, pixels)),
+        None => {
+            let (rs, gs, bs) = shifts(l);
+            let (pr, pg, pb, pa) = (pos.r & 3, pos.g & 3, pos.b & 3, pos.a & 3);
+            for (s, d) in src[..pixels * 2]
+                .chunks_exact(2)
+                .zip(dst[..pixels * 4].chunks_exact_mut(4))
+            {
+                let (r, g, b) = decode_generic(s, l, rs, gs, bs);
+                d[pa] = fill;
+                d[pr] = r;
+                d[pg] = g;
+                d[pb] = b;
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn to_packed4_impl<const G6: bool, const BE: bool, const ORDER: usize>(
+    src: &[u8],
+    l: Packed16Layout,
+    dst: &mut [u8],
+    fill: u8,
+    pixels: usize,
+) {
+    let (rs, gs, bs) = shifts(l);
     let src = &src[..pixels * 2];
     let dst = &mut dst[..pixels * 4];
     for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(4)) {
-        let (r, g, b) = l.unpack(l.read_word(s));
-        d[pos.r] = r;
-        d[pos.g] = g;
-        d[pos.b] = b;
-        d[pos.a] = fill;
+        let (r, g, b) = decode_px::<G6, BE>(s, rs, gs, bs);
+        put4::<ORDER>(d, r, g, b, fill);
     }
 }
 
 /// A 3-byte packed order → packed 16-bit words (truncating quantiser).
 pub fn from_packed3(src: &[u8], pos: Rgb3, dst: &mut [u8], l: Packed16Layout, pixels: usize) {
+    match order3(pos) {
+        Some(0) => specialise!(l, from_packed3_impl, 0, (src, dst, l, pixels)),
+        Some(_) => specialise!(l, from_packed3_impl, 1, (src, dst, l, pixels)),
+        None => {
+            let (pr, pg, pb) = (pos.r.min(2), pos.g.min(2), pos.b.min(2));
+            for (s, d) in src[..pixels * 3]
+                .chunks_exact(3)
+                .zip(dst[..pixels * 2].chunks_exact_mut(2))
+            {
+                l.write_word(d, l.pack(s[pr], s[pg], s[pb]));
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn from_packed3_impl<const G6: bool, const BE: bool, const ORDER: usize>(
+    src: &[u8],
+    dst: &mut [u8],
+    l: Packed16Layout,
+    pixels: usize,
+) {
+    let (rs, gs, bs) = shifts(l);
     let src = &src[..pixels * 3];
     let dst = &mut dst[..pixels * 2];
     for (s, d) in src.chunks_exact(3).zip(dst.chunks_exact_mut(2)) {
-        l.write_word(d, l.pack(s[pos.r], s[pos.g], s[pos.b]));
+        let (r, g, b) = get3::<ORDER>(s);
+        d.copy_from_slice(&encode_px::<G6, BE>(r, g, b, rs, gs, bs));
     }
 }
 
 /// A 4-byte packed order → packed 16-bit words (truncating quantiser;
 /// the fourth lane — alpha or padding — is ignored).
 pub fn from_packed4(src: &[u8], pos: Rgba4, dst: &mut [u8], l: Packed16Layout, pixels: usize) {
+    match order4(pos) {
+        Some(0) => specialise!(l, from_packed4_impl, 0, (src, dst, l, pixels)),
+        Some(1) => specialise!(l, from_packed4_impl, 1, (src, dst, l, pixels)),
+        Some(2) => specialise!(l, from_packed4_impl, 2, (src, dst, l, pixels)),
+        Some(_) => specialise!(l, from_packed4_impl, 3, (src, dst, l, pixels)),
+        None => {
+            let (pr, pg, pb) = (pos.r & 3, pos.g & 3, pos.b & 3);
+            for (s, d) in src[..pixels * 4]
+                .chunks_exact(4)
+                .zip(dst[..pixels * 2].chunks_exact_mut(2))
+            {
+                l.write_word(d, l.pack(s[pr], s[pg], s[pb]));
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn from_packed4_impl<const G6: bool, const BE: bool, const ORDER: usize>(
+    src: &[u8],
+    dst: &mut [u8],
+    l: Packed16Layout,
+    pixels: usize,
+) {
+    let (rs, gs, bs) = shifts(l);
     let src = &src[..pixels * 4];
     let dst = &mut dst[..pixels * 2];
     for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(2)) {
-        l.write_word(d, l.pack(s[pos.r], s[pos.g], s[pos.b]));
+        let (r, g, b) = get4::<ORDER>(s);
+        d.copy_from_slice(&encode_px::<G6, BE>(r, g, b, rs, gs, bs));
     }
 }
 

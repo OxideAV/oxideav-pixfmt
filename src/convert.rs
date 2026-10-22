@@ -809,6 +809,19 @@ const RGB_PIVOTS: &[PixelFormat] = &[
     PixelFormat::Rgba64Le,
     PixelFormat::Gray8,
 ];
+/// The 8-bit RGB pivot order when **neither** endpoint carries alpha:
+/// the three-byte `Rgb24` leads, so e.g. `Yuv420P → Rgb565Le` or
+/// `Nv12 → Bgrx` never synthesises and drops an opaque fourth byte
+/// mid-route. Same bytes as the alpha-first order (the synthesised
+/// alpha never reached the output), one third less intermediate
+/// traffic.
+const RGB_PIVOTS_NO_ALPHA: &[PixelFormat] = &[
+    PixelFormat::Rgb24,
+    PixelFormat::Rgba,
+    PixelFormat::Rgb48Le,
+    PixelFormat::Rgba64Le,
+    PixelFormat::Gray8,
+];
 /// RGB pivot order used when either endpoint carries more than 8
 /// significant bits: the deep packed pivots come first so a
 /// deep → deep staged route (e.g. `Gbrp10Le → Gbrp12Le`) never
@@ -1399,7 +1412,8 @@ fn lookup_staged(
     let rgb_pivots = match (deep, no_alpha) {
         (true, true) => RGB_PIVOTS_DEEP_NO_ALPHA,
         (true, false) => RGB_PIVOTS_DEEP,
-        (false, _) => RGB_PIVOTS,
+        (false, true) => RGB_PIVOTS_NO_ALPHA,
+        (false, false) => RGB_PIVOTS,
     };
     let yuv_pivots = match (deep, no_alpha) {
         (true, true) => YUV_PIVOTS_DEEP_NO_ALPHA,
@@ -2854,16 +2868,18 @@ impl ConvertOp {
         let ranged = |full_range: bool| primaries.with_range(ctx.limited(!full_range));
         let workers = ctx.workers(src_info.height as usize);
         match *self {
-            Self::Swizzle3 { src: sp, dst: dp } => swizzle3(src, src_info, sp, dp),
-            Self::Swizzle4 { src: sp, dst: dp } => swizzle4(src, src_info, sp, dp),
-            Self::Promote3To4 { src: sp, dst: dp } => promote3_to_4(src, src_info, sp, dp),
-            Self::Demote4To3 { src: sp, dst: dp } => demote4_to_3(src, src_info, sp, dp),
+            Self::Swizzle3 { src: sp, dst: dp } => swizzle3(src, src_info, sp, dp, workers),
+            Self::Swizzle4 { src: sp, dst: dp } => swizzle4(src, src_info, sp, dp, workers),
+            Self::Promote3To4 { src: sp, dst: dp } => promote3_to_4(src, src_info, sp, dp, workers),
+            Self::Demote4To3 { src: sp, dst: dp } => demote4_to_3(src, src_info, sp, dp, workers),
             Self::Rgb48ToRgb24 => do_rgb48_to_rgb24(src, src_info),
             Self::Rgb24ToRgb48 => do_rgb24_to_rgb48(src, src_info),
             Self::Rgba64ToRgba => do_rgba64_to_rgba(src, src_info),
             Self::RgbaToRgba64 => do_rgba_to_rgba64(src, src_info),
-            Self::Gray8ToPacked3 => gray_to_packed3(src, src_info),
-            Self::Gray8ToPacked4 { alpha_first } => gray_to_packed4(src, src_info, alpha_first),
+            Self::Gray8ToPacked3 => gray_to_packed3(src, src_info, workers),
+            Self::Gray8ToPacked4 { alpha_first } => {
+                gray_to_packed4(src, src_info, alpha_first, workers)
+            }
             Self::Gray16ToGray8 => do_gray16_to_gray8(src, src_info),
             Self::Gray8ToGray16 => do_gray8_to_gray16(src, src_info),
             Self::MonoToGray { black_is_zero } => do_mono_to_gray(src, src_info, black_is_zero),
@@ -2877,26 +2893,34 @@ impl ConvertOp {
             Self::Ya8ToRgba => do_ya8_to_rgba(src, src_info),
             Self::Rgb24ToYa8 => do_rgb24_to_ya8(src, src_info),
             Self::RgbaToYa8 => do_rgba_to_ya8(src, src_info),
-            Self::Ya16ToYa8 => packed_map(src, src_info, 4, 2, gray::ya16le_to_ya8),
-            Self::Ya8ToYa16 => packed_map(src, src_info, 2, 4, gray::ya8_to_ya16le),
-            Self::Ya16ToGray16 => packed_map(src, src_info, 4, 2, gray::ya16le_to_gray16le),
-            Self::Gray16ToYa16 => packed_map(src, src_info, 2, 4, gray::gray16le_to_ya16le),
-            Self::Ya16ToGray8 => packed_map(src, src_info, 4, 1, gray::ya16le_to_gray8),
-            Self::Gray8ToYa16 => packed_map(src, src_info, 1, 4, gray::gray8_to_ya16le),
-            Self::Ya16ToRgba64 => packed_map(src, src_info, 4, 8, gray::ya16le_to_rgba64le),
-            Self::Rgba64ToYa16 => packed_map(src, src_info, 8, 4, gray::rgba64le_to_ya16le),
+            Self::Ya16ToYa8 => packed_map(src, src_info, workers, 4, 2, gray::ya16le_to_ya8),
+            Self::Ya8ToYa16 => packed_map(src, src_info, workers, 2, 4, gray::ya8_to_ya16le),
+            Self::Ya16ToGray16 => {
+                packed_map(src, src_info, workers, 4, 2, gray::ya16le_to_gray16le)
+            }
+            Self::Gray16ToYa16 => {
+                packed_map(src, src_info, workers, 2, 4, gray::gray16le_to_ya16le)
+            }
+            Self::Ya16ToGray8 => packed_map(src, src_info, workers, 4, 1, gray::ya16le_to_gray8),
+            Self::Gray8ToYa16 => packed_map(src, src_info, workers, 1, 4, gray::gray8_to_ya16le),
+            Self::Ya16ToRgba64 => {
+                packed_map(src, src_info, workers, 4, 8, gray::ya16le_to_rgba64le)
+            }
+            Self::Rgba64ToYa16 => {
+                packed_map(src, src_info, workers, 8, 4, gray::rgba64le_to_ya16le)
+            }
             Self::Ya16ToPacked8 { alpha } => {
                 if alpha {
-                    packed_map(src, src_info, 4, 4, gray::ya16le_to_rgba)
+                    packed_map(src, src_info, workers, 4, 4, gray::ya16le_to_rgba)
                 } else {
-                    packed_map(src, src_info, 4, 3, gray::ya16le_to_rgb24)
+                    packed_map(src, src_info, workers, 4, 3, gray::ya16le_to_rgb24)
                 }
             }
             Self::Packed8ToYa16 { alpha_in } => {
                 if alpha_in {
-                    packed_map(src, src_info, 4, 4, gray::rgba_to_ya16le)
+                    packed_map(src, src_info, workers, 4, 4, gray::rgba_to_ya16le)
                 } else {
-                    packed_map(src, src_info, 3, 4, gray::rgb24_to_ya16le)
+                    packed_map(src, src_info, workers, 3, 4, gray::rgb24_to_ya16le)
                 }
             }
             Self::YuvLumaToGray { full_range } => {
@@ -2981,7 +3005,7 @@ impl ConvertOp {
                     (false, true) => cmyk::cmyk_inverted_to_rgb24,
                     (true, true) => cmyk::cmyk_inverted_to_rgba,
                 };
-                packed_map(src, src_info, 4, if alpha { 4 } else { 3 }, f)
+                packed_map(src, src_info, workers, 4, if alpha { 4 } else { 3 }, f)
             }
             Self::RgbToCmyk { alpha_in, inverted } => {
                 let f = match (alpha_in, inverted) {
@@ -2990,9 +3014,9 @@ impl ConvertOp {
                     (false, true) => cmyk::rgb24_to_cmyk_inverted,
                     (true, true) => cmyk::rgba_to_cmyk_inverted,
                 };
-                packed_map(src, src_info, if alpha_in { 4 } else { 3 }, 4, f)
+                packed_map(src, src_info, workers, if alpha_in { 4 } else { 3 }, 4, f)
             }
-            Self::CmykComplement => packed_map(src, src_info, 4, 4, cmyk::cmyk_complement),
+            Self::CmykComplement => packed_map(src, src_info, workers, 4, 4, cmyk::cmyk_complement),
             Self::YuvToYuva { wsub, hsub } => do_yuv_to_yuva(src, src_info, wsub, hsub),
             Self::YuvaToYuv { wsub, hsub } => do_yuva_to_yuv(src, src_info, wsub, hsub),
             Self::YuvaToRgb { wsub, hsub, alpha } => {
@@ -3092,8 +3116,8 @@ impl ConvertOp {
             Self::PlanarFamilyToDeepGray { src: s, bits } => {
                 planar_family_to_deep_gray(src, src_info, s, bits, ctx.limited(true), workers)
             }
-            Self::Rgb48ToRgba64 => packed_map(src, src_info, 6, 8, rgb::rgb48_to_rgba64),
-            Self::Rgba64ToRgb48 => packed_map(src, src_info, 8, 6, rgb::rgba64_to_rgb48),
+            Self::Rgb48ToRgba64 => packed_map(src, src_info, workers, 6, 8, rgb::rgb48_to_rgba64),
+            Self::Rgba64ToRgb48 => packed_map(src, src_info, workers, 8, 6, rgb::rgba64_to_rgb48),
             Self::PackedPosToGray { comps, r, g, b } => {
                 do_packed_pos_to_gray(src, src_info, matrix.with_range(false), comps, r, g, b)
             }
@@ -3102,9 +3126,9 @@ impl ConvertOp {
             }
             Self::GrayToPackedDeep { alpha_out } => {
                 if alpha_out {
-                    packed_map(src, src_info, 1, 8, gray::gray8_to_rgba64le)
+                    packed_map(src, src_info, workers, 1, 8, gray::gray8_to_rgba64le)
                 } else {
-                    packed_map(src, src_info, 1, 6, gray::gray8_to_rgb48le)
+                    packed_map(src, src_info, workers, 1, 6, gray::gray8_to_rgb48le)
                 }
             }
             Self::DeepGrayToPackedDeep { bits, alpha_out } => {
@@ -3126,7 +3150,7 @@ impl ConvertOp {
                 } else {
                     cmyk::cmyk_to_rgb24
                 };
-                let rgb = packed_map(src, src_info, 4, 3, f)?;
+                let rgb = packed_map(src, src_info, workers, 4, 3, f)?;
                 let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
                 do_rgb_to_gray(&rgb, rgb_info, matrix.with_range(false), false)
             }
@@ -3136,7 +3160,7 @@ impl ConvertOp {
                 } else {
                     cmyk::gray8_to_cmyk
                 };
-                packed_map(src, src_info, 1, 4, f)
+                packed_map(src, src_info, workers, 1, 4, f)
             }
             Self::Pal8ToGray => {
                 let rgb = pal8_to_rgb(src, src_info, opts, false)?;
@@ -3144,7 +3168,7 @@ impl ConvertOp {
                 do_rgb_to_gray(&rgb, rgb_info, matrix.with_range(false), false)
             }
             Self::GrayToPal8 => {
-                let rgb = gray_to_packed3(src, src_info)?;
+                let rgb = gray_to_packed3(src, src_info, workers)?;
                 let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
                 rgb_to_pal8(&rgb, rgb_info, opts, false)
             }
@@ -3208,7 +3232,7 @@ impl ConvertOp {
                 })
             }
             Self::Gray8ToP16 { dst: dl } => {
-                let rgb = gray_to_packed3(src, src_info)?;
+                let rgb = gray_to_packed3(src, src_info, workers)?;
                 let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
                 packed_to_p16(&rgb, rgb_info, 3, [0, 1, 2], dl, opts.dither, workers)
             }
@@ -3232,7 +3256,7 @@ impl ConvertOp {
                 packed_to_p16(&rgb, rgb_info, 3, [0, 1, 2], dl, opts.dither, workers)
             }
             Self::Packed4ToPal8 { src: sp } => {
-                let rgb = demote4_to_3(src, src_info, sp, rgb::RGB_POS)?;
+                let rgb = demote4_to_3(src, src_info, sp, rgb::RGB_POS, workers)?;
                 let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
                 rgb_to_pal8(&rgb, rgb_info, opts, false)
             }
@@ -3251,7 +3275,7 @@ impl ConvertOp {
                 })
             }
             Self::Packed4ToPlanarFamily { src: sp, dst: d } => {
-                let rgb = demote4_to_3(src, src_info, sp, rgb::RGB_POS)?;
+                let rgb = demote4_to_3(src, src_info, sp, rgb::RGB_POS, workers)?;
                 let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
                 rgb_to_planar_family(&rgb, rgb_info, matrix, d, false, workers)
             }
@@ -3302,33 +3326,21 @@ fn tight_row(src: &[u8], stride: usize, row: usize, row_bytes: usize) -> &[u8] {
     &src[off..off + row_bytes]
 }
 
-/// Row-wise map between two single-plane packed layouts: gather each
-/// tight source row (`src_bpp` bytes/pixel) and let `f` emit the
-/// corresponding destination row (`dst_bpp` bytes/pixel). The kernel
-/// signature matches the low-level `(src, dst, pixels)` helpers in
-/// [`crate::gray`] / [`crate::rgb`].
+/// Row-wise map between two single-plane packed layouts (`src_bpp` /
+/// `dst_bpp` bytes per pixel) with a `(src, dst, pixels)` kernel from
+/// [`crate::gray`] / [`crate::rgb`] / [`crate::cmyk`], on the banded,
+/// geometry-checked [`packed_rows`] driver.
 fn packed_map(
     src: &VideoFrame,
     src_info: FrameInfo,
+    workers: usize,
     src_bpp: usize,
     dst_bpp: usize,
     f: fn(&[u8], &mut [u8], usize),
 ) -> Result<VideoFrame> {
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    let in_plane = &src.planes[0];
-    let mut out = vec![0u8; w * h * dst_bpp];
-    for row in 0..h {
-        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * src_bpp);
-        f(sr, &mut out[row * w * dst_bpp..(row + 1) * w * dst_bpp], w);
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * dst_bpp,
-            data: out,
-        }],
-    ))
+    packed_rows(src, src_info, src_bpp, dst_bpp, workers, |s, d, n| {
+        f(s, d, n)
+    })
 }
 
 /// Gather a plane's `w_bytes × h` payload into a tight buffer. A plane
@@ -3372,28 +3384,11 @@ fn swizzle3(
     src_info: FrameInfo,
     src_pos: rgb::Rgb3,
     dst_pos: rgb::Rgb3,
+    workers: usize,
 ) -> Result<VideoFrame> {
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    let in_plane = &src.planes[0];
-    let mut out = vec![0u8; w * h * 3];
-    for row in 0..h {
-        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 3);
-        rgb::swizzle3(
-            sr,
-            src_pos,
-            &mut out[row * w * 3..row * w * 3 + w * 3],
-            dst_pos,
-            w,
-        );
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * 3,
-            data: out,
-        }],
-    ))
+    packed_rows(src, src_info, 3, 3, workers, |s, d, n| {
+        rgb::swizzle3(s, src_pos, d, dst_pos, n)
+    })
 }
 
 fn swizzle4(
@@ -3401,28 +3396,11 @@ fn swizzle4(
     src_info: FrameInfo,
     src_pos: rgb::Rgba4,
     dst_pos: rgb::Rgba4,
+    workers: usize,
 ) -> Result<VideoFrame> {
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    let in_plane = &src.planes[0];
-    let mut out = vec![0u8; w * h * 4];
-    for row in 0..h {
-        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
-        rgb::swizzle4(
-            sr,
-            src_pos,
-            &mut out[row * w * 4..row * w * 4 + w * 4],
-            dst_pos,
-            w,
-        );
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * 4,
-            data: out,
-        }],
-    ))
+    packed_rows(src, src_info, 4, 4, workers, |s, d, n| {
+        rgb::swizzle4(s, src_pos, d, dst_pos, n)
+    })
 }
 
 fn promote3_to_4(
@@ -3430,28 +3408,11 @@ fn promote3_to_4(
     src_info: FrameInfo,
     src_pos: rgb::Rgb3,
     dst_pos: rgb::Rgba4,
+    workers: usize,
 ) -> Result<VideoFrame> {
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    let in_plane = &src.planes[0];
-    let mut out = vec![0u8; w * h * 4];
-    for row in 0..h {
-        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 3);
-        rgb::rgb3_to_rgba4(
-            sr,
-            src_pos,
-            &mut out[row * w * 4..row * w * 4 + w * 4],
-            dst_pos,
-            w,
-        );
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * 4,
-            data: out,
-        }],
-    ))
+    packed_rows(src, src_info, 3, 4, workers, |s, d, n| {
+        rgb::rgb3_to_rgba4(s, src_pos, d, dst_pos, n)
+    })
 }
 
 fn demote4_to_3(
@@ -3459,28 +3420,11 @@ fn demote4_to_3(
     src_info: FrameInfo,
     src_pos: rgb::Rgba4,
     dst_pos: rgb::Rgb3,
+    workers: usize,
 ) -> Result<VideoFrame> {
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    let in_plane = &src.planes[0];
-    let mut out = vec![0u8; w * h * 3];
-    for row in 0..h {
-        let sr = tight_row(&in_plane.data, in_plane.stride, row, w * 4);
-        rgb::rgba4_to_rgb3(
-            sr,
-            src_pos,
-            &mut out[row * w * 3..row * w * 3 + w * 3],
-            dst_pos,
-            w,
-        );
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * 3,
-            data: out,
-        }],
-    ))
+    packed_rows(src, src_info, 4, 3, workers, |s, d, n| {
+        rgb::rgba4_to_rgb3(s, src_pos, d, dst_pos, n)
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -3690,50 +3634,30 @@ fn do_rgba_to_rgba64(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame
 // -------------------------------------------------------------------------
 // Gray / Mono.
 
-fn gray_to_packed3(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    let in_plane = &src.planes[0];
-    let mut out = vec![0u8; w * h * 3];
-    for row in 0..h {
-        let sr = tight_row(&in_plane.data, in_plane.stride, row, w);
-        gray::gray8_to_rgb24(sr, &mut out[row * w * 3..row * w * 3 + w * 3], w);
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * 3,
-            data: out,
-        }],
-    ))
+fn gray_to_packed3(src: &VideoFrame, src_info: FrameInfo, workers: usize) -> Result<VideoFrame> {
+    packed_rows(src, src_info, 1, 3, workers, |s, d, n| {
+        gray::gray8_to_rgb24(s, d, n)
+    })
 }
 
-fn gray_to_packed4(src: &VideoFrame, src_info: FrameInfo, alpha_first: bool) -> Result<VideoFrame> {
-    let w = src_info.width as usize;
-    let h = src_info.height as usize;
-    let in_plane = &src.planes[0];
-    let mut out = vec![0u8; w * h * 4];
-    for row in 0..h {
-        let sr = tight_row(&in_plane.data, in_plane.stride, row, w);
-        let dr = &mut out[row * w * 4..row * w * 4 + w * 4];
+fn gray_to_packed4(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    alpha_first: bool,
+    workers: usize,
+) -> Result<VideoFrame> {
+    packed_rows(src, src_info, 1, 4, workers, |s, d, n| {
         if alpha_first {
-            for (i, &g) in sr.iter().enumerate().take(w) {
-                dr[i * 4] = 255;
-                dr[i * 4 + 1] = g;
-                dr[i * 4 + 2] = g;
-                dr[i * 4 + 3] = g;
+            for (&g, px) in s[..n].iter().zip(d.chunks_exact_mut(4)) {
+                px[0] = 255;
+                px[1] = g;
+                px[2] = g;
+                px[3] = g;
             }
         } else {
-            gray::gray8_to_rgba(sr, dr, w);
+            gray::gray8_to_rgba(s, d, n);
         }
-    }
-    Ok(make_frame(
-        src,
-        vec![VideoPlane {
-            stride: w * 4,
-            data: out,
-        }],
-    ))
+    })
 }
 
 fn do_gray16_to_gray8(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
@@ -4243,7 +4167,7 @@ fn do_packed_deep_to_deep_gray(
 
 /// `Ya16Le` → `Gray10Le` / `Gray12Le`: luma word, narrowed.
 fn do_ya16_to_deep_gray(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Result<VideoFrame> {
-    let g16 = packed_map(src, src_info, 4, 2, gray::ya16le_to_gray16le)?;
+    let g16 = packed_map(src, src_info, 1, 4, 2, gray::ya16le_to_gray16le)?;
     let g16_info = FrameInfo::new(PixelFormat::Gray16Le, src_info.width, src_info.height);
     do_gray_depth_rescale(&g16, g16_info, 16, bits)
 }
@@ -4252,7 +4176,7 @@ fn do_ya16_to_deep_gray(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Res
 fn do_deep_gray_to_ya16(src: &VideoFrame, src_info: FrameInfo, bits: u32) -> Result<VideoFrame> {
     let g16 = do_gray_depth_rescale(src, src_info, bits, 16)?;
     let g16_info = FrameInfo::new(PixelFormat::Gray16Le, src_info.width, src_info.height);
-    packed_map(&g16, g16_info, 2, 4, gray::gray16le_to_ya16le)
+    packed_map(&g16, g16_info, 1, 2, 4, gray::gray16le_to_ya16le)
 }
 
 /// Significant bits of a deep grey word format.
