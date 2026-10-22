@@ -16,7 +16,9 @@
 //!
 //! The audit is a permanent test: `violations()` must be empty. (Round
 //! 476 opened at 320 depth violations — every deep endpoint pivoting
-//! through `Gray8`, `Rgb24` or `Rgba` — and closed them all.)
+//! through `Gray8`, `Rgb24` or `Rgba` — and closed them all; the core
+//! 0.1.41 packed-RGB wave of round 479 grew the table to 82 formats
+//! and stayed at zero.)
 
 use oxideav_core::PixelFormat;
 use oxideav_pixfmt::{staged_pivot, supports, supports_direct, FormatInfo};
@@ -93,6 +95,18 @@ const ALL_FORMATS: &[PixelFormat] = &[
     PixelFormat::RgbaF32Le,
     PixelFormat::GbrpF32Le,
     PixelFormat::GbrapF32Le,
+    PixelFormat::Rgb555Le,
+    PixelFormat::Rgb555Be,
+    PixelFormat::Bgr555Le,
+    PixelFormat::Bgr555Be,
+    PixelFormat::Rgb565Le,
+    PixelFormat::Rgb565Be,
+    PixelFormat::Bgr565Le,
+    PixelFormat::Bgr565Be,
+    PixelFormat::Rgbx,
+    PixelFormat::Bgrx,
+    PixelFormat::Xrgb,
+    PixelFormat::Xbgr,
 ];
 
 /// Bits per channel a format carries: `FormatInfo::bit_depth` (32 for
@@ -164,7 +178,7 @@ fn violations() -> Vec<Violation> {
 
 /// The route-depth invariants hold on every supported pair. (The audit
 /// drives the planner only — no sample is converted — so it has nothing
-/// to prove under miri and is skipped there, where the 4830-pair table
+/// to prove under miri and is skipped there, where the 6642-pair table
 /// walk would cost tens of minutes.)
 #[test]
 #[cfg_attr(miri, ignore = "planner-only audit; no memory to check")]

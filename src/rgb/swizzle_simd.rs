@@ -111,6 +111,82 @@ unsafe fn avx2_swizzle4(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 4]
 }
 
 // -------------------------------------------------------------------------
+// swizzle4 with a constant lane — 4-byte permutation per pixel where
+// `perm[j] == 0xFF` emits `fill` instead of a source byte (the alpha
+// lane synthesised opaque from a padded source, or the padding lane
+// written as 0 from an alpha source).
+
+pub(crate) fn swizzle4_fill_perm(
+    src: &[u8],
+    dst: &mut [u8],
+    pixels: usize,
+    perm: [u8; 4],
+    fill: u8,
+) {
+    match path() {
+        #[cfg(target_arch = "x86_64")]
+        Path::Avx2 => unsafe { avx2_swizzle4_fill(src, dst, pixels, perm, fill) },
+        _ => scalar_swizzle4_fill(src, dst, pixels, perm, fill),
+    }
+}
+
+#[inline(always)]
+fn scalar_swizzle4_fill(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 4], fill: u8) {
+    let src = &src[..pixels * 4];
+    let dst = &mut dst[..pixels * 4];
+    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+        for j in 0..4 {
+            let p = perm[j];
+            d[j] = if p == 0xFF { fill } else { s[(p & 3) as usize] };
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_swizzle4_fill(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 4], fill: u8) {
+    use core::arch::x86_64::*;
+    // Same 32-byte shuffle as `avx2_swizzle4`; the constant lane gets
+    // 0x80 (pshufb emits zero there) and is OR-ed with `fill`.
+    let mut mask_bytes = [0u8; 32];
+    let mut fill_or = [0u8; 32];
+    for lane in 0..2 {
+        for pix in 0..4 {
+            let base = pix * 4;
+            for j in 0..4 {
+                let idx = lane * 16 + base + j;
+                if perm[j] == 0xFF {
+                    mask_bytes[idx] = 0x80;
+                    fill_or[idx] = fill;
+                } else {
+                    mask_bytes[idx] = (base as u8) + perm[j];
+                }
+            }
+        }
+    }
+    let mask = _mm256_loadu_si256(mask_bytes.as_ptr() as *const __m256i);
+    let fill_v = _mm256_loadu_si256(fill_or.as_ptr() as *const __m256i);
+
+    let chunks = pixels / 8;
+    let tail_start = chunks * 8;
+    for c in 0..chunks {
+        let off = c * 32;
+        let v = _mm256_loadu_si256(src.as_ptr().add(off) as *const __m256i);
+        let out = _mm256_or_si256(_mm256_shuffle_epi8(v, mask), fill_v);
+        _mm256_storeu_si256(dst.as_mut_ptr().add(off) as *mut __m256i, out);
+    }
+    if tail_start < pixels {
+        scalar_swizzle4_fill(
+            &src[tail_start * 4..],
+            &mut dst[tail_start * 4..],
+            pixels - tail_start,
+            perm,
+            fill,
+        );
+    }
+}
+
+// -------------------------------------------------------------------------
 // swizzle3 — 3-byte permutation per pixel.
 //
 // A 3-byte stride doesn't align with 128/256-bit lane boundaries, so we
@@ -148,22 +224,34 @@ fn scalar_swizzle3(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 3]) {
 // 0xFF`), which is emitted as 255.
 
 pub(crate) fn rgb3_to_rgba4_perm(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4]) {
+    rgb3_to_rgba4_fill_perm(src, dst, pixels, perm3, 255);
+}
+
+/// [`rgb3_to_rgba4_perm`] with the constant lane set to `fill` (255
+/// for an alpha layout, 0 for a padded `Rgbx`-style one).
+pub(crate) fn rgb3_to_rgba4_fill_perm(
+    src: &[u8],
+    dst: &mut [u8],
+    pixels: usize,
+    perm3: [u8; 4],
+    fill: u8,
+) {
     match path() {
         #[cfg(target_arch = "x86_64")]
-        Path::Avx2 => unsafe { avx2_rgb3_to_rgba4(src, dst, pixels, perm3) },
-        _ => scalar_rgb3_to_rgba4(src, dst, pixels, perm3),
+        Path::Avx2 => unsafe { avx2_rgb3_to_rgba4(src, dst, pixels, perm3, fill) },
+        _ => scalar_rgb3_to_rgba4(src, dst, pixels, perm3, fill),
     }
 }
 
 #[inline(always)]
-fn scalar_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4]) {
+fn scalar_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4], fill: u8) {
     for i in 0..pixels {
         let s = i * 3;
         let d = i * 4;
         for j in 0..4 {
             let p = perm3[j];
             dst[d + j] = if p == 0xFF {
-                255
+                fill
             } else {
                 src[s + (p & 3) as usize]
             };
@@ -173,7 +261,7 @@ fn scalar_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn avx2_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4]) {
+unsafe fn avx2_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4], fill: u8) {
     use core::arch::x86_64::*;
     // Process 4 pixels per __m128i iteration: read 12 bytes (3 pixels
     // worth + 3 extra for the 4th), shuffle into a 16-byte register
@@ -184,7 +272,7 @@ unsafe fn avx2_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [
     //
     // Mask entry j (within 16-byte output):
     //   pixel = j / 4, slot = j % 4, base = pixel * 3.
-    //   if perm3[slot] == 0xFF: 0x80 (pshufb emits zero); we'll OR 0xFF later.
+    //   if perm3[slot] == 0xFF: 0x80 (pshufb emits zero); we OR `fill` later.
     //   else: base + perm3[slot].
     let mut mask_bytes = [0u8; 16];
     let mut alpha_or = [0u8; 16];
@@ -194,7 +282,7 @@ unsafe fn avx2_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [
             let idx = pix * 4 + slot;
             if p == 0xFF {
                 mask_bytes[idx] = 0x80;
-                alpha_or[idx] = 0xFF;
+                alpha_or[idx] = fill;
             } else {
                 mask_bytes[idx] = base + p;
             }
@@ -221,6 +309,7 @@ unsafe fn avx2_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [
         &mut dst[tail_start * 4..],
         pixels - tail_start,
         perm3,
+        fill,
     );
 }
 

@@ -24,7 +24,7 @@ nightly = []
 bench = ["dep:criterion"]
 
 [dependencies]
-oxideav-core = "0.1.40"
+oxideav-core = "0.1.41"
 criterion = { version = "0.8", optional = true }
 
 [[bench]]

@@ -127,6 +127,18 @@ const FORMATS: &[PixelFormat] = &[
     PixelFormat::RgbaF32Le,
     PixelFormat::GbrpF32Le,
     PixelFormat::GbrapF32Le,
+    PixelFormat::Rgb555Le,
+    PixelFormat::Rgb555Be,
+    PixelFormat::Bgr555Le,
+    PixelFormat::Bgr555Be,
+    PixelFormat::Rgb565Le,
+    PixelFormat::Rgb565Be,
+    PixelFormat::Bgr565Le,
+    PixelFormat::Bgr565Be,
+    PixelFormat::Rgbx,
+    PixelFormat::Bgrx,
+    PixelFormat::Xrgb,
+    PixelFormat::Xbgr,
 ];
 
 /// Map a raw fuzzer byte to a small dimension, biased toward the values
@@ -214,6 +226,22 @@ fn build_frame(
         // Packed 16-bit grey + alpha — interleaved (Y, A) LE16 word
         // pairs, 4 bytes per pixel; any byte pattern is a legal sample.
         PixelFormat::Ya16Le => vec![build_plane(hu, wu * 4, pad, fill, &mut seed)],
+        // Packed 16-bit RGB words — one LE / BE word per pixel (the
+        // odd stride paddings above put the words at odd offsets, so
+        // every kernel must read bytes, never aligned u16s); and the
+        // padded 32-bit layouts (4 bytes per pixel, fourth byte junk
+        // the readers must ignore).
+        PixelFormat::Rgb555Le
+        | PixelFormat::Rgb555Be
+        | PixelFormat::Bgr555Le
+        | PixelFormat::Bgr555Be
+        | PixelFormat::Rgb565Le
+        | PixelFormat::Rgb565Be
+        | PixelFormat::Bgr565Le
+        | PixelFormat::Bgr565Be => vec![build_plane(hu, wu * 2, pad, fill, &mut seed)],
+        PixelFormat::Rgbx | PixelFormat::Bgrx | PixelFormat::Xrgb | PixelFormat::Xbgr => {
+            vec![build_plane(hu, wu * 4, pad, fill, &mut seed)]
+        }
         // Scene-referred float — binary32 LE words; arbitrary fuzz bytes
         // decode to arbitrary floats (NaN, ±∞, denormals), all of which
         // every converter must accept without panicking.

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(convert)* the twelve oxideav-core 0.1.41 packed RGB layouts join the closed matrix: the 16-bit `Rgb555Le/Be` / `Bgr555Le/Be` / `Rgb565Le/Be` / `Bgr565Le/Be` words and the padded `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr`. A computed packed-RGB tier makes every pair between the twelve and the single-plane 8-bit family (`Rgb24` / `Bgr24` / `Rgba` / `Bgra` / `Argb` / `Abgr`), each other, `Gray8` and `Pal8` direct, and the padded four direct to and from every planar YUV(A) family member through the `Rgb24` engine. 82 formats, **all 82 × 81 = 6642 ordered pairs** convert (2368 direct, was 1820 of 4830); route-depth audit still at zero violations
+- *(packed16)* new module: `Packed16Layout` (bit positions, green width, byte order; `of(PixelFormat)` and the eight constants), the replication widen (`(v << 3) | (v >> 2)`, `(v << 2) | (v >> 4)`) and truncating quantiser (`v >> 3`, `v >> 2`) — exact round trips, and a 5-5-5 ↔ 5-6-5 relayout byte-identical to staging through 8 bits — plus tight-row kernels. The 5-5-5 top bit is written 0 and ignored on read (the core ruling)
+- *(packed16)* `ConvertOptions::dither` now reaches the 16-bit quantiser: `Bayer8x8` adds `(BAYER8[y & 7][x & 7] · (256 >> bits)) >> 6` before the truncation, `FloydSteinberg` diffuses the integer residual 7/16 right, 3/16 below-left, 5/16 below and the exact remainder below-right; both pinned bit-for-bit in `tests/packed16_words.rs`
+- *(rgb)* `swizzle4_fill` / `rgb3_to_rgba4_fill` (constant fourth lane; AVX2 twins of the permutation paths) and the `RGBX_POS` / `BGRX_POS` / `XRGB_POS` / `XBGR_POS` positions; `Rgb3` / `Rgba4` derive `Debug` / `PartialEq` / `Eq`. The padding byte is written 0 and never read; a padded → alpha move synthesises opaque alpha
+- *(format_info)* descriptors for the twelve (`bit_depth` 5 / 6 for the words — the widest component — and 8 for the padded four; no alpha)
+- *(fuzz)* the geometry harness builds the twelve as sources (words at odd offsets on padded strides, junk padding bytes)
+
+### Fixed
+
+- *(convert)* a front-door geometry gate on the source's first plane: a packed plane shorter than `plane_row_bytes × rows` at its stride is `Error::Invalid` on every route (the historical swizzle / promote / demote / grey-broadcast / palette row slicers indexed it unchecked and panicked)
+
+### Changed
+
+- *(deps)* `oxideav-core` minimum 0.1.41 (the twelve variants, `is_packed_rgb` / `is_rgb`)
+
 ## [0.1.11](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.10...v0.1.11) - 2026-10-17
 
 ### Added

@@ -84,6 +84,18 @@ const ALL_FORMATS: &[PixelFormat] = &[
     PixelFormat::RgbaF32Le,
     PixelFormat::GbrpF32Le,
     PixelFormat::GbrapF32Le,
+    PixelFormat::Rgb555Le,
+    PixelFormat::Rgb555Be,
+    PixelFormat::Bgr555Le,
+    PixelFormat::Bgr555Be,
+    PixelFormat::Rgb565Le,
+    PixelFormat::Rgb565Be,
+    PixelFormat::Bgr565Le,
+    PixelFormat::Bgr565Be,
+    PixelFormat::Rgbx,
+    PixelFormat::Bgrx,
+    PixelFormat::Xrgb,
+    PixelFormat::Xbgr,
 ];
 
 /// Build a frame for `fmt` at `w × h` on the geometry core reports for

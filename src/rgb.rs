@@ -14,7 +14,7 @@ mod swizzle_simd;
 
 /// Component index into a 4-byte packed pixel. Used to describe where
 /// R, G, B, and A live for each of the 4-channel formats.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgba4 {
     pub r: usize,
     pub g: usize,
@@ -48,8 +48,15 @@ pub const ABGR_POS: Rgba4 = Rgba4 {
     a: 0,
 };
 
+/// Byte positions of the padded alpha-less layouts (core 0.1.41): the
+/// colour lanes of the alpha twin, with `a` naming the padding lane.
+pub const RGBX_POS: Rgba4 = RGBA_POS;
+pub const BGRX_POS: Rgba4 = BGRA_POS;
+pub const XRGB_POS: Rgba4 = ARGB_POS;
+pub const XBGR_POS: Rgba4 = ABGR_POS;
+
 /// Component index into a 3-byte packed pixel.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb3 {
     pub r: usize,
     pub g: usize,
@@ -102,6 +109,48 @@ pub fn rgb3_to_rgba4(src: &[u8], src_pos: Rgb3, dst: &mut [u8], dst_pos: Rgba4, 
     perm3[dst_pos.g] = src_pos.g as u8;
     perm3[dst_pos.b] = src_pos.b as u8;
     swizzle_simd::rgb3_to_rgba4_perm(src, dst, pixels, perm3);
+}
+
+/// Convert a 3-byte packed source to a 4-byte packed destination whose
+/// fourth lane is a constant: `fill = 255` synthesises opaque alpha
+/// (what [`rgb3_to_rgba4`] does), `fill = 0` writes the padding byte of
+/// the alpha-less `Rgbx` / `Bgrx` / `Xrgb` / `Xbgr` layouts (core
+/// 0.1.41: writers emit 0, readers ignore it).
+pub fn rgb3_to_rgba4_fill(
+    src: &[u8],
+    src_pos: Rgb3,
+    dst: &mut [u8],
+    dst_pos: Rgba4,
+    pixels: usize,
+    fill: u8,
+) {
+    let mut perm3 = [0xFFu8; 4];
+    perm3[dst_pos.r] = src_pos.r as u8;
+    perm3[dst_pos.g] = src_pos.g as u8;
+    perm3[dst_pos.b] = src_pos.b as u8;
+    swizzle_simd::rgb3_to_rgba4_fill_perm(src, dst, pixels, perm3, fill);
+}
+
+/// Swizzle a packed 4-byte pixel stream between two `Rgba4` layouts
+/// carrying only the colour lanes: the destination's fourth lane
+/// (`dst_pos.a`) is written as the constant `fill` and the source's is
+/// never read. This is the move between an alpha layout and its padded
+/// twin (`Rgba → Rgbx` with `fill = 0`, `Rgbx → Rgba` with `fill =
+/// 255`) and between two padded layouts.
+pub fn swizzle4_fill(
+    src: &[u8],
+    src_pos: Rgba4,
+    dst: &mut [u8],
+    dst_pos: Rgba4,
+    pixels: usize,
+    fill: u8,
+) {
+    debug_assert!(src.len() >= pixels * 4 && dst.len() >= pixels * 4);
+    let mut perm = [0xFFu8; 4];
+    perm[dst_pos.r] = src_pos.r as u8;
+    perm[dst_pos.g] = src_pos.g as u8;
+    perm[dst_pos.b] = src_pos.b as u8;
+    swizzle_simd::swizzle4_fill_perm(src, dst, pixels, perm, fill);
 }
 
 /// Drop the alpha channel, converting a 4-byte packed source to a

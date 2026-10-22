@@ -19,6 +19,7 @@ use oxideav_core::{
 use crate::cmyk;
 use crate::float;
 use crate::gray;
+use crate::packed16::{self, Packed16Layout};
 use crate::pal8;
 use crate::palette::Palette;
 use crate::planar8::{self, chroma_dims, tight_plane, Packed8, Planar8};
@@ -334,6 +335,7 @@ pub fn convert_with(
     if src_info.format == dst_format {
         return Ok(src.clone());
     }
+    check_plane_geometry(src, src_info)?;
     // Materialise any significant-bits side-channel to the surface
     // format's nominal depth (see the rustdoc above) so every converter
     // below sees plain nominal-depth planes.
@@ -380,6 +382,52 @@ pub fn convert_with(
         "pixfmt: conversion {:?} → {:?} not implemented",
         src_info.format, dst_format
     )))
+}
+
+/// Hostile-geometry gate, applied once at the front door: the source's
+/// first plane — the whole packed picture of a single-plane layout, the
+/// full-resolution luma / G plane otherwise — must hold its
+/// `plane_row_bytes × rows` payload at its stride, the rule
+/// [`tight_plane`] applies, so a short or over-narrow plane is
+/// `Error::Invalid` before any row slicer in a packed converter can
+/// index past it. Only plane 0 is gated: the chroma planes of a
+/// subsampled source are the converter's own business (luma-only
+/// extraction documents that it never reads them, so a truncated
+/// chroma grid is legal there and rejected by the paths that would
+/// read it), and side-channel planes beyond `plane_count()` are not
+/// images. A missing plane 0 is likewise left to the converter.
+fn check_plane_geometry(src: &VideoFrame, info: FrameInfo) -> Result<()> {
+    for (i, plane) in src.planes.iter().enumerate().take(1) {
+        let (Some(row), Some((_, rows))) = (
+            info.format.plane_row_bytes(i, info.width),
+            info.format.plane_dimensions(i, info.width, info.height),
+        ) else {
+            continue;
+        };
+        let rows = rows as usize;
+        if rows == 0 || row == 0 {
+            continue;
+        }
+        if plane.stride < row {
+            return Err(Error::invalid(format!(
+                "pixfmt: {:?} plane {i} stride {} shorter than its {row}-byte rows",
+                info.format, plane.stride
+            )));
+        }
+        let need = plane
+            .stride
+            .checked_mul(rows - 1)
+            .and_then(|v| v.checked_add(row))
+            .ok_or_else(|| Error::invalid("pixfmt: plane geometry overflows usize"))?;
+        if plane.data.len() < need {
+            return Err(Error::invalid(format!(
+                "pixfmt: {:?} plane {i} holds {} bytes, geometry needs {need}",
+                info.format,
+                plane.data.len()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// H.273 `MatrixCoefficients == 0` (identity): the "YUV" planes carry
@@ -1053,6 +1101,151 @@ fn int_layout(f: PixelFormat) -> Option<IntLayout> {
     Some(IntLayout { shape, bits, alpha })
 }
 
+/// Shape of a single-plane 8-bit-or-narrower RGB layout: three bytes,
+/// four bytes (alpha or padding in the fourth lane), or one 16-bit
+/// word.
+#[derive(Clone, Copy, Debug)]
+enum PackedRgb8 {
+    Three(rgb::Rgb3),
+    Four { pos: rgb::Rgba4, alpha: bool },
+    Word(Packed16Layout),
+}
+
+fn packed_rgb8(f: PixelFormat) -> Option<PackedRgb8> {
+    use PixelFormat as P;
+    Some(match f {
+        P::Rgb24 => PackedRgb8::Three(rgb::RGB_POS),
+        P::Bgr24 => PackedRgb8::Three(rgb::BGR_POS),
+        P::Rgba => PackedRgb8::Four {
+            pos: rgb::RGBA_POS,
+            alpha: true,
+        },
+        P::Bgra => PackedRgb8::Four {
+            pos: rgb::BGRA_POS,
+            alpha: true,
+        },
+        P::Argb => PackedRgb8::Four {
+            pos: rgb::ARGB_POS,
+            alpha: true,
+        },
+        P::Abgr => PackedRgb8::Four {
+            pos: rgb::ABGR_POS,
+            alpha: true,
+        },
+        P::Rgbx => PackedRgb8::Four {
+            pos: rgb::RGBX_POS,
+            alpha: false,
+        },
+        P::Bgrx => PackedRgb8::Four {
+            pos: rgb::BGRX_POS,
+            alpha: false,
+        },
+        P::Xrgb => PackedRgb8::Four {
+            pos: rgb::XRGB_POS,
+            alpha: false,
+        },
+        P::Xbgr => PackedRgb8::Four {
+            pos: rgb::XBGR_POS,
+            alpha: false,
+        },
+        _ => PackedRgb8::Word(Packed16Layout::of(f)?),
+    })
+}
+
+/// True for the twelve core 0.1.41 packed RGB layouts (the 16-bit
+/// words and the padded 32-bit family).
+fn is_packed_rgb_0141(f: PixelFormat) -> bool {
+    matches!(
+        packed_rgb8(f),
+        Some(PackedRgb8::Word(_)) | Some(PackedRgb8::Four { alpha: false, .. })
+    )
+}
+
+/// Computed packed-RGB tier: every ordered pair that involves one of
+/// the core 0.1.41 packed layouts (16-bit `Rgb555*` / `Bgr555*` /
+/// `Rgb565*` / `Bgr565*` words, padded `Rgbx` / `Bgrx` / `Xrgb` /
+/// `Xbgr`) and one of: the single-plane 8-bit RGB family (`Rgb24` /
+/// `Bgr24` / `Rgba` / `Bgra` / `Argb` / `Abgr` and the twelve
+/// themselves), `Gray8` or `Pal8`. The historical six-member family
+/// keeps its explicit table rows; this tier is only consulted when at
+/// least one endpoint is new.
+fn lookup_packed_rgb(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
+    use PixelFormat as P;
+    if !(is_packed_rgb_0141(src) || is_packed_rgb_0141(dst)) {
+        return None;
+    }
+    let fill_for = |alpha: bool| if alpha { 255 } else { 0 };
+    match (packed_rgb8(src), packed_rgb8(dst)) {
+        (Some(s), Some(d)) => Some(match (s, d) {
+            (PackedRgb8::Three(sp), PackedRgb8::Four { pos, alpha }) => {
+                ConvertOp::Promote3To4Fill {
+                    src: sp,
+                    dst: pos,
+                    fill: fill_for(alpha),
+                }
+            }
+            (PackedRgb8::Four { pos: sp, .. }, PackedRgb8::Three(dp)) => {
+                ConvertOp::Demote4To3 { src: sp, dst: dp }
+            }
+            // Alpha is carried only between two alpha layouts (table
+            // rows); every move touching a padded layout writes the
+            // destination's fourth lane as a constant.
+            (PackedRgb8::Four { pos: sp, .. }, PackedRgb8::Four { pos: dp, alpha }) => {
+                ConvertOp::Swizzle4Fill {
+                    src: sp,
+                    dst: dp,
+                    fill: fill_for(alpha),
+                }
+            }
+            (PackedRgb8::Word(sl), PackedRgb8::Three(dp)) => {
+                ConvertOp::P16ToPacked3 { src: sl, dst: dp }
+            }
+            (PackedRgb8::Word(sl), PackedRgb8::Four { pos, alpha }) => ConvertOp::P16ToPacked4 {
+                src: sl,
+                dst: pos,
+                fill: fill_for(alpha),
+            },
+            (PackedRgb8::Three(sp), PackedRgb8::Word(dl)) => {
+                ConvertOp::Packed3ToP16 { src: sp, dst: dl }
+            }
+            (PackedRgb8::Four { pos, .. }, PackedRgb8::Word(dl)) => {
+                ConvertOp::Packed4ToP16 { src: pos, dst: dl }
+            }
+            (PackedRgb8::Word(sl), PackedRgb8::Word(dl)) => {
+                ConvertOp::P16ToP16 { src: sl, dst: dl }
+            }
+            // Three → Three never involves a new layout.
+            (PackedRgb8::Three(_), PackedRgb8::Three(_)) => return None,
+        }),
+        (Some(s), None) => match (s, dst) {
+            (PackedRgb8::Four { pos, .. }, P::Gray8) => Some(ConvertOp::PackedPosToGray {
+                comps: 4,
+                r: pos.r,
+                g: pos.g,
+                b: pos.b,
+            }),
+            (PackedRgb8::Word(sl), P::Gray8) => Some(ConvertOp::P16ToGray { src: sl }),
+            (PackedRgb8::Four { pos, .. }, P::Pal8) => Some(ConvertOp::Packed4ToPal8 { src: pos }),
+            (PackedRgb8::Word(sl), P::Pal8) => Some(ConvertOp::P16ToPal8 { src: sl }),
+            _ => None,
+        },
+        (None, Some(d)) => match (src, d) {
+            (P::Gray8, PackedRgb8::Four { pos, alpha }) => Some(ConvertOp::Gray8ToPacked4Pos {
+                dst: pos,
+                fill: fill_for(alpha),
+            }),
+            (P::Gray8, PackedRgb8::Word(dl)) => Some(ConvertOp::Gray8ToP16 { dst: dl }),
+            (P::Pal8, PackedRgb8::Four { pos, alpha }) => Some(ConvertOp::Pal8ToPacked4 {
+                dst: pos,
+                fill: fill_for(alpha),
+            }),
+            (P::Pal8, PackedRgb8::Word(dl)) => Some(ConvertOp::Pal8ToP16 { dst: dl }),
+            _ => None,
+        },
+        (None, None) => None,
+    }
+}
+
 /// Computed dispatch tier: conversions derived from the [`PlanarYuv`]
 /// family descriptors rather than enumerated as table rows. Consulted
 /// only when [`lookup`] has no explicit entry, so every pair the table
@@ -1060,6 +1253,12 @@ fn int_layout(f: PixelFormat) -> Option<IntLayout> {
 /// *direct* (single-step) conversion for [`supports_direct`] purposes.
 fn lookup_computed(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
     use PixelFormat as P;
+    // Packed RGB tier (core 0.1.41): the 16-bit words and the padded
+    // 32-bit layouts against the whole single-plane RGB family, Gray8
+    // and Pal8.
+    if let Some(op) = lookup_packed_rgb(src, dst) {
+        return Some(op);
+    }
     // Scene-referred float family (core 0.1.35): float ↔ float, float ↔
     // the integer gray / packed RGB / planar GBR(A) shapes, and float ↔
     // the 16-bit planar YUV(A) tier (full-precision deep matrix).
@@ -1113,7 +1312,14 @@ fn lookup_computed(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
                 src: s,
                 alpha: true,
             }),
-            _ => None,
+            // Padded 32-bit RGB: the Rgb24 decode, then the padding
+            // lane written as 0 at the layout's byte positions.
+            _ => match packed_rgb8(dst) {
+                Some(PackedRgb8::Four { pos, alpha: false }) => {
+                    Some(ConvertOp::PlanarFamilyToPacked4 { src: s, dst: pos })
+                }
+                _ => None,
+            },
         },
         // Packed RGB / Gray8 → family member.
         (None, Some(d)) => match src {
@@ -1138,7 +1344,14 @@ fn lookup_computed(src: PixelFormat, dst: PixelFormat) -> Option<ConvertOp> {
                 dst: d,
                 alpha_in: true,
             }),
-            _ => None,
+            // Padded 32-bit RGB: the padding lane dropped on the way to
+            // the Rgb24 encoder (alpha destinations get opaque alpha).
+            _ => match packed_rgb8(src) {
+                Some(PackedRgb8::Four { pos, alpha: false }) => {
+                    Some(ConvertOp::Packed4ToPlanarFamily { src: pos, dst: d })
+                }
+                _ => None,
+            },
         },
         // Planar GBR(A) ↔ the deep grey words (the `Gray8` rows are
         // explicit table entries and take precedence).
@@ -2406,6 +2619,102 @@ enum ConvertOp {
         src: PlanarYuv,
         dst: PlanarYuv,
     },
+    // --- Packed RGB tier (core 0.1.41) -------------------------------
+    /// 4-byte packed → 4-byte packed carrying the colour lanes only;
+    /// the destination's fourth lane is the constant `fill` (0 for a
+    /// padded layout, 255 for an alpha layout fed from a padded one).
+    Swizzle4Fill {
+        src: rgb::Rgba4,
+        dst: rgb::Rgba4,
+        fill: u8,
+    },
+    /// 3-byte packed → 4-byte packed with the fourth lane set to `fill`.
+    Promote3To4Fill {
+        src: rgb::Rgb3,
+        dst: rgb::Rgba4,
+        fill: u8,
+    },
+    /// Packed 16-bit words → 3-byte packed (replication widen).
+    P16ToPacked3 {
+        src: Packed16Layout,
+        dst: rgb::Rgb3,
+    },
+    /// Packed 16-bit words → 4-byte packed (replication widen; the
+    /// fourth lane is `fill`).
+    P16ToPacked4 {
+        src: Packed16Layout,
+        dst: rgb::Rgba4,
+        fill: u8,
+    },
+    /// 3-byte packed → packed 16-bit words; the quantiser honours
+    /// `ConvertOptions::dither` (truncation by default).
+    Packed3ToP16 {
+        src: rgb::Rgb3,
+        dst: Packed16Layout,
+    },
+    /// 4-byte packed → packed 16-bit words (alpha / padding ignored);
+    /// same quantiser as [`Self::Packed3ToP16`].
+    Packed4ToP16 {
+        src: rgb::Rgba4,
+        dst: Packed16Layout,
+    },
+    /// Packed 16-bit words → another 16-bit layout: exact unless green
+    /// narrows 6 → 5 bits, which quantises (dither honoured).
+    P16ToP16 {
+        src: Packed16Layout,
+        dst: Packed16Layout,
+    },
+    /// `Gray8` broadcast into a 4-byte layout at `dst`'s positions with
+    /// the fourth lane set to `fill`.
+    Gray8ToPacked4Pos {
+        dst: rgb::Rgba4,
+        fill: u8,
+    },
+    /// `Gray8` broadcast then quantised into packed 16-bit words.
+    Gray8ToP16 {
+        dst: Packed16Layout,
+    },
+    /// Packed 16-bit words → `Gray8`: replication widen, then the
+    /// full-range luminance projection of the packed RGB → `Gray8`
+    /// rows.
+    P16ToGray {
+        src: Packed16Layout,
+    },
+    /// `Pal8` → 4-byte layout: palette expansion (palette alpha
+    /// dropped) at `dst`'s positions, fourth lane `fill`.
+    Pal8ToPacked4 {
+        dst: rgb::Rgba4,
+        fill: u8,
+    },
+    /// `Pal8` → packed 16-bit words: palette expansion then the
+    /// quantiser (dither honoured).
+    Pal8ToP16 {
+        dst: Packed16Layout,
+    },
+    /// 4-byte padded layout → `Pal8`: colour lanes gathered as `Rgb24`,
+    /// then the palette quantiser (dither honoured).
+    Packed4ToPal8 {
+        src: rgb::Rgba4,
+    },
+    /// Packed 16-bit words → `Pal8`: replication widen, then the
+    /// palette quantiser.
+    P16ToPal8 {
+        src: Packed16Layout,
+    },
+    /// Computed tier: planar family member → padded 32-bit RGB: the
+    /// `Rgb24` decode, then the padding lane written as 0 at `dst`'s
+    /// byte positions.
+    PlanarFamilyToPacked4 {
+        src: PlanarYuv,
+        dst: rgb::Rgba4,
+    },
+    /// Computed tier: padded 32-bit RGB → planar family member: the
+    /// padding lane dropped into an `Rgb24` encode (alpha destinations
+    /// get opaque alpha, as from `Rgb24`).
+    Packed4ToPlanarFamily {
+        src: rgb::Rgba4,
+        dst: PlanarYuv,
+    },
     /// Computed tier: planar family member → packed `Rgb24` / `Rgba`.
     /// Deep planes are reduced to 8 bits (truncation, per the crate
     /// depth policy) before the proven 8-bit scalar/SIMD decode; alpha
@@ -2841,6 +3150,111 @@ impl ConvertOp {
             }
             Self::Packed422ToGray { is_yuyv } => do_packed422_to_gray(src, src_info, is_yuyv),
             Self::GrayToPacked422 { is_yuyv } => do_gray_to_packed422(src, src_info, is_yuyv),
+            Self::Swizzle4Fill {
+                src: sp,
+                dst: dp,
+                fill,
+            } => packed_rows(src, src_info, 4, 4, workers, |s, d, n| {
+                rgb::swizzle4_fill(s, sp, d, dp, n, fill)
+            }),
+            Self::Promote3To4Fill {
+                src: sp,
+                dst: dp,
+                fill,
+            } => packed_rows(src, src_info, 3, 4, workers, |s, d, n| {
+                rgb::rgb3_to_rgba4_fill(s, sp, d, dp, n, fill)
+            }),
+            Self::P16ToPacked3 { src: sl, dst: dp } => {
+                packed_rows(src, src_info, 2, 3, workers, |s, d, n| {
+                    packed16::to_packed3(s, sl, d, dp, n)
+                })
+            }
+            Self::P16ToPacked4 {
+                src: sl,
+                dst: dp,
+                fill,
+            } => packed_rows(src, src_info, 2, 4, workers, |s, d, n| {
+                packed16::to_packed4(s, sl, d, dp, fill, n)
+            }),
+            Self::Packed3ToP16 { src: sp, dst: dl } => packed_to_p16(
+                src,
+                src_info,
+                3,
+                [sp.r, sp.g, sp.b],
+                dl,
+                opts.dither,
+                workers,
+            ),
+            Self::Packed4ToP16 { src: sp, dst: dl } => packed_to_p16(
+                src,
+                src_info,
+                4,
+                [sp.r, sp.g, sp.b],
+                dl,
+                opts.dither,
+                workers,
+            ),
+            Self::P16ToP16 { src: sl, dst: dl } => {
+                p16_to_p16(src, src_info, sl, dl, opts.dither, workers)
+            }
+            Self::Gray8ToPacked4Pos { dst: dp, fill } => {
+                packed_rows(src, src_info, 1, 4, workers, |s, d, n| {
+                    for (g, px) in s[..n].iter().zip(d.chunks_exact_mut(4)) {
+                        px[dp.r] = *g;
+                        px[dp.g] = *g;
+                        px[dp.b] = *g;
+                        px[dp.a] = fill;
+                    }
+                })
+            }
+            Self::Gray8ToP16 { dst: dl } => {
+                let rgb = gray_to_packed3(src, src_info)?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                packed_to_p16(&rgb, rgb_info, 3, [0, 1, 2], dl, opts.dither, workers)
+            }
+            Self::P16ToGray { src: sl } => {
+                let rgb = packed_rows(src, src_info, 2, 3, workers, |s, d, n| {
+                    packed16::to_packed3(s, sl, d, rgb::RGB_POS, n)
+                })?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                do_rgb_to_gray(&rgb, rgb_info, matrix.with_range(false), false)
+            }
+            Self::Pal8ToPacked4 { dst: dp, fill } => {
+                let rgb = pal8_to_rgb(src, src_info, opts, false)?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                packed_rows(&rgb, rgb_info, 3, 4, workers, |s, d, n| {
+                    rgb::rgb3_to_rgba4_fill(s, rgb::RGB_POS, d, dp, n, fill)
+                })
+            }
+            Self::Pal8ToP16 { dst: dl } => {
+                let rgb = pal8_to_rgb(src, src_info, opts, false)?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                packed_to_p16(&rgb, rgb_info, 3, [0, 1, 2], dl, opts.dither, workers)
+            }
+            Self::Packed4ToPal8 { src: sp } => {
+                let rgb = demote4_to_3(src, src_info, sp, rgb::RGB_POS)?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                rgb_to_pal8(&rgb, rgb_info, opts, false)
+            }
+            Self::P16ToPal8 { src: sl } => {
+                let rgb = packed_rows(src, src_info, 2, 3, workers, |s, d, n| {
+                    packed16::to_packed3(s, sl, d, rgb::RGB_POS, n)
+                })?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                rgb_to_pal8(&rgb, rgb_info, opts, false)
+            }
+            Self::PlanarFamilyToPacked4 { src: s, dst: dp } => {
+                let rgb = planar_family_to_rgb(src, src_info, matrix, s, false, workers)?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                packed_rows(&rgb, rgb_info, 3, 4, workers, |s, d, n| {
+                    rgb::rgb3_to_rgba4_fill(s, rgb::RGB_POS, d, dp, n, 0)
+                })
+            }
+            Self::Packed4ToPlanarFamily { src: sp, dst: d } => {
+                let rgb = demote4_to_3(src, src_info, sp, rgb::RGB_POS)?;
+                let rgb_info = FrameInfo::new(PixelFormat::Rgb24, src_info.width, src_info.height);
+                rgb_to_planar_family(&rgb, rgb_info, matrix, d, false, workers)
+            }
             Self::PlanarFamily { src: s, dst: d } => planar_family(src, src_info, s, d),
             Self::PlanarFamilyToRgb { src: s, alpha } => {
                 planar_family_to_rgb(src, src_info, matrix, s, alpha, workers)
@@ -3064,6 +3478,135 @@ fn demote4_to_3(
         src,
         vec![VideoPlane {
             stride: w * 3,
+            data: out,
+        }],
+    ))
+}
+
+// -------------------------------------------------------------------------
+// Packed RGB tier (core 0.1.41): row-band driver and the dithered
+// quantisers that need the whole picture.
+
+/// Run a tight-row packed → packed kernel `f(src_rows, dst_rows,
+/// pixels)` over the source plane in row bands (scoped threads when
+/// `workers > 1`, see [`planar8::map_packed_banded`]). The plane is
+/// validated through [`tight_plane`] — a short or over-narrow plane is
+/// `Error::Invalid`, never a panic — and borrowed without a copy when
+/// its stride is tight.
+fn packed_rows<F>(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    src_bpp: usize,
+    dst_bpp: usize,
+    workers: usize,
+    f: F,
+) -> Result<VideoFrame>
+where
+    F: Fn(&[u8], &mut [u8], usize) + Sync,
+{
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let Some(plane) = src.planes.first() else {
+        return Err(Error::invalid("pixfmt: packed source needs a plane"));
+    };
+    let tight = tight_plane(plane, w * src_bpp, h)?;
+    let out = planar8::map_packed_banded(&tight, w * src_bpp, w * dst_bpp, h, workers, |s, d| {
+        f(s, d, d.len() / dst_bpp)
+    });
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * dst_bpp,
+            data: out,
+        }],
+    ))
+}
+
+/// Packed 8-bit RGB(A/X) → packed 16-bit words under `dither`: the
+/// truncating default runs in row bands; the ordered and
+/// error-diffusion quantisers walk the whole picture once (they need
+/// `(x, y)` and, for Floyd–Steinberg, the previous row's residuals).
+fn packed_to_p16(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    src_bpp: usize,
+    pos: [usize; 3],
+    l: Packed16Layout,
+    dither: Dither,
+    workers: usize,
+) -> Result<VideoFrame> {
+    if dither == Dither::None {
+        let p = rgb::Rgba4 {
+            r: pos[0],
+            g: pos[1],
+            b: pos[2],
+            a: 0,
+        };
+        return packed_rows(src, src_info, src_bpp, 2, workers, |s, d, n| {
+            if src_bpp == 3 {
+                packed16::from_packed3(
+                    s,
+                    rgb::Rgb3 {
+                        r: p.r,
+                        g: p.g,
+                        b: p.b,
+                    },
+                    d,
+                    l,
+                    n,
+                )
+            } else {
+                packed16::from_packed4(s, p, d, l, n)
+            }
+        });
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let Some(plane) = src.planes.first() else {
+        return Err(Error::invalid("pixfmt: packed source needs a plane"));
+    };
+    let tight = tight_plane(plane, w * src_bpp, h)?;
+    let mut out = vec![0u8; w * h * 2];
+    packed16::quantise_rows(
+        &tight, src_bpp, pos[0], pos[1], pos[2], w, h, l, &mut out, dither,
+    );
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
+            data: out,
+        }],
+    ))
+}
+
+/// Packed 16-bit words → another 16-bit layout. Exact (row bands)
+/// unless green narrows 6 → 5 bits under a dither, which walks the
+/// picture once through the dithered quantiser.
+fn p16_to_p16(
+    src: &VideoFrame,
+    src_info: FrameInfo,
+    sl: Packed16Layout,
+    dl: Packed16Layout,
+    dither: Dither,
+    workers: usize,
+) -> Result<VideoFrame> {
+    if dither == Dither::None || sl.g_bits <= dl.g_bits {
+        return packed_rows(src, src_info, 2, 2, workers, |s, d, n| {
+            packed16::relayout(s, sl, d, dl, n)
+        });
+    }
+    let w = src_info.width as usize;
+    let h = src_info.height as usize;
+    let Some(plane) = src.planes.first() else {
+        return Err(Error::invalid("pixfmt: packed source needs a plane"));
+    };
+    let tight = tight_plane(plane, w * 2, h)?;
+    let mut out = vec![0u8; w * h * 2];
+    packed16::relayout_rows(&tight, sl, &mut out, dl, w, h, dither);
+    Ok(make_frame(
+        src,
+        vec![VideoPlane {
+            stride: w * 2,
             data: out,
         }],
     ))

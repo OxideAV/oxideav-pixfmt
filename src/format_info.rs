@@ -10,7 +10,8 @@ use oxideav_core::PixelFormat;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FormatInfo {
     /// Component bit depth (before packing). 8 for Rgb24, 16 for Gray16Le,
-    /// 10 for Yuv420P10Le, …
+    /// 10 for Yuv420P10Le, … For the packed 16-bit RGB words it is the
+    /// widest component: 5 on the 5-5-5 layouts, 6 on 5-6-5.
     pub bit_depth: u8,
     /// Number of distinct planes — matches [`PixelFormat::plane_count`].
     pub planes: u8,
@@ -178,6 +179,16 @@ impl FormatInfo {
                 has_alpha: false,
                 is_palette: true,
             },
+            // Packed 16-bit RGB words (core 0.1.41): one little- or
+            // big-endian word per pixel holding 5-5-5 or 5-6-5
+            // components. `bit_depth` reports the widest component (the
+            // 5-5-5 top bit is padding, never a sample).
+            P::Rgb555Le | P::Rgb555Be | P::Bgr555Le | P::Bgr555Be => Self::packed(5, false),
+            P::Rgb565Le | P::Rgb565Be | P::Bgr565Le | P::Bgr565Be => Self::packed(6, false),
+            // Padded 32-bit RGB (core 0.1.41): the alpha twins' byte
+            // positions with the fourth byte as padding — `has_alpha`
+            // is false.
+            P::Rgbx | P::Bgrx | P::Xrgb | P::Xbgr => Self::packed(8, false),
             // The enum is `#[non_exhaustive]`; a future variant that
             // lands in oxideav-core without a matching arm here falls
             // back to a conservative "single packed 8-bit plane"

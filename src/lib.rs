@@ -240,6 +240,7 @@ pub mod dither;
 pub mod float;
 pub mod format_info;
 pub mod gray;
+pub mod packed16;
 pub mod pal8;
 pub mod palette;
 mod planar8;
