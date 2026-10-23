@@ -77,36 +77,38 @@ fn scalar_swizzle4(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 4]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_swizzle4(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 4]) {
-    use core::arch::x86_64::*;
-    // Build a 32-byte shuffle mask: within each 16-byte lane, replicate
-    // the 4-byte permutation across 4 pixels, offset by the pixel's base.
-    let mut mask_bytes = [0u8; 32];
-    for lane in 0..2 {
-        for pix in 0..4 {
-            let base = pix * 4;
-            for j in 0..4 {
-                mask_bytes[lane * 16 + base + j] = (base as u8) + perm[j];
+    unsafe {
+        use core::arch::x86_64::*;
+        // Build a 32-byte shuffle mask: within each 16-byte lane, replicate
+        // the 4-byte permutation across 4 pixels, offset by the pixel's base.
+        let mut mask_bytes = [0u8; 32];
+        for lane in 0..2 {
+            for pix in 0..4 {
+                let base = pix * 4;
+                for j in 0..4 {
+                    mask_bytes[lane * 16 + base + j] = (base as u8) + perm[j];
+                }
             }
         }
-    }
-    let mask = _mm256_loadu_si256(mask_bytes.as_ptr() as *const __m256i);
+        let mask = _mm256_loadu_si256(mask_bytes.as_ptr() as *const __m256i);
 
-    // 8 pixels per AVX2 iteration (32 bytes).
-    let chunks = pixels / 8;
-    let tail_start = chunks * 8;
-    for c in 0..chunks {
-        let off = c * 32;
-        let v = _mm256_loadu_si256(src.as_ptr().add(off) as *const __m256i);
-        let out = _mm256_shuffle_epi8(v, mask);
-        _mm256_storeu_si256(dst.as_mut_ptr().add(off) as *mut __m256i, out);
-    }
-    if tail_start < pixels {
-        scalar_swizzle4(
-            &src[tail_start * 4..],
-            &mut dst[tail_start * 4..],
-            pixels - tail_start,
-            perm,
-        );
+        // 8 pixels per AVX2 iteration (32 bytes).
+        let chunks = pixels / 8;
+        let tail_start = chunks * 8;
+        for c in 0..chunks {
+            let off = c * 32;
+            let v = _mm256_loadu_si256(src.as_ptr().add(off) as *const __m256i);
+            let out = _mm256_shuffle_epi8(v, mask);
+            _mm256_storeu_si256(dst.as_mut_ptr().add(off) as *mut __m256i, out);
+        }
+        if tail_start < pixels {
+            scalar_swizzle4(
+                &src[tail_start * 4..],
+                &mut dst[tail_start * 4..],
+                pixels - tail_start,
+                perm,
+            );
+        }
     }
 }
 
@@ -155,44 +157,46 @@ fn scalar_swizzle4_fill(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 4]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_swizzle4_fill(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 4], fill: u8) {
-    use core::arch::x86_64::*;
-    // Same 32-byte shuffle as `avx2_swizzle4`; the constant lane gets
-    // 0x80 (pshufb emits zero there) and is OR-ed with `fill`.
-    let mut mask_bytes = [0u8; 32];
-    let mut fill_or = [0u8; 32];
-    for lane in 0..2 {
-        for pix in 0..4 {
-            let base = pix * 4;
-            for (j, &p) in perm.iter().enumerate() {
-                let idx = lane * 16 + base + j;
-                if p == 0xFF {
-                    mask_bytes[idx] = 0x80;
-                    fill_or[idx] = fill;
-                } else {
-                    mask_bytes[idx] = (base as u8) + p;
+    unsafe {
+        use core::arch::x86_64::*;
+        // Same 32-byte shuffle as `avx2_swizzle4`; the constant lane gets
+        // 0x80 (pshufb emits zero there) and is OR-ed with `fill`.
+        let mut mask_bytes = [0u8; 32];
+        let mut fill_or = [0u8; 32];
+        for lane in 0..2 {
+            for pix in 0..4 {
+                let base = pix * 4;
+                for (j, &p) in perm.iter().enumerate() {
+                    let idx = lane * 16 + base + j;
+                    if p == 0xFF {
+                        mask_bytes[idx] = 0x80;
+                        fill_or[idx] = fill;
+                    } else {
+                        mask_bytes[idx] = (base as u8) + p;
+                    }
                 }
             }
         }
-    }
-    let mask = _mm256_loadu_si256(mask_bytes.as_ptr() as *const __m256i);
-    let fill_v = _mm256_loadu_si256(fill_or.as_ptr() as *const __m256i);
+        let mask = _mm256_loadu_si256(mask_bytes.as_ptr() as *const __m256i);
+        let fill_v = _mm256_loadu_si256(fill_or.as_ptr() as *const __m256i);
 
-    let chunks = pixels / 8;
-    let tail_start = chunks * 8;
-    for c in 0..chunks {
-        let off = c * 32;
-        let v = _mm256_loadu_si256(src.as_ptr().add(off) as *const __m256i);
-        let out = _mm256_or_si256(_mm256_shuffle_epi8(v, mask), fill_v);
-        _mm256_storeu_si256(dst.as_mut_ptr().add(off) as *mut __m256i, out);
-    }
-    if tail_start < pixels {
-        scalar_swizzle4_fill(
-            &src[tail_start * 4..],
-            &mut dst[tail_start * 4..],
-            pixels - tail_start,
-            perm,
-            fill,
-        );
+        let chunks = pixels / 8;
+        let tail_start = chunks * 8;
+        for c in 0..chunks {
+            let off = c * 32;
+            let v = _mm256_loadu_si256(src.as_ptr().add(off) as *const __m256i);
+            let out = _mm256_or_si256(_mm256_shuffle_epi8(v, mask), fill_v);
+            _mm256_storeu_si256(dst.as_mut_ptr().add(off) as *mut __m256i, out);
+        }
+        if tail_start < pixels {
+            scalar_swizzle4_fill(
+                &src[tail_start * 4..],
+                &mut dst[tail_start * 4..],
+                pixels - tail_start,
+                perm,
+                fill,
+            );
+        }
     }
 }
 
@@ -278,55 +282,57 @@ fn scalar_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4], fill: u8) {
-    use core::arch::x86_64::*;
-    // Process 4 pixels per __m128i iteration: read 12 bytes (3 pixels
-    // worth + 3 extra for the 4th), shuffle into a 16-byte register
-    // with the alpha lane filled from a zeroed lane, then OR with 0xFF
-    // at the alpha slot. We handle the 4-pixel block at a time from a
-    // 16-byte load (which safely reads 4 extra bytes past the 3rd pixel
-    // as long as we leave 4 pixels' tail for the scalar path).
-    //
-    // Mask entry j (within 16-byte output):
-    //   pixel = j / 4, slot = j % 4, base = pixel * 3.
-    //   if perm3[slot] == 0xFF: 0x80 (pshufb emits zero); we OR `fill` later.
-    //   else: base + perm3[slot].
-    let mut mask_bytes = [0u8; 16];
-    let mut alpha_or = [0u8; 16];
-    for pix in 0..4 {
-        let base = (pix * 3) as u8;
-        for (slot, &p) in perm3.iter().enumerate() {
-            let idx = pix * 4 + slot;
-            if p == 0xFF {
-                mask_bytes[idx] = 0x80;
-                alpha_or[idx] = fill;
-            } else {
-                mask_bytes[idx] = base + p;
+    unsafe {
+        use core::arch::x86_64::*;
+        // Process 4 pixels per __m128i iteration: read 12 bytes (3 pixels
+        // worth + 3 extra for the 4th), shuffle into a 16-byte register
+        // with the alpha lane filled from a zeroed lane, then OR with 0xFF
+        // at the alpha slot. We handle the 4-pixel block at a time from a
+        // 16-byte load (which safely reads 4 extra bytes past the 3rd pixel
+        // as long as we leave 4 pixels' tail for the scalar path).
+        //
+        // Mask entry j (within 16-byte output):
+        //   pixel = j / 4, slot = j % 4, base = pixel * 3.
+        //   if perm3[slot] == 0xFF: 0x80 (pshufb emits zero); we OR `fill` later.
+        //   else: base + perm3[slot].
+        let mut mask_bytes = [0u8; 16];
+        let mut alpha_or = [0u8; 16];
+        for pix in 0..4 {
+            let base = (pix * 3) as u8;
+            for (slot, &p) in perm3.iter().enumerate() {
+                let idx = pix * 4 + slot;
+                if p == 0xFF {
+                    mask_bytes[idx] = 0x80;
+                    alpha_or[idx] = fill;
+                } else {
+                    mask_bytes[idx] = base + p;
+                }
             }
         }
-    }
-    let mask = _mm_loadu_si128(mask_bytes.as_ptr() as *const __m128i);
-    let alpha = _mm_loadu_si128(alpha_or.as_ptr() as *const __m128i);
+        let mask = _mm_loadu_si128(mask_bytes.as_ptr() as *const __m128i);
+        let alpha = _mm_loadu_si128(alpha_or.as_ptr() as *const __m128i);
 
-    // Advance 12 src bytes → 16 dst bytes per iter. Leave a tail of at
-    // least 4 pixels for the scalar path so the 16-byte load doesn't
-    // read past the end of src.
-    let simd_blocks = if pixels >= 4 { (pixels - 4) / 4 } else { 0 };
-    for c in 0..simd_blocks {
-        let soff = c * 12;
-        let doff = c * 16;
-        let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
-        let shuffled = _mm_shuffle_epi8(v, mask);
-        let out = _mm_or_si128(shuffled, alpha);
-        _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
+        // Advance 12 src bytes → 16 dst bytes per iter. Leave a tail of at
+        // least 4 pixels for the scalar path so the 16-byte load doesn't
+        // read past the end of src.
+        let simd_blocks = if pixels >= 4 { (pixels - 4) / 4 } else { 0 };
+        for c in 0..simd_blocks {
+            let soff = c * 12;
+            let doff = c * 16;
+            let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
+            let shuffled = _mm_shuffle_epi8(v, mask);
+            let out = _mm_or_si128(shuffled, alpha);
+            _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
+        }
+        let tail_start = simd_blocks * 4;
+        scalar_rgb3_to_rgba4(
+            &src[tail_start * 3..],
+            &mut dst[tail_start * 4..],
+            pixels - tail_start,
+            perm3,
+            fill,
+        );
     }
-    let tail_start = simd_blocks * 4;
-    scalar_rgb3_to_rgba4(
-        &src[tail_start * 3..],
-        &mut dst[tail_start * 4..],
-        pixels - tail_start,
-        perm3,
-        fill,
-    );
 }
 
 // -------------------------------------------------------------------------
@@ -360,87 +366,91 @@ fn scalar_rgba4_to_rgb3(src: &[u8], dst: &mut [u8], pixels: usize, perm4: [u8; 3
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_rgba4_to_rgb3(src: &[u8], dst: &mut [u8], pixels: usize, perm4: [u8; 3]) {
-    use core::arch::x86_64::*;
-    // 4 pixels per iteration: read 16 bytes (exactly the pshufb source
-    // range), shuffle into 12 consecutive dst bytes. Per-iteration we
-    // store 16 bytes but advance dst by 12; the 4 trailing bytes get
-    // overwritten by the next iteration. The scalar tail covers the
-    // final 4 pixels so the last SIMD iteration's spill is guaranteed
-    // to be overwritten.
-    let mut mask_bytes = [0x80u8; 16];
-    for pix in 0..4 {
-        let sbase = (pix * 4) as u8;
-        let dbase = pix * 3;
-        for j in 0..3 {
-            mask_bytes[dbase + j] = sbase + perm4[j];
+    unsafe {
+        use core::arch::x86_64::*;
+        // 4 pixels per iteration: read 16 bytes (exactly the pshufb source
+        // range), shuffle into 12 consecutive dst bytes. Per-iteration we
+        // store 16 bytes but advance dst by 12; the 4 trailing bytes get
+        // overwritten by the next iteration. The scalar tail covers the
+        // final 4 pixels so the last SIMD iteration's spill is guaranteed
+        // to be overwritten.
+        let mut mask_bytes = [0x80u8; 16];
+        for pix in 0..4 {
+            let sbase = (pix * 4) as u8;
+            let dbase = pix * 3;
+            for j in 0..3 {
+                mask_bytes[dbase + j] = sbase + perm4[j];
+            }
         }
-    }
-    let mask = _mm_loadu_si128(mask_bytes.as_ptr() as *const __m128i);
+        let mask = _mm_loadu_si128(mask_bytes.as_ptr() as *const __m128i);
 
-    let simd_blocks = if pixels >= 4 { (pixels - 4) / 4 } else { 0 };
-    for c in 0..simd_blocks {
-        let soff = c * 16;
-        let doff = c * 12;
-        let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
-        let out = _mm_shuffle_epi8(v, mask);
-        _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
+        let simd_blocks = if pixels >= 4 { (pixels - 4) / 4 } else { 0 };
+        for c in 0..simd_blocks {
+            let soff = c * 16;
+            let doff = c * 12;
+            let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
+            let out = _mm_shuffle_epi8(v, mask);
+            _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
+        }
+        let tail_start = simd_blocks * 4;
+        scalar_rgba4_to_rgb3(
+            &src[tail_start * 4..],
+            &mut dst[tail_start * 3..],
+            pixels - tail_start,
+            perm4,
+        );
     }
-    let tail_start = simd_blocks * 4;
-    scalar_rgba4_to_rgb3(
-        &src[tail_start * 4..],
-        &mut dst[tail_start * 3..],
-        pixels - tail_start,
-        perm4,
-    );
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_swizzle3(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 3]) {
-    use core::arch::x86_64::*;
-    // Each __m128i lane holds 5 whole pixels (15 bytes) plus one dead
-    // byte at index 15. We build a 16-byte mask that picks the
-    // permuted bytes for those 5 pixels and fills byte 15 with 0x80
-    // (which makes `pshufb` emit a zero there — we overwrite it at the
-    // store or just ignore it because we advance the dst by 15 bytes
-    // each iteration).
-    let mut mask_bytes = [0x80u8; 16];
-    for pix in 0..5 {
-        let base = pix * 3;
-        for j in 0..3 {
-            mask_bytes[base + j] = (base as u8) + perm[j];
+    unsafe {
+        use core::arch::x86_64::*;
+        // Each __m128i lane holds 5 whole pixels (15 bytes) plus one dead
+        // byte at index 15. We build a 16-byte mask that picks the
+        // permuted bytes for those 5 pixels and fills byte 15 with 0x80
+        // (which makes `pshufb` emit a zero there — we overwrite it at the
+        // store or just ignore it because we advance the dst by 15 bytes
+        // each iteration).
+        let mut mask_bytes = [0x80u8; 16];
+        for pix in 0..5 {
+            let base = pix * 3;
+            for j in 0..3 {
+                mask_bytes[base + j] = (base as u8) + perm[j];
+            }
         }
-    }
-    let mask = _mm_loadu_si128(mask_bytes.as_ptr() as *const __m128i);
+        let mask = _mm_loadu_si128(mask_bytes.as_ptr() as *const __m128i);
 
-    // We process 5 pixels per iteration. To emit exactly 15 bytes
-    // without overwriting subsequent output with the zero at lane 15,
-    // we use a masked store via _mm_maskmoveu_si128 — but that's
-    // expensive. Simpler: write 16 bytes and rely on the next
-    // iteration to overwrite the dead byte (which becomes the 16th
-    // written byte of the previous iteration). Only the very last
-    // iteration needs care; we stop the SIMD loop one block short and
-    // let the scalar tail finish safely.
-    let avail = pixels;
-    let simd_blocks = if avail >= 5 { (avail - 5) / 5 } else { 0 };
-    // simd_blocks iterations process 5 pixels each. Remaining pixels go
-    // to the scalar path, which always includes at least the last
-    // 5-pixel block so the 16th-byte spill is guaranteed to be
-    // overwritten by the scalar store.
-    for c in 0..simd_blocks {
-        let soff = c * 15;
-        let doff = c * 15;
-        let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
-        let out = _mm_shuffle_epi8(v, mask);
-        _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
+        // We process 5 pixels per iteration. To emit exactly 15 bytes
+        // without overwriting subsequent output with the zero at lane 15,
+        // we use a masked store via _mm_maskmoveu_si128 — but that's
+        // expensive. Simpler: write 16 bytes and rely on the next
+        // iteration to overwrite the dead byte (which becomes the 16th
+        // written byte of the previous iteration). Only the very last
+        // iteration needs care; we stop the SIMD loop one block short and
+        // let the scalar tail finish safely.
+        let avail = pixels;
+        let simd_blocks = if avail >= 5 { (avail - 5) / 5 } else { 0 };
+        // simd_blocks iterations process 5 pixels each. Remaining pixels go
+        // to the scalar path, which always includes at least the last
+        // 5-pixel block so the 16th-byte spill is guaranteed to be
+        // overwritten by the scalar store.
+        for c in 0..simd_blocks {
+            let soff = c * 15;
+            let doff = c * 15;
+            let v = _mm_loadu_si128(src.as_ptr().add(soff) as *const __m128i);
+            let out = _mm_shuffle_epi8(v, mask);
+            _mm_storeu_si128(dst.as_mut_ptr().add(doff) as *mut __m128i, out);
+        }
+        let tail_start = simd_blocks * 5;
+        scalar_swizzle3(
+            &src[tail_start * 3..],
+            &mut dst[tail_start * 3..],
+            pixels - tail_start,
+            perm,
+        );
     }
-    let tail_start = simd_blocks * 5;
-    scalar_swizzle3(
-        &src[tail_start * 3..],
-        &mut dst[tail_start * 3..],
-        pixels - tail_start,
-        perm,
-    );
 }
 
 #[cfg(test)]
