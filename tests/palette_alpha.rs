@@ -5,7 +5,7 @@
 //! the record when its `Palette` carries non-opaque entries.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo, Palette};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, Palette, convert};
 
 fn pal8_frame(w: usize, h: usize, indices: Vec<u8>) -> VideoFrame {
     assert_eq!(indices.len(), w * h);
@@ -64,14 +64,28 @@ fn no_record_or_malformed_record_is_opaque() {
     let info = FrameInfo::new(PixelFormat::Pal8, w as u32, h as u32);
     let plain = pal8_frame(w, h, vec![0, 1, 2, 3]).with_palette(four_entry_palette());
     let rgba = convert(&plain, info, PixelFormat::Rgba, &ConvertOptions::default()).unwrap();
-    assert!(rgba.planes[0].data.chunks_exact(4).all(|p| p[3] == 255));
+    assert!(
+        rgba.planes[0]
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[3] == 255)
+    );
     // A record longer than the palette is malformed: core reads it as
     // absent, so every entry is opaque.
     let bad = pal8_frame(w, h, vec![0, 1, 2, 3])
         .with_palette(four_entry_palette())
         .with_palette_alpha(vec![0, 0, 0, 0, 0]);
     let rgba = convert(&bad, info, PixelFormat::Rgba, &ConvertOptions::default()).unwrap();
-    assert!(rgba.planes[0].data.chunks_exact(4).all(|p| p[3] == 255));
+    assert!(
+        rgba.planes[0]
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p[3] == 255)
+    );
     // An options-bundle palette (no side-channel) keeps its own alpha
     // column, as before.
     let opts = ConvertOptions {

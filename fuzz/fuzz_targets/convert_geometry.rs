@@ -49,7 +49,7 @@ use libfuzzer_sys::fuzz_target;
 
 use oxideav_core::{ColorRange, MatrixCoefficients, PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, convert_with, ConvertContext, ConvertOptions, FormatInfo, FrameInfo, Palette,
+    ConvertContext, ConvertOptions, FormatInfo, FrameInfo, Palette, convert, convert_with,
 };
 
 /// Every source format the geometry harness knows how to build a
@@ -155,11 +155,7 @@ fn pick_dim(b: u8) -> u32 {
 /// subsampling factors). Returns `None` for formats this harness builds
 /// with a bespoke layout (mono, packed-422, NV, palette).
 fn luma_bytes_per_sample(info: &FormatInfo) -> usize {
-    if info.bit_depth > 8 {
-        2
-    } else {
-        1
-    }
+    if info.bit_depth > 8 { 2 } else { 1 }
 }
 
 /// Build a tight plane of `rows` rows, each `row_bytes` wide, with

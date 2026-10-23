@@ -16,8 +16,8 @@
 
 use oxideav_core::{ExecutionContext, PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, convert_with, staged_pivot, supports_direct, ColorSpace, ConvertContext,
-    ConvertOptions, FrameInfo,
+    ColorSpace, ConvertContext, ConvertOptions, FrameInfo, convert, convert_with, staged_pivot,
+    supports_direct,
 };
 
 fn le16(values: &[u16]) -> Vec<u8> {
@@ -25,7 +25,9 @@ fn le16(values: &[u16]) -> Vec<u8> {
 }
 
 fn rd16(data: &[u8]) -> Vec<u16> {
-    data.chunks_exact(2)
+    data.as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

@@ -9,7 +9,7 @@
 
 use oxideav_core::{ExecutionContext, PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, convert_with, supports, ConvertContext, ConvertOptions, FormatInfo, FrameInfo, Palette,
+    ConvertContext, ConvertOptions, FormatInfo, FrameInfo, Palette, convert, convert_with, supports,
 };
 
 /// Every PixelFormat variant (kept in discriminant order).
@@ -118,7 +118,7 @@ fn build(fmt: PixelFormat, w: u32, h: u32, seed: &mut u32) -> VideoFrame {
                 *b = (*seed >> 24) as u8;
             }
             if let Some(mask) = deep_mask {
-                for c in data.chunks_exact_mut(2) {
+                for c in data.as_chunks_mut::<2>().0 {
                     let v = u16::from_le_bytes([c[0], c[1]]) & mask;
                     c.copy_from_slice(&v.to_le_bytes());
                 }
@@ -132,8 +132,8 @@ fn build(fmt: PixelFormat, w: u32, h: u32, seed: &mut u32) -> VideoFrame {
 /// Pairs whose geometry rule pins the width.
 fn width_pinned(f: PixelFormat, w: u32) -> bool {
     match f {
-        PixelFormat::Yuv411P => w % 4 != 0,
-        PixelFormat::Yuyv422 | PixelFormat::Uyvy422 => w % 2 != 0,
+        PixelFormat::Yuv411P => !w.is_multiple_of(4),
+        PixelFormat::Yuyv422 | PixelFormat::Uyvy422 => !w.is_multiple_of(2),
         _ => false,
     }
 }
@@ -181,8 +181,7 @@ fn every_supported_pair_converts_at_odd_sizes() {
                     let (_, ph) = dst_fmt.plane_dimensions(p, w, h).unwrap();
                     let pl = &out.planes[p];
                     assert!(
-                        pl.stride >= row
-                            && pl.data.len() >= pl.stride * (ph as usize - 1) + row,
+                        pl.stride >= row && pl.data.len() >= pl.stride * (ph as usize - 1) + row,
                         "{src_fmt:?} → {dst_fmt:?} at {w}x{h}: plane {p} is {} bytes / stride {} (need {row} x {ph})",
                         pl.data.len(),
                         pl.stride

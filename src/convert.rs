@@ -22,7 +22,7 @@ use crate::gray;
 use crate::packed16::{self, Packed16Layout};
 use crate::pal8;
 use crate::palette::Palette;
-use crate::planar8::{self, chroma_dims, tight_plane, Packed8, Planar8};
+use crate::planar8::{self, Packed8, Planar8, chroma_dims, tight_plane};
 use crate::rgb;
 use crate::yuv::{self, YuvMatrix};
 
@@ -230,7 +230,7 @@ fn matrix_weights(m: MatrixCoefficients) -> Result<Option<(f32, f32)>> {
                 "pixfmt: matrix coefficients {} ({}) are not implemented",
                 m.code_point(),
                 m.name().unwrap_or("reserved")
-            )))
+            )));
         }
     }))
 }
@@ -623,7 +623,7 @@ fn range_limited_to_full(plane: &mut [u8], bits: u32) {
     }
     let table = range_table(bits, true);
     let mask = ((1u32 << bits) - 1) as u16;
-    for word in plane.chunks_exact_mut(2) {
+    for word in plane.as_chunks_mut::<2>().0 {
         let v = u16::from_le_bytes([word[0], word[1]]) & mask;
         word.copy_from_slice(&table[v as usize].to_le_bytes());
     }
@@ -640,7 +640,7 @@ fn range_full_to_limited(plane: &mut [u8], bits: u32) {
     }
     let table = range_table(bits, false);
     let mask = ((1u32 << bits) - 1) as u16;
-    for word in plane.chunks_exact_mut(2) {
+    for word in plane.as_chunks_mut::<2>().0 {
         let v = u16::from_le_bytes([word[0], word[1]]) & mask;
         word.copy_from_slice(&table[v as usize].to_le_bytes());
     }
@@ -718,7 +718,7 @@ fn normalize_significant_bits(src: &VideoFrame, src_info: FrameInfo) -> Result<O
         if b < nominal {
             if wide_words {
                 let mask = (1u32 << b) - 1;
-                for word in data.chunks_exact_mut(2) {
+                for word in data.as_chunks_mut::<2>().0 {
                     let v = u16::from_le_bytes([word[0], word[1]]) as u32 & mask;
                     let out = widen_bits(v, b, nominal) as u16;
                     word.copy_from_slice(&out.to_le_bytes());
@@ -936,11 +936,7 @@ struct PlanarYuv {
 impl PlanarYuv {
     /// Bytes per sample word (1 for 8-bit storage, 2 for LE-16).
     const fn sample_bytes(&self) -> usize {
-        if self.bits > 8 {
-            2
-        } else {
-            1
-        }
+        if self.bits > 8 { 2 } else { 1 }
     }
 }
 
@@ -1065,11 +1061,7 @@ struct IntLayout {
 
 impl IntLayout {
     const fn sample_bytes(&self) -> usize {
-        if self.bits > 8 {
-            2
-        } else {
-            1
-        }
+        if self.bits > 8 { 2 } else { 1 }
     }
     const fn comps(&self) -> usize {
         match (self.shape, self.alpha) {
@@ -3223,7 +3215,7 @@ impl ConvertOp {
             }
             Self::Gray8ToPacked4Pos { dst: dp, fill } => {
                 packed_rows(src, src_info, 1, 4, workers, |s, d, n| {
-                    for (g, px) in s[..n].iter().zip(d.chunks_exact_mut(4)) {
+                    for (g, px) in s[..n].iter().zip(d.as_chunks_mut::<4>().0) {
                         px[dp.r] = *g;
                         px[dp.g] = *g;
                         px[dp.b] = *g;
@@ -3660,7 +3652,7 @@ fn gray_to_packed4(
 ) -> Result<VideoFrame> {
     packed_rows(src, src_info, 1, 4, workers, |s, d, n| {
         if alpha_first {
-            for (&g, px) in s[..n].iter().zip(d.chunks_exact_mut(4)) {
+            for (&g, px) in s[..n].iter().zip(d.as_chunks_mut::<4>().0) {
                 px[0] = 255;
                 px[1] = g;
                 px[2] = g;
@@ -4047,7 +4039,7 @@ fn do_packed422_to_gray(
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 {
+    if !w.is_multiple_of(2) {
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let in_plane = &src.planes[0];
@@ -4074,7 +4066,7 @@ fn do_gray_to_packed422(
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 {
+    if !w.is_multiple_of(2) {
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let in_plane = &src.planes[0];
@@ -4269,17 +4261,22 @@ fn luma_depth_range_banded(
         let n = d.len() / dsb;
         match (ssb, dsb) {
             (1, 2) => {
-                for (o, &v) in d.chunks_exact_mut(2).zip(s[..n].iter()) {
+                for (o, &v) in d.as_chunks_mut::<2>().0.iter_mut().zip(s[..n].iter()) {
                     o.copy_from_slice(&map(v as u32).to_le_bytes());
                 }
             }
             (2, 1) => {
-                for (o, i) in d.iter_mut().zip(s[..n * 2].chunks_exact(2)) {
+                for (o, i) in d.iter_mut().zip(s[..n * 2].as_chunks::<2>().0) {
                     *o = map(u16::from_le_bytes([i[0], i[1]]) as u32) as u8;
                 }
             }
             _ => {
-                for (o, i) in d.chunks_exact_mut(2).zip(s[..n * 2].chunks_exact(2)) {
+                for (o, i) in d
+                    .as_chunks_mut::<2>()
+                    .0
+                    .iter_mut()
+                    .zip(s[..n * 2].as_chunks::<2>().0)
+                {
                     let v = u16::from_le_bytes([i[0], i[1]]) as u32;
                     o.copy_from_slice(&map(v).to_le_bytes());
                 }
@@ -4326,7 +4323,7 @@ fn gbr_to_deep_gray(
         planar8::widen_row16(gb, &mut g16, src_bits);
         planar8::widen_row16(bb, &mut b16, src_bits);
         let shift = 16 - bits;
-        for (i, o) in d.chunks_exact_mut(2).enumerate() {
+        for (i, o) in d.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let y = yuv::rgb16_to_luma16_fp(r16[i], g16[i], b16[i], &p) >> shift;
             o.copy_from_slice(&y.to_le_bytes());
         }
@@ -4756,7 +4753,7 @@ fn do_rgb_to_yuv(
 /// trailing column). Every other siting rounds up per the odd-dimension
 /// rule on [`convert_with`].
 fn chroma_grid(w: usize, h: usize, wsub: usize, hsub: usize) -> Result<(usize, usize)> {
-    if wsub == 4 && w % 4 != 0 {
+    if wsub == 4 && !w.is_multiple_of(4) {
         return Err(Error::invalid(
             "pixfmt: 4:1:1 YUV requires width divisible by 4",
         ));
@@ -5041,7 +5038,7 @@ fn resample_chroma_pair(
         _ => {
             return Err(Error::unsupported(
                 "pixfmt: unregistered planar YUV chroma resample pair",
-            ))
+            ));
         }
     }
 
@@ -5231,7 +5228,7 @@ fn resample_chroma16_pair(
         _ => {
             return Err(Error::unsupported(
                 "pixfmt: unregistered 16-bit planar YUV chroma resample pair",
-            ))
+            ));
         }
     }
 
@@ -5298,7 +5295,7 @@ fn opaque_plane(count: usize, bits: u32) -> Vec<u8> {
         let full = ((1u32 << bits) - 1) as u16;
         let [lo, hi] = full.to_le_bytes();
         let mut out = vec![0u8; count * 2];
-        for word in out.chunks_exact_mut(2) {
+        for word in out.as_chunks_mut::<2>().0 {
             word[0] = lo;
             word[1] = hi;
         }
@@ -5315,7 +5312,7 @@ fn neutral_chroma_plane(count: usize, bits: u32) -> Vec<u8> {
         let mid = (1u32 << (bits - 1)) as u16;
         let [lo, hi] = mid.to_le_bytes();
         let mut out = vec![0u8; count * 2];
-        for word in out.chunks_exact_mut(2) {
+        for word in out.as_chunks_mut::<2>().0 {
             word[0] = lo;
             word[1] = hi;
         }
@@ -5991,7 +5988,7 @@ fn packed422_to_yuv422p(
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 {
+    if !w.is_multiple_of(2) {
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let cw = w / 2;
@@ -6034,7 +6031,7 @@ fn yuv422p_to_packed422(
     }
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 {
+    if !w.is_multiple_of(2) {
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let cw = w / 2;
@@ -6059,7 +6056,7 @@ fn yuv422p_to_packed422(
 fn packed422_swap(src: &VideoFrame, src_info: FrameInfo) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 {
+    if !w.is_multiple_of(2) {
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let in_plane = &src.planes[0];
@@ -6083,7 +6080,7 @@ fn packed422_to_rgb(
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 {
+    if !w.is_multiple_of(2) {
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let cw = w / 2;
@@ -6135,7 +6132,7 @@ fn rgb_to_packed422(
 ) -> Result<VideoFrame> {
     let w = src_info.width as usize;
     let h = src_info.height as usize;
-    if w % 2 != 0 {
+    if !w.is_multiple_of(2) {
         return Err(Error::invalid("pixfmt: packed 4:2:2 requires even width"));
     }
     let cw = w / 2;
@@ -6203,7 +6200,9 @@ fn pal8_to_rgb(
         let alpha = src.palette_alpha();
         Palette {
             colors: raw
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .enumerate()
                 .map(|(i, c)| {
                     let a = alpha.and_then(|a| a.get(i).copied()).unwrap_or(255);
@@ -6212,14 +6211,15 @@ fn pal8_to_rgb(
                 .collect(),
         }
     });
-    let palette =
-        match (&side_channel, &opts.palette) {
-            (Some(p), _) => p,
-            (None, Some(p)) => p,
-            (None, None) => return Err(Error::invalid(
+    let palette = match (&side_channel, &opts.palette) {
+        (Some(p), _) => p,
+        (None, Some(p)) => p,
+        (None, None) => {
+            return Err(Error::invalid(
                 "pixfmt: Pal8 → RGB requires a frame-attached palette or ConvertOptions.palette",
-            )),
-        };
+            ));
+        }
+    };
     let w = src_info.width as usize;
     let h = src_info.height as usize;
     let in_plane = &src.planes[0];

@@ -277,11 +277,11 @@ fn prop_over_buffer_premul_matches_per_pixel() {
         let stride = (w * 4) as usize;
         let mut src = vec![0u8; stride * h as usize];
         let mut dst = vec![0u8; stride * h as usize];
-        for px in src.chunks_exact_mut(4) {
+        for px in src.as_chunks_mut::<4>().0 {
             let p = rng.rgba_premul();
             px.copy_from_slice(&p);
         }
-        for px in dst.chunks_exact_mut(4) {
+        for px in dst.as_chunks_mut::<4>().0 {
             let p = rng.rgba_premul();
             px.copy_from_slice(&p);
         }

@@ -13,7 +13,7 @@ use oxideav_core::{
 };
 use oxideav_pixfmt::yuv::{self, YuvMatrix};
 use oxideav_pixfmt::{
-    convert, convert_with, ColorSpace, ConvertContext, ConvertOptions, FrameInfo,
+    ColorSpace, ConvertContext, ConvertOptions, FrameInfo, convert, convert_with,
 };
 
 fn ramp(n: usize, mul: usize, add: usize) -> Vec<u8> {
@@ -169,7 +169,7 @@ fn full_range_deep_420_reaches_the_deep_matrix() {
     // Unsignalled: 1023 is above limited-range white → clips to 65535
     // anyway; use a mid-grey to see the range matter.
     let mut grey = f.clone();
-    for p in grey.planes[0].data.chunks_exact_mut(2) {
+    for p in grey.planes[0].data.as_chunks_mut::<2>().0 {
         p.copy_from_slice(&word(512));
     }
     let limited = convert(&grey, info, PixelFormat::Rgb48Le, &o).unwrap();
@@ -191,7 +191,7 @@ fn full_range_deep_420_reaches_the_deep_matrix() {
     // codes on G, within 0.1 % of full scale.
     let white = f.with_color_signal(ColorSignal::unspecified().with_range(ColorRange::Full));
     let out = convert(&white, info, PixelFormat::Rgba64Le, &o).unwrap();
-    for px in out.planes[0].data.chunks_exact(8) {
+    for px in out.planes[0].data.as_chunks::<8>().0 {
         for c in 0..3 {
             let v = u16::from_le_bytes([px[c * 2], px[c * 2 + 1]]);
             assert!(v >= 65535 - 64, "channel {c} = {v}");
@@ -333,13 +333,15 @@ fn unimplemented_matrices_reject_cleanly() {
             "{code:?}"
         );
         // A carriage move ignores the matrix.
-        assert!(convert(
-            &tagged,
-            info,
-            PixelFormat::Yuv444P,
-            &ConvertOptions::default()
-        )
-        .is_ok());
+        assert!(
+            convert(
+                &tagged,
+                info,
+                PixelFormat::Yuv444P,
+                &ConvertOptions::default()
+            )
+            .is_ok()
+        );
     }
 }
 

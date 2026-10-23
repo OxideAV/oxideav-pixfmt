@@ -27,7 +27,7 @@
 use std::process::Command;
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ColorSpace, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ColorSpace, ConvertOptions, FrameInfo, convert};
 
 const W: usize = 64;
 const H: usize = 32;
@@ -348,7 +348,9 @@ fn gray16_to_grayf32_normalisation_matches_validator() {
         return;
     }
     let as_f32 = |buf: &[u8]| -> Vec<f32> {
-        buf.chunks_exact(4)
+        buf.as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     };
@@ -895,7 +897,7 @@ fn packed16_words_match_validator_layouts() {
             ));
         }
         let mut raw = vec![0u8; W * H * 2];
-        for (px, &word) in raw.chunks_exact_mut(2).zip(&words) {
+        for (px, &word) in raw.as_chunks_mut::<2>().0.iter_mut().zip(&words) {
             layout.write_word(px, word);
         }
         let ours = convert(
@@ -952,8 +954,10 @@ fn padded_layouts_match_validator_byte_positions() {
         assert_eq!(theirs.len(), W * H * 4, "{name}: validator output size");
         for (i, (a, b)) in ours.planes[0]
             .data
-            .chunks_exact(4)
-            .zip(theirs.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(theirs.as_chunks::<4>().0)
             .enumerate()
         {
             assert_eq!(a[pad], 0, "{name}: pixel {i} padding byte");

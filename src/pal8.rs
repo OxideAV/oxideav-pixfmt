@@ -7,7 +7,7 @@
 //! optional Floyd-Steinberg or Bayer dithering.
 
 use crate::convert::Dither;
-use crate::dither::{bayer8x8_offset, FloydSteinbergError};
+use crate::dither::{FloydSteinbergError, bayer8x8_offset};
 use crate::palette::Palette;
 
 /// Decode a Pal8 row into Rgb24. `indices` is one scanline of palette

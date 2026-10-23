@@ -604,7 +604,10 @@ pub fn rgb24_to_yuv420(
 #[inline]
 fn pair_average_row(src: &[u8], dst: &mut [u8], w: usize) {
     let full = w / 2;
-    for (d, pair) in dst[..full].iter_mut().zip(src[..full * 2].chunks_exact(2)) {
+    for (d, pair) in dst[..full]
+        .iter_mut()
+        .zip(src[..full * 2].as_chunks::<2>().0)
+    {
         *d = ((pair[0] as u16 + pair[1] as u16).div_ceil(2)) as u8;
     }
     if w % 2 == 1 {
@@ -1436,7 +1439,7 @@ pub fn yuyv422_to_yuv422p(
     w: usize,
     h: usize,
 ) {
-    debug_assert!(w % 2 == 0, "YUYV requires even width");
+    debug_assert!(w.is_multiple_of(2), "YUYV requires even width");
     let cw = w / 2;
     debug_assert!(src.len() >= w * h * 2);
     debug_assert!(yp.len() >= w * h);
@@ -1468,7 +1471,7 @@ pub fn uyvy422_to_yuv422p(
     w: usize,
     h: usize,
 ) {
-    debug_assert!(w % 2 == 0, "UYVY requires even width");
+    debug_assert!(w.is_multiple_of(2), "UYVY requires even width");
     let cw = w / 2;
     debug_assert!(src.len() >= w * h * 2);
     debug_assert!(yp.len() >= w * h);
@@ -1492,7 +1495,7 @@ pub fn uyvy422_to_yuv422p(
 /// Merge planar Yuv422P (`yp` full-res; `up`, `vp` each `w/2 × h`)
 /// into a packed YUYV byte stream `dst` of length `w * h * 2`.
 pub fn yuv422p_to_yuyv422(yp: &[u8], up: &[u8], vp: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    debug_assert!(w % 2 == 0, "YUYV requires even width");
+    debug_assert!(w.is_multiple_of(2), "YUYV requires even width");
     let cw = w / 2;
     debug_assert!(yp.len() >= w * h);
     debug_assert!(up.len() >= cw * h);
@@ -1515,7 +1518,7 @@ pub fn yuv422p_to_yuyv422(yp: &[u8], up: &[u8], vp: &[u8], dst: &mut [u8], w: us
 /// Merge planar Yuv422P into a packed UYVY byte stream. Mirror of
 /// [`yuv422p_to_yuyv422`] with luma and chroma byte positions swapped.
 pub fn yuv422p_to_uyvy422(yp: &[u8], up: &[u8], vp: &[u8], dst: &mut [u8], w: usize, h: usize) {
-    debug_assert!(w % 2 == 0, "UYVY requires even width");
+    debug_assert!(w.is_multiple_of(2), "UYVY requires even width");
     let cw = w / 2;
     debug_assert!(yp.len() >= w * h);
     debug_assert!(up.len() >= cw * h);
@@ -1543,7 +1546,7 @@ pub fn yuyv_uyvy_swap(buf: &mut [u8]) {
     //   index 0 ↔ index 1  (Y0 ↔ U)
     //   index 2 ↔ index 3  (Y1 ↔ V)
     debug_assert!(
-        buf.len() % 4 == 0,
+        buf.len().is_multiple_of(4),
         "packed 4:2:2 buffer must be a multiple of 4 bytes"
     );
     let mut i = 0;
@@ -1637,7 +1640,7 @@ pub fn depth_down_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: u32
     let mask: u32 = (1u32 << bits) - 1;
     for (d, w) in dst[..count]
         .iter_mut()
-        .zip(src[..count * 2].chunks_exact(2))
+        .zip(src[..count * 2].as_chunks::<2>().0)
     {
         let v = u16::from_le_bytes([w[0], w[1]]) as u32 & mask;
         *d = (v >> shift) as u8;
@@ -1672,7 +1675,9 @@ pub fn depth_up_8_to_le16_plane(src: &[u8], dst: &mut [u8], count: usize, bits: 
 pub fn rgb24_to_gray8(src: &[u8], dst: &mut [u8], pixels: usize, matrix: YuvMatrix) {
     let p = matrix.encode_params();
     for (px, d) in src[..pixels * 3]
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .zip(dst[..pixels].iter_mut())
     {
         let r = px[0] as i32;
@@ -1703,8 +1708,8 @@ pub fn depth_rescale_le16_plane(
         "depth_rescale: bits out of range"
     );
     let mask: u32 = ((1u64 << src_bits) - 1) as u32;
-    let src_pairs = src[..count * 2].chunks_exact(2);
-    let dst_pairs = dst[..count * 2].chunks_exact_mut(2);
+    let src_pairs = src[..count * 2].as_chunks::<2>().0.iter();
+    let dst_pairs = dst[..count * 2].as_chunks_mut::<2>().0.iter_mut();
     // Hoist the direction branch out of the per-sample loop so each
     // specialised body is a straight-line shift chain the compiler can
     // vectorise.

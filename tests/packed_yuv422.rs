@@ -10,7 +10,7 @@
 //!    Yuv422P path, since the chroma is the same.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert};
 
 fn make_frame_single(
     format: PixelFormat,

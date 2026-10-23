@@ -21,7 +21,7 @@
 use oxideav_core::{ColorRange, ExecutionContext, PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::yuv::{self, YuvMatrix};
 use oxideav_pixfmt::{
-    convert, convert_with, ColorSpace, ConvertContext, ConvertOptions, FrameInfo,
+    ColorSpace, ConvertContext, ConvertOptions, FrameInfo, convert, convert_with,
 };
 
 struct Rng(u64);
@@ -293,7 +293,7 @@ fn nv12_and_nv21_match_the_oracle_at_odd_geometry() {
                 planes: vec![y.clone(), uv.clone()],
             };
             let (mut u, mut v) = (Vec::new(), Vec::new());
-            for pair in uv.data.chunks_exact(2) {
+            for pair in uv.data.as_chunks::<2>().0 {
                 let (first, second) = (pair[0], pair[1]);
                 if nv12 {
                     u.push(first);
@@ -345,7 +345,9 @@ fn deep_420_to_packed_matches_narrow_then_oracle() {
             }
             let narrow = |p: &VideoPlane| -> Vec<u8> {
                 p.data
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|b| (u16::from_le_bytes([b[0], b[1]]) >> (bits - 8)) as u8)
                     .collect()
             };
@@ -597,8 +599,10 @@ fn family_to_deep_packed_matches_the_staged_route() {
                     rgb48.clone()
                 } else {
                     rgb48
-                        .chunks_exact(6)
-                        .zip(mid.planes[3].data.chunks_exact(2))
+                        .as_chunks::<6>()
+                        .0
+                        .iter()
+                        .zip(mid.planes[3].data.as_chunks::<2>().0)
                         .flat_map(|(c, a)| c.iter().chain(a.iter()).copied().collect::<Vec<u8>>())
                         .collect()
                 };

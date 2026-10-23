@@ -4,7 +4,7 @@
 //! measures the tight conversion call. No allocation inside the measured
 //! region — the destination buffer is reused across iterations.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oxideav_pixfmt::yuv::{self, YuvMatrix};
 
 fn synth_rgb24(w: usize, h: usize) -> Vec<u8> {

@@ -21,7 +21,7 @@
 //! and stayed at zero.)
 
 use oxideav_core::PixelFormat;
-use oxideav_pixfmt::{staged_pivot, supports, supports_direct, FormatInfo};
+use oxideav_pixfmt::{FormatInfo, staged_pivot, supports, supports_direct};
 
 /// Every PixelFormat variant (kept in discriminant order).
 const ALL_FORMATS: &[PixelFormat] = &[

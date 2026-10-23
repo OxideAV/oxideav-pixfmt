@@ -63,7 +63,7 @@ fn blit_alpha_mask_8x8_white_on_16x16_black_yields_white_square() {
     let dst_h = 16u32;
     let stride = (dst_w * 4) as usize;
     let mut dst = vec![0u8; stride * dst_h as usize];
-    for px in dst.chunks_exact_mut(4) {
+    for px in dst.as_chunks_mut::<4>().0 {
         px[3] = 255;
     }
     let mask = vec![255u8; 64];
@@ -131,17 +131,17 @@ fn over_buffer_preserves_dimensions_and_blends_uniformly() {
     let stride = (w * 4) as usize;
     let mut dst = vec![0u8; stride * h as usize];
     let mut src = vec![0u8; stride * h as usize];
-    for px in dst.chunks_exact_mut(4) {
+    for px in dst.as_chunks_mut::<4>().0 {
         px[2] = 255;
         px[3] = 255;
     }
-    for px in src.chunks_exact_mut(4) {
+    for px in src.as_chunks_mut::<4>().0 {
         px[0] = 128;
         px[3] = 128;
     }
     over_buffer(&mut dst, &src, w, h, stride, true);
     let first = [dst[0], dst[1], dst[2], dst[3]];
-    for px in dst.chunks_exact(4) {
+    for px in dst.as_chunks::<4>().0 {
         assert_eq!([px[0], px[1], px[2], px[3]], first);
     }
 }

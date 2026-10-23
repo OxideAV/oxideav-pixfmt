@@ -9,8 +9,8 @@
 use oxideav_core::{ExecutionContext, PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::packed16::{self, Packed16Layout};
 use oxideav_pixfmt::{
-    convert, convert_with, staged_pivot, supports_direct, ConvertContext, ConvertOptions, Dither,
-    FormatInfo, FrameInfo, Palette,
+    ConvertContext, ConvertOptions, Dither, FormatInfo, FrameInfo, Palette, convert, convert_with,
+    staged_pivot, supports_direct,
 };
 
 const WORDS: [PixelFormat; 8] = [
@@ -103,7 +103,7 @@ fn all_words(l: Packed16Layout) -> (Vec<u8>, u32, u32, Vec<u16>) {
         })
         .collect();
     let mut data = vec![0u8; words.len() * 2];
-    for (px, &word) in data.chunks_exact_mut(2).zip(&words) {
+    for (px, &word) in data.as_chunks_mut::<2>().0.iter_mut().zip(&words) {
         l.write_word(px, word);
     }
     (data, w as u32, h as u32, words)
@@ -116,11 +116,7 @@ fn layout(f: PixelFormat) -> Packed16Layout {
 /// The 5-5-5 top bit is padding: a word read back after any round
 /// trip has it cleared.
 fn canonical(l: Packed16Layout, word: u16) -> u16 {
-    if l.g_bits == 5 {
-        word & 0x7FFF
-    } else {
-        word
-    }
+    if l.g_bits == 5 { word & 0x7FFF } else { word }
 }
 
 #[test]
@@ -250,11 +246,18 @@ fn every_word_round_trips_through_rgb24() {
         let src = tight(data, w as usize * 2);
         let rgb = conv(&src, f, PixelFormat::Rgb24, w, h);
         let back = conv(&rgb, PixelFormat::Rgb24, f, w, h);
-        for (i, (px, &word)) in back.planes[0].data.chunks_exact(2).zip(&words).enumerate() {
+        for (i, (px, &word)) in back.planes[0]
+            .data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(&words)
+            .enumerate()
+        {
             assert_eq!(l.read_word(px), canonical(l, word), "{f:?} word {i}");
         }
         // The expansion is the replication rule, component by component.
-        for (px, &word) in rgb.planes[0].data.chunks_exact(3).zip(&words) {
+        for (px, &word) in rgb.planes[0].data.as_chunks::<3>().0.iter().zip(&words) {
             let (r, g, b) = l.split(word);
             let g8 = if l.g_bits == 6 {
                 packed16::expand6(g)
@@ -262,7 +265,7 @@ fn every_word_round_trips_through_rgb24() {
                 packed16::expand5(g)
             };
             assert_eq!(
-                px,
+                *px,
                 [packed16::expand5(r), g8, packed16::expand5(b)],
                 "{f:?}"
             );
@@ -289,8 +292,10 @@ fn quantise_then_widen_is_a_fixed_point() {
         let l = layout(f);
         for (px, s) in word1.planes[0]
             .data
-            .chunks_exact(2)
-            .zip(rgb.planes[0].data.chunks_exact(3))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(rgb.planes[0].data.as_chunks::<3>().0)
         {
             assert_eq!(l.read_word(px), l.pack(s[0], s[1], s[2]), "{f:?}");
         }
@@ -321,8 +326,10 @@ fn relayout_direct_equals_staging_through_rgb24() {
         let swapped = conv(&src, sf, swap_order(sf), w, h);
         for (d, s) in swapped.planes[0]
             .data
-            .chunks_exact(2)
-            .zip(src.planes[0].data.chunks_exact(2))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(src.planes[0].data.as_chunks::<2>().0)
         {
             let expect = canonical(sl, sl.read_word(s));
             assert_eq!(layout(swap_order(sf)).read_word(d), expect, "{sf:?}");
@@ -371,8 +378,10 @@ fn four_byte_orders_carry_colour_and_a_constant_fourth_lane() {
             let fill = if f4.has_alpha() { 255 } else { 0 };
             for (px, s) in out.planes[0]
                 .data
-                .chunks_exact(4)
-                .zip(rgb.planes[0].data.chunks_exact(3))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgb.planes[0].data.as_chunks::<3>().0)
             {
                 assert_eq!(
                     [px[r], px[g], px[b], px[a]],
@@ -382,7 +391,7 @@ fn four_byte_orders_carry_colour_and_a_constant_fourth_lane() {
             }
             // The way back ignores the fourth lane entirely.
             let mut junk = out.clone();
-            for px in junk.planes[0].data.chunks_exact_mut(4) {
+            for px in junk.planes[0].data.as_chunks_mut::<4>().0 {
                 px[a] = rng(&mut seed);
             }
             let back = conv(&junk, f4, wf, w, h);
@@ -421,7 +430,13 @@ fn gray8_and_pal8_hops() {
         let l = layout(wf);
         // Gray8 → word: pack(g, g, g).
         let out = conv(&gray, PixelFormat::Gray8, wf, w, h);
-        for (px, &g) in out.planes[0].data.chunks_exact(2).zip(&gray.planes[0].data) {
+        for (px, &g) in out.planes[0]
+            .data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(&gray.planes[0].data)
+        {
             assert_eq!(l.read_word(px), l.pack(g, g, g), "Gray8 → {wf:?}");
         }
         // Word → Gray8: the Rgb24 route's luminance projection.
@@ -436,7 +451,13 @@ fn gray8_and_pal8_hops() {
         assert_eq!(direct.planes[0].data, via.planes[0].data, "{wf:?} → Gray8");
         // Pal8 → word: each index's palette colour packed (alpha dropped).
         let out = conv_opts(&pal, PixelFormat::Pal8, wf, w, h, &opts);
-        for (px, &i) in out.planes[0].data.chunks_exact(2).zip(&pal.planes[0].data) {
+        for (px, &i) in out.planes[0]
+            .data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(&pal.planes[0].data)
+        {
             let c = colors[i as usize];
             assert_eq!(l.read_word(px), l.pack(c[0], c[1], c[2]), "Pal8 → {wf:?}");
         }
@@ -517,7 +538,7 @@ fn ordered_dither_on_a_565_to_555_relayout_touches_green_only() {
     // i.e. m ≥ 24; red and blue are copied as they are.
     let word = (12u16 << 11) | (25 << 5) | 13;
     let mut data = vec![0u8; 8 * 8 * 2];
-    for px in data.chunks_exact_mut(2) {
+    for px in data.as_chunks_mut::<2>().0 {
         px.copy_from_slice(&word.to_le_bytes());
     }
     let src = tight(data, 16);
@@ -615,7 +636,9 @@ fn floyd_steinberg_to_565_is_pinned() {
     let out = conv_opts(&row, PixelFormat::Rgb24, PixelFormat::Rgb565Le, 4, 1, &opts);
     let words: Vec<u16> = out.planes[0]
         .data
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|px| u16::from_le_bytes([px[0], px[1]]))
         .collect();
     assert_eq!(words, [0x8410, 0x7C0F, 0x8410, 0x7C0F]);
@@ -641,7 +664,14 @@ fn floyd_steinberg_to_565_is_pinned() {
             &opts,
         );
         let expect = reference_floyd_steinberg(&rgb, 3, [0, 1, 2], w, h, bits);
-        for (i, (px, q)) in out.planes[0].data.chunks_exact(2).zip(&expect).enumerate() {
+        for (i, (px, q)) in out.planes[0]
+            .data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(&expect)
+            .enumerate()
+        {
             assert_eq!(
                 l.split(l.read_word(px)),
                 (q[0], q[1], q[2]),
@@ -657,7 +687,14 @@ fn floyd_steinberg_to_565_is_pinned() {
             &opts,
         );
         let expect = reference_floyd_steinberg(&bgra, 4, [2, 1, 0], w, h, bits);
-        for (i, (px, q)) in out.planes[0].data.chunks_exact(2).zip(&expect).enumerate() {
+        for (i, (px, q)) in out.planes[0]
+            .data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(&expect)
+            .enumerate()
+        {
             assert_eq!(
                 l.split(l.read_word(px)),
                 (q[0], q[1], q[2]),
@@ -686,14 +723,23 @@ fn floyd_steinberg_to_565_is_pinned() {
         &opts,
     );
     let widened: Vec<u8> = src565
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .flat_map(|px| {
             let (r, g, b) = packed16::RGB565_LE.split(u16::from_le_bytes([px[0], px[1]]));
             [r, packed16::expand6(g), b]
         })
         .collect();
     let expect = reference_floyd_steinberg(&widened, 3, [0, 1, 2], w, h, [8, 5, 8]);
-    for (i, (px, q)) in out.planes[0].data.chunks_exact(2).zip(&expect).enumerate() {
+    for (i, (px, q)) in out.planes[0]
+        .data
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(&expect)
+        .enumerate()
+    {
         assert_eq!(
             packed16::RGB555_LE.split(u16::from_le_bytes([px[0], px[1]])),
             (q[0], q[1], q[2]),

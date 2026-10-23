@@ -232,8 +232,10 @@ fn rgb_row_to_rgba_scalar(rgb: &[u8], alpha: Option<&[u8]>, dst: &mut [u8], w: u
         Some(a) => {
             let a = &a[..w];
             for ((d, s), &av) in dst
-                .chunks_exact_mut(4)
-                .zip(rgb.chunks_exact(3))
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(rgb.as_chunks::<3>().0)
                 .zip(a.iter())
             {
                 d[0] = s[0];
@@ -243,7 +245,12 @@ fn rgb_row_to_rgba_scalar(rgb: &[u8], alpha: Option<&[u8]>, dst: &mut [u8], w: u
             }
         }
         None => {
-            for (d, s) in dst.chunks_exact_mut(4).zip(rgb.chunks_exact(3)) {
+            for (d, s) in dst
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(rgb.as_chunks::<3>().0)
+            {
                 d[0] = s[0];
                 d[1] = s[1];
                 d[2] = s[2];
@@ -256,29 +263,31 @@ fn rgb_row_to_rgba_scalar(rgb: &[u8], alpha: Option<&[u8]>, dst: &mut [u8], w: u
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn rgb_row_to_rgba_neon(rgb: &[u8], alpha: Option<&[u8]>, dst: &mut [u8], w: usize) {
-    use core::arch::aarch64::*;
-    let rgb = &rgb[..w * 3];
-    let dst = &mut dst[..w * 4];
-    let full = w / 16;
-    let opaque = vdupq_n_u8(255);
-    for i in 0..full {
-        let s = rgb.as_ptr().add(i * 48);
-        let d = dst.as_mut_ptr().add(i * 64);
-        let px = vld3q_u8(s);
-        let a = match alpha {
-            Some(a) => vld1q_u8(a.as_ptr().add(i * 16)),
-            None => opaque,
-        };
-        vst4q_u8(d, uint8x16x4_t(px.0, px.1, px.2, a));
-    }
-    let done = full * 16;
-    if done < w {
-        rgb_row_to_rgba_scalar(
-            &rgb[done * 3..],
-            alpha.map(|a| &a[done..]),
-            &mut dst[done * 4..],
-            w - done,
-        );
+    unsafe {
+        use core::arch::aarch64::*;
+        let rgb = &rgb[..w * 3];
+        let dst = &mut dst[..w * 4];
+        let full = w / 16;
+        let opaque = vdupq_n_u8(255);
+        for i in 0..full {
+            let s = rgb.as_ptr().add(i * 48);
+            let d = dst.as_mut_ptr().add(i * 64);
+            let px = vld3q_u8(s);
+            let a = match alpha {
+                Some(a) => vld1q_u8(a.as_ptr().add(i * 16)),
+                None => opaque,
+            };
+            vst4q_u8(d, uint8x16x4_t(px.0, px.1, px.2, a));
+        }
+        let done = full * 16;
+        if done < w {
+            rgb_row_to_rgba_scalar(
+                &rgb[done * 3..],
+                alpha.map(|a| &a[done..]),
+                &mut dst[done * 4..],
+                w - done,
+            );
+        }
     }
 }
 
@@ -306,8 +315,10 @@ fn rgba_row_split_scalar(src: &[u8], rgb: &mut [u8], alpha: Option<&mut [u8]>, w
         Some(a) => {
             let a = &mut a[..w];
             for ((s, d), av) in src
-                .chunks_exact(4)
-                .zip(rgb.chunks_exact_mut(3))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgb.as_chunks_mut::<3>().0)
                 .zip(a.iter_mut())
             {
                 d[0] = s[0];
@@ -317,7 +328,12 @@ fn rgba_row_split_scalar(src: &[u8], rgb: &mut [u8], alpha: Option<&mut [u8]>, w
             }
         }
         None => {
-            for (s, d) in src.chunks_exact(4).zip(rgb.chunks_exact_mut(3)) {
+            for (s, d) in src
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(rgb.as_chunks_mut::<3>().0)
+            {
                 d[0] = s[0];
                 d[1] = s[1];
                 d[2] = s[2];
@@ -329,24 +345,26 @@ fn rgba_row_split_scalar(src: &[u8], rgb: &mut [u8], alpha: Option<&mut [u8]>, w
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 unsafe fn rgba_row_split_neon(src: &[u8], rgb: &mut [u8], alpha: Option<&mut [u8]>, w: usize) {
-    use core::arch::aarch64::*;
-    let full = w / 16;
-    let mut alpha = alpha;
-    for i in 0..full {
-        let px = vld4q_u8(src.as_ptr().add(i * 64));
-        vst3q_u8(rgb.as_mut_ptr().add(i * 48), uint8x16x3_t(px.0, px.1, px.2));
-        if let Some(a) = alpha.as_deref_mut() {
-            vst1q_u8(a.as_mut_ptr().add(i * 16), px.3);
+    unsafe {
+        use core::arch::aarch64::*;
+        let full = w / 16;
+        let mut alpha = alpha;
+        for i in 0..full {
+            let px = vld4q_u8(src.as_ptr().add(i * 64));
+            vst3q_u8(rgb.as_mut_ptr().add(i * 48), uint8x16x3_t(px.0, px.1, px.2));
+            if let Some(a) = alpha.as_deref_mut() {
+                vst1q_u8(a.as_mut_ptr().add(i * 16), px.3);
+            }
         }
-    }
-    let done = full * 16;
-    if done < w {
-        rgba_row_split_scalar(
-            &src[done * 4..],
-            &mut rgb[done * 3..],
-            alpha.map(|a| &mut a[done..]),
-            w - done,
-        );
+        let done = full * 16;
+        if done < w {
+            rgba_row_split_scalar(
+                &src[done * 4..],
+                &mut rgb[done * 3..],
+                alpha.map(|a| &mut a[done..]),
+                w - done,
+            );
+        }
     }
 }
 
@@ -676,14 +694,14 @@ pub(crate) fn widen_row16(src: &[u8], dst: &mut [u16], bits: u32) {
             *d = ((v as u16) << 8) | v as u16;
         }
     } else if bits >= 16 {
-        for (d, b) in dst.iter_mut().zip(src.chunks_exact(2)) {
+        for (d, b) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
             *d = u16::from_le_bytes([b[0], b[1]]);
         }
     } else {
         let mask = (1u32 << bits) - 1;
         let sh = 16 - bits;
         let back = bits - sh;
-        for (d, b) in dst.iter_mut().zip(src.chunks_exact(2)) {
+        for (d, b) in dst.iter_mut().zip(src.as_chunks::<2>().0) {
             let v = u16::from_le_bytes([b[0], b[1]]) as u32 & mask;
             *d = ((v << sh) | (v >> back)) as u16;
         }
@@ -740,10 +758,8 @@ pub(crate) fn decode_deep(
                 widen_row16(&src.v[cr * cw * sb..(cr + 1) * cw * sb], &mut v16r, bits);
                 staged_cr = cr;
             }
-            if alpha_out {
-                if let Some(a) = src.a {
-                    widen_row16(&a[row * w * sb..(row + 1) * w * sb], &mut a16, bits);
-                }
+            if alpha_out && let Some(a) = src.a {
+                widen_row16(&a[row * w * sb..(row + 1) * w * sb], &mut a16, bits);
             }
             for (col, px) in drow.chunks_exact_mut(bpp).enumerate() {
                 let ci = col / wsub;
@@ -985,7 +1001,7 @@ mod tests {
             assert_eq!(a2, alpha);
             let mut opaque = vec![0u8; w * 4];
             rgb_row_to_rgba(&rgb, None, &mut opaque, w);
-            assert!(opaque.chunks_exact(4).all(|p| p[3] == 255));
+            assert!(opaque.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
         }
     }
 }

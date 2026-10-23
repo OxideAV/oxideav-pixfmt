@@ -5,7 +5,7 @@
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, float, supports, supports_direct, ColorSpace, ConvertOptions, FormatInfo, FrameInfo,
+    ColorSpace, ConvertOptions, FormatInfo, FrameInfo, convert, float, supports, supports_direct,
 };
 
 const FLOATS: [PixelFormat; 5] = [
@@ -68,7 +68,9 @@ fn rgba_f32(w: usize, h: usize, pad: usize, f: impl Fn(usize, usize) -> [f32; 4]
 
 fn f32s(plane: &[u8]) -> Vec<f32> {
     plane
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
@@ -565,13 +567,15 @@ fn padding_and_odd_dimensions() {
         pts: None,
         planes: planar.planes[..2].to_vec(),
     };
-    assert!(convert(
-        &short,
-        FrameInfo::new(PixelFormat::GbrapF32Le, w as u32, h as u32),
-        PixelFormat::Rgba,
-        &opts()
-    )
-    .is_err());
+    assert!(
+        convert(
+            &short,
+            FrameInfo::new(PixelFormat::GbrapF32Le, w as u32, h as u32),
+            PixelFormat::Rgba,
+            &opts()
+        )
+        .is_err()
+    );
 }
 
 /// The low-level plane helpers agree with the frame path.
@@ -615,11 +619,13 @@ fn significant_bits_record_is_ignored_on_float_surfaces() {
     }
     let mut hostile = plain.clone();
     hostile.set_significant_bits(vec![0, 200]);
-    assert!(convert(
-        &hostile,
-        FrameInfo::new(PixelFormat::RgbaF32Le, w as u32, h as u32),
-        PixelFormat::Rgb24,
-        &opts()
-    )
-    .is_ok());
+    assert!(
+        convert(
+            &hostile,
+            FrameInfo::new(PixelFormat::RgbaF32Le, w as u32, h as u32),
+            PixelFormat::Rgb24,
+            &opts()
+        )
+        .is_ok()
+    );
 }

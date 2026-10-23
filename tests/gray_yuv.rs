@@ -6,7 +6,7 @@
 //! synthesises neutral (128) chroma. No colour matrix is involved.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert};
 
 fn gray_frame(w: usize, h: usize, data: Vec<u8>) -> VideoFrame {
     assert_eq!(data.len(), w * h);

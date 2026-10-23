@@ -9,7 +9,7 @@
 //! (`YuvJ* → Yuv* (range rescale) → RGB`).
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ColorSpace, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ColorSpace, ConvertOptions, FrameInfo, convert};
 
 fn opts(cs: ColorSpace) -> ConvertOptions {
     ConvertOptions {

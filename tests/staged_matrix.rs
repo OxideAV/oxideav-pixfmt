@@ -11,7 +11,7 @@
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, supports, supports_direct, ConvertOptions, FormatInfo, FrameInfo, Palette,
+    ConvertOptions, FormatInfo, FrameInfo, Palette, convert, supports, supports_direct,
 };
 
 /// Every PixelFormat variant (kept in discriminant order).

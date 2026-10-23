@@ -9,7 +9,7 @@
 //! the core invariant exercised here.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert};
 
 /// Build an 8-bit planar YUV frame for the given subsampling.
 fn synth_yuv8(fmt: PixelFormat, w: usize, h: usize, wsub: usize, hsub: usize) -> VideoFrame {
@@ -112,7 +112,7 @@ fn depth_up_word_layout_10bit() {
     let src_info = FrameInfo::new(PixelFormat::Yuv444P, w as u32, h as u32);
     let up = convert(&src, src_info, PixelFormat::Yuv444P10Le, &opts).expect("up");
     for plane in &up.planes {
-        for word in plane.data.chunks_exact(2) {
+        for word in plane.data.as_chunks::<2>().0 {
             let v = u16::from_le_bytes([word[0], word[1]]);
             assert_eq!(v, 0x2AE, "10-bit packed word for input 0xAB");
         }
@@ -135,7 +135,7 @@ fn depth_up_word_layout_12bit() {
     let src_info = FrameInfo::new(PixelFormat::Yuv444P, w as u32, h as u32);
     let up = convert(&src, src_info, PixelFormat::Yuv444P12Le, &opts).expect("up");
     for plane in &up.planes {
-        for word in plane.data.chunks_exact(2) {
+        for word in plane.data.as_chunks::<2>().0 {
             let v = u16::from_le_bytes([word[0], word[1]]);
             assert_eq!(v, 0xABA, "12-bit packed word for input 0xAB");
         }

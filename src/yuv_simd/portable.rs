@@ -7,7 +7,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use crate::yuv::{yuv_to_rgb_fp, DecodeParams, YuvMatrix, FP_HALF, FP_SHIFT};
+use crate::yuv::{DecodeParams, FP_HALF, FP_SHIFT, YuvMatrix, yuv_to_rgb_fp};
 use core::simd::prelude::*;
 use core::simd::{i32x8, u8x8};
 

@@ -6,7 +6,7 @@
 //! above it so the tail handling is covered.
 
 use oxideav_pixfmt::rgb::{
-    self, Rgb3, Rgba4, ABGR_POS, ARGB_POS, BGRA_POS, BGR_POS, RGBA_POS, RGB_POS,
+    self, ABGR_POS, ARGB_POS, BGR_POS, BGRA_POS, RGB_POS, RGBA_POS, Rgb3, Rgba4,
 };
 
 fn lcg_bytes(seed: u64, n: usize) -> Vec<u8> {

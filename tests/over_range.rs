@@ -10,7 +10,7 @@
 
 use oxideav_core::{ExecutionContext, PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, convert_with, ConvertContext, ConvertOptions, FormatInfo, FrameInfo,
+    ConvertContext, ConvertOptions, FormatInfo, FrameInfo, convert, convert_with,
 };
 
 fn frame_filled(fmt: PixelFormat, w: u32, h: u32, word: u16) -> VideoFrame {

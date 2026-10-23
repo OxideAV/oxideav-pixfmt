@@ -8,9 +8,9 @@
 //! single-precision float round-off.
 
 use oxideav_pixfmt::transfer::{
-    bt1886_eotf, bt1886_eotf_with_levels, bt1886_inverse_eotf, bt2020_12_inverse_oetf,
-    bt2020_12_oetf, bt709_inverse_oetf, bt709_oetf, hlg_inverse_oetf, hlg_oetf, pq_eotf,
-    pq_eotf_normalised, pq_inverse_eotf, pq_inverse_eotf_normalised, PQ_PEAK_CDM2,
+    PQ_PEAK_CDM2, bt709_inverse_oetf, bt709_oetf, bt1886_eotf, bt1886_eotf_with_levels,
+    bt1886_inverse_eotf, bt2020_12_inverse_oetf, bt2020_12_oetf, hlg_inverse_oetf, hlg_oetf,
+    pq_eotf, pq_eotf_normalised, pq_inverse_eotf, pq_inverse_eotf_normalised,
 };
 
 fn assert_close(actual: f32, expected: f32, eps: f32, label: &str) {

@@ -7,8 +7,8 @@
 
 use oxideav_core::{ExecutionContext, PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, convert_with, staged_pivot, supports_direct, ConvertContext, ConvertOptions,
-    FormatInfo, FrameInfo, Palette,
+    ConvertContext, ConvertOptions, FormatInfo, FrameInfo, Palette, convert, convert_with,
+    staged_pivot, supports_direct,
 };
 
 const PADDED: [PixelFormat; 4] = [
@@ -175,8 +175,10 @@ fn padding_is_written_zero_and_never_read() {
             let out = conv(&src, sf, pf, w, h);
             for (d, s) in out.planes[0]
                 .data
-                .chunks_exact(4)
-                .zip(src.planes[0].data.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(src.planes[0].data.as_chunks::<4>().0)
             {
                 assert_eq!(
                     [d[pr], d[pg], d[pb], d[px]],
@@ -186,7 +188,7 @@ fn padding_is_written_zero_and_never_read() {
             }
             // Changing the source's fourth lane changes nothing.
             let mut junk = src.clone();
-            for p in junk.planes[0].data.chunks_exact_mut(4) {
+            for p in junk.planes[0].data.as_chunks_mut::<4>().0 {
                 p[sa] = rng(&mut seed);
             }
             let again = conv(&junk, sf, pf, w, h);
@@ -202,8 +204,10 @@ fn padding_is_written_zero_and_never_read() {
             let out = conv(&src, sf, pf, w, h);
             for (d, s) in out.planes[0]
                 .data
-                .chunks_exact(4)
-                .zip(src.planes[0].data.chunks_exact(3))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(src.planes[0].data.as_chunks::<3>().0)
             {
                 assert_eq!(
                     [d[pr], d[pg], d[pb], d[px]],
@@ -220,8 +224,10 @@ fn padding_is_written_zero_and_never_read() {
             let out = conv(&src, pf, df, w, h);
             for (d, s) in out.planes[0]
                 .data
-                .chunks_exact(4)
-                .zip(src.planes[0].data.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(src.planes[0].data.as_chunks::<4>().0)
             {
                 assert_eq!(
                     [d[dr], d[dg], d[db], d[da]],
@@ -236,8 +242,10 @@ fn padding_is_written_zero_and_never_read() {
             let out = conv(&src, pf, df, w, h);
             for (d, s) in out.planes[0]
                 .data
-                .chunks_exact(3)
-                .zip(src.planes[0].data.chunks_exact(4))
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(src.planes[0].data.as_chunks::<4>().0)
             {
                 assert_eq!(
                     [d[dr], d[dg], d[db]],
@@ -253,7 +261,7 @@ fn padding_is_written_zero_and_never_read() {
         let rgba = tight(random_bytes(n * 4, &mut seed), w as usize * 4);
         let back = conv(&conv(&rgba, a, pf, w, h), pf, a, w, h);
         let mut expect = rgba.planes[0].data.clone();
-        for p in expect.chunks_exact_mut(4) {
+        for p in expect.as_chunks_mut::<4>().0 {
             p[aa] = 255;
         }
         assert_eq!(back.planes[0].data, expect, "{a:?} → {pf:?} → {a:?}");
@@ -286,7 +294,13 @@ fn gray8_and_pal8_hops() {
     for &pf in &PADDED {
         let [pr, pg, pb, px] = pos4(pf);
         let out = conv(&gray, PixelFormat::Gray8, pf, w, h);
-        for (d, &g) in out.planes[0].data.chunks_exact(4).zip(&gray.planes[0].data) {
+        for (d, &g) in out.planes[0]
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(&gray.planes[0].data)
+        {
             assert_eq!([d[pr], d[pg], d[pb], d[px]], [g, g, g, 0], "Gray8 → {pf:?}");
         }
         // Padded → Gray8 is the Rgb24 route's luminance projection.
@@ -303,7 +317,13 @@ fn gray8_and_pal8_hops() {
         // Pal8 → padded: the palette colour, alpha column dropped, 0 padding.
         let out =
             convert(&pal, FrameInfo::new(PixelFormat::Pal8, w, h), pf, &opts).expect("Pal8 →");
-        for (d, &i) in out.planes[0].data.chunks_exact(4).zip(&pal.planes[0].data) {
+        for (d, &i) in out.planes[0]
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(&pal.planes[0].data)
+        {
             let c = colors[i as usize];
             assert_eq!(
                 [d[pr], d[pg], d[pb], d[px]],
@@ -338,7 +358,7 @@ fn planar_frame(f: PixelFormat, w: u32, h: u32, seed: &mut u32) -> VideoFrame {
             let mut data = random_bytes(row * ph as usize, seed);
             if info.bit_depth > 8 && info.bit_depth < 16 {
                 let mask = ((1u32 << info.bit_depth) - 1) as u16;
-                for c in data.chunks_exact_mut(2) {
+                for c in data.as_chunks_mut::<2>().0 {
                     let v = u16::from_le_bytes([c[0], c[1]]) & mask;
                     c.copy_from_slice(&v.to_le_bytes());
                 }
@@ -366,8 +386,10 @@ fn planar_family_hops_equal_the_rgb24_route() {
                 let direct = conv(&yuv, yf, pf, w, h);
                 for (d, s) in direct.planes[0]
                     .data
-                    .chunks_exact(4)
-                    .zip(rgb.planes[0].data.chunks_exact(3))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(rgb.planes[0].data.as_chunks::<3>().0)
                 {
                     assert_eq!(
                         [d[pr], d[pg], d[pb], d[px]],
@@ -389,7 +411,9 @@ fn planar_family_hops_equal_the_rgb24_route() {
                     let a = &direct.planes[3].data;
                     let full = if FormatInfo::of(yf).bit_depth > 8 {
                         let m = ((1u32 << FormatInfo::of(yf).bit_depth) - 1) as u16;
-                        a.chunks_exact(2)
+                        a.as_chunks::<2>()
+                            .0
+                            .iter()
                             .all(|c| u16::from_le_bytes([c[0], c[1]]) == m)
                     } else {
                         a.iter().all(|&b| b == 255)
@@ -429,7 +453,12 @@ fn staged_routes_equal_the_manual_two_step() {
             // Whatever the route, the padding lane comes out 0.
             let px = pos4(pf)[3];
             assert!(
-                back.planes[0].data.chunks_exact(4).all(|p| p[px] == 0),
+                back.planes[0]
+                    .data
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|p| p[px] == 0),
                 "{df:?} → {pf:?} padding"
             );
         }

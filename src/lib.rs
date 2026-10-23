@@ -265,8 +265,8 @@ pub use alpha::{
     unpremultiply,
 };
 pub use convert::{
-    convert, convert_in_place_if_same, convert_with, staged_pivot, supports, supports_direct,
-    ColorSpace, ConvertContext, ConvertOptions, Dither, FrameInfo,
+    ColorSpace, ConvertContext, ConvertOptions, Dither, FrameInfo, convert,
+    convert_in_place_if_same, convert_with, staged_pivot, supports, supports_direct,
 };
 pub use format_info::{ChromaSubsampling, FormatInfo};
-pub use palette::{generate_palette, Palette, PaletteGenOptions, PaletteStrategy};
+pub use palette::{Palette, PaletteGenOptions, PaletteStrategy, generate_palette};

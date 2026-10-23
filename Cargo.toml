@@ -1,8 +1,8 @@
 [package]
 name = "oxideav-pixfmt"
 version = "0.1.11"
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.95"
 license = "MIT"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust pixel-format conversions, palette quantisation, and dithering — the oxideav framework's shared pixfmt layer"

@@ -4,11 +4,11 @@
 //!
 //! Run with: `cargo bench --features bench --bench depth_gray`
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_pixfmt::yuv::{
-    depth_down_le16_plane, depth_rescale_le16_plane, depth_up_8_to_le16_plane, rgb24_to_gray8,
-    YuvMatrix,
+    YuvMatrix, depth_down_le16_plane, depth_rescale_le16_plane, depth_up_8_to_le16_plane,
+    rgb24_to_gray8,
 };
 
 const W: usize = 1920;

@@ -139,7 +139,12 @@ fn scalar_swizzle4_fill(src: &[u8], dst: &mut [u8], pixels: usize, perm: [u8; 4]
     let is_fill = perm.map(|p| p == 0xFF);
     let src = &src[..pixels * 4];
     let dst = &mut dst[..pixels * 4];
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0)
+    {
         for j in 0..4 {
             let v = s[idx[j]];
             d[j] = if is_fill[j] { fill } else { v };
@@ -257,7 +262,12 @@ fn scalar_rgb3_to_rgba4(src: &[u8], dst: &mut [u8], pixels: usize, perm3: [u8; 4
     let is_fill = perm3.map(|p| p == 0xFF);
     let src = &src[..pixels * 3];
     let dst = &mut dst[..pixels * 4];
-    for (s, d) in src.chunks_exact(3).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0)
+    {
         for j in 0..4 {
             let v = s[idx[j]];
             d[j] = if is_fill[j] { fill } else { v };

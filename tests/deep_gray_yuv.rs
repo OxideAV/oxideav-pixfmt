@@ -15,8 +15,8 @@
 
 use oxideav_core::{ColorRange, ExecutionContext, PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, convert_with, staged_pivot, supports_direct, ConvertContext, ConvertOptions,
-    FormatInfo, FrameInfo,
+    ConvertContext, ConvertOptions, FormatInfo, FrameInfo, convert, convert_with, staged_pivot,
+    supports_direct,
 };
 
 fn le16(values: &[u16]) -> Vec<u8> {
@@ -24,7 +24,9 @@ fn le16(values: &[u16]) -> Vec<u8> {
 }
 
 fn rd16(data: &[u8]) -> Vec<u16> {
-    data.chunks_exact(2)
+    data.as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -98,7 +100,7 @@ const BYTE_FAMILY: &[(PixelFormat, usize, usize, bool)] = &[
 /// keep one representative per depth / siting class and a few pixels;
 /// natively every member runs at the full sizes.
 fn miri_thin(i: usize) -> bool {
-    cfg!(miri) && i % 4 != 0
+    cfg!(miri) && !i.is_multiple_of(4)
 }
 
 const DEEP_GRAY: &[(PixelFormat, u32)] = &[
@@ -728,11 +730,13 @@ fn short_planes_are_invalid() {
         pts: None,
         planes: vec![],
     };
-    assert!(convert(
-        &no_planes,
-        FrameInfo::new(PixelFormat::Yuv444P16Le, 4, 4),
-        PixelFormat::Gray16Le,
-        &ConvertOptions::default()
-    )
-    .is_err());
+    assert!(
+        convert(
+            &no_planes,
+            FrameInfo::new(PixelFormat::Yuv444P16Le, 4, 4),
+            PixelFormat::Gray16Le,
+            &ConvertOptions::default()
+        )
+        .is_err()
+    );
 }

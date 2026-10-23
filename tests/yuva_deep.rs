@@ -13,7 +13,7 @@
 //! formats resolves through `convert()`.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, supports, supports_direct, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert, supports, supports_direct};
 
 /// MSB-replicating widen (the crate depth policy) for reference values.
 fn widen(v: u16, from: u32, to: u32) -> u16 {

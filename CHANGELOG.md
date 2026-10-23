@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- edition 2024, MSRV 1.95
 - *(deps)* `oxideav-core` minimum 0.1.41 (the twelve variants, `is_packed_rgb` / `is_rgb`)
 
 ## [0.1.11](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.10...v0.1.11) - 2026-10-17

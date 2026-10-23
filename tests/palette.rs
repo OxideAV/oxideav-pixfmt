@@ -2,8 +2,8 @@
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{
-    convert, generate_palette, ConvertOptions, Dither, FrameInfo, PaletteGenOptions,
-    PaletteStrategy,
+    ConvertOptions, Dither, FrameInfo, PaletteGenOptions, PaletteStrategy, convert,
+    generate_palette,
 };
 
 fn deterministic_rgba(w: u32, h: u32, seed: u32) -> (VideoFrame, FrameInfo) {
@@ -289,15 +289,15 @@ fn pal8_side_channel_takes_precedence_and_roundtrips() {
         ..Default::default()
     };
     let rgb = convert(&frame, info, PixelFormat::Rgb24, &opts).unwrap();
-    for (i, px) in rgb.planes[0].data.chunks_exact(3).enumerate() {
+    for (i, px) in rgb.planes[0].data.as_chunks::<3>().0.iter().enumerate() {
         let want = (i as u8) * 16;
-        assert_eq!(px, [want, want, want], "index {i}");
+        assert_eq!(*px, [want, want, want], "index {i}");
     }
     // Rgba expansion synthesises opaque alpha from the 3-byte entries.
     let rgba = convert(&frame, info, PixelFormat::Rgba, &ConvertOptions::default()).unwrap();
-    for (i, px) in rgba.planes[0].data.chunks_exact(4).enumerate() {
+    for (i, px) in rgba.planes[0].data.as_chunks::<4>().0.iter().enumerate() {
         let want = (i as u8) * 16;
-        assert_eq!(px, [want, want, want, 255], "index {i}");
+        assert_eq!(*px, [want, want, want, 255], "index {i}");
     }
 }
 
@@ -323,7 +323,7 @@ fn rgb_to_pal8_attaches_matching_side_channel() {
     // columns entry-for-entry (alpha is not representable there).
     let side = pal8.palette().expect("side-channel attached");
     assert_eq!(side.len(), palette.colors.len() * 3);
-    for (entry, c) in side.chunks_exact(3).zip(palette.colors.iter()) {
+    for (entry, c) in side.as_chunks::<3>().0.iter().zip(palette.colors.iter()) {
         assert_eq!(entry, &c[..3]);
     }
     // The index plane itself is unchanged by the attachment.

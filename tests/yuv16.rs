@@ -23,7 +23,7 @@ use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::yuv::{
     depth_down_le16_plane, depth_rescale_le16_plane, depth_up_8_to_le16_plane,
 };
-use oxideav_pixfmt::{convert, supports, supports_direct, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert, supports, supports_direct};
 
 fn rd16(buf: &[u8], i: usize) -> u16 {
     (buf[i * 2] as u16) | ((buf[i * 2 + 1] as u16) << 8)
@@ -494,7 +494,9 @@ fn cross_depth_cross_subsampling_closure() {
                 stride: p.stride,
                 data: p
                     .data
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .flat_map(|c| (u16::from_le_bytes([c[0], c[1]]) & 0x3FF).to_le_bytes())
                     .collect(),
             })

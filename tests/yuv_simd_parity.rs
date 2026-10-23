@@ -61,15 +61,18 @@ fn run_once(force_scalar: bool, make: impl FnOnce() -> Vec<u8>) -> Vec<u8> {
     static LOCK: Mutex<()> = Mutex::new(());
     let _g = LOCK.lock().unwrap();
     if force_scalar {
-        std::env::set_var("OXIDEAV_PIXFMT_FORCE_SCALAR", "1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("OXIDEAV_PIXFMT_FORCE_SCALAR", "1") };
     } else {
-        std::env::remove_var("OXIDEAV_PIXFMT_FORCE_SCALAR");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("OXIDEAV_PIXFMT_FORCE_SCALAR") };
     }
     // The dispatch cache is a OnceLock/AtomicU8 — once set, subsequent
     // calls stick to the selected path. The test forces the scalar path
     // from the first call in this process.
     let out = make();
-    std::env::remove_var("OXIDEAV_PIXFMT_FORCE_SCALAR");
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("OXIDEAV_PIXFMT_FORCE_SCALAR") };
     out
 }
 

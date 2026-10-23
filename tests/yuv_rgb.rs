@@ -2,7 +2,7 @@
 //! loses detail on chroma transitions (> 30 dB is the expected floor).
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ColorSpace, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ColorSpace, ConvertOptions, FrameInfo, convert};
 
 fn synth_rgb24(w: u32, h: u32) -> (VideoFrame, FrameInfo) {
     // Smooth gradients in each channel — the usual PSNR benchmark. High-
@@ -375,7 +375,7 @@ fn bt2020_neutral_grey_round_trips_to_chroma_128() {
     // Neutral grey (R = G = B = 128) must produce Cb = Cr = 128 in
     // limited and full range alike — the YCbCr coefficient design
     // intrinsically forces equal-RGB pixels onto the chroma origin.
-    use oxideav_pixfmt::yuv::{rgb_to_yuv, YuvMatrix};
+    use oxideav_pixfmt::yuv::{YuvMatrix, rgb_to_yuv};
     let mat = YuvMatrix::BT2020.with_range(true);
     let (_, cb, cr) = rgb_to_yuv(128, 128, 128, mat);
     assert!(
@@ -396,7 +396,7 @@ fn bt2020_pure_white_lands_in_luma() {
     // R=G=B=255 should produce the limited-range white code (Y' ≈ 235)
     // with neutral chroma. Verifies that the luma coefficient sum
     // 0.2627 + 0.6780 + 0.0593 = 1.0 is wired correctly.
-    use oxideav_pixfmt::yuv::{rgb_to_yuv, YuvMatrix};
+    use oxideav_pixfmt::yuv::{YuvMatrix, rgb_to_yuv};
     let (y, cb, cr) = rgb_to_yuv(255, 255, 255, YuvMatrix::BT2020.with_range(true));
     assert!((233..=237).contains(&y), "expected y near 235, got {y}");
     assert!(cb.abs_diff(128) <= 1, "expected cb ≈ 128, got {cb}");
@@ -418,7 +418,7 @@ fn bt2020_pure_white_lands_in_luma() {
 
 #[test]
 fn bt2020_limited_black_and_primary_anchors() {
-    use oxideav_pixfmt::yuv::{rgb_to_yuv, YuvMatrix};
+    use oxideav_pixfmt::yuv::{YuvMatrix, rgb_to_yuv};
     let m = YuvMatrix::BT2020.with_range(true);
     // (rgb, expected (y, cb, cr)) — exact values in comments.
     let vectors = [
@@ -446,7 +446,7 @@ fn bt2020_limited_black_and_primary_anchors() {
 
 #[test]
 fn bt2020_full_black_and_primary_anchors() {
-    use oxideav_pixfmt::yuv::{rgb_to_yuv, YuvMatrix};
+    use oxideav_pixfmt::yuv::{YuvMatrix, rgb_to_yuv};
     let m = YuvMatrix::BT2020.with_range(false);
     let vectors = [
         // Black: full-range zero code, chroma origin.
@@ -478,7 +478,7 @@ fn bt2020_anchor_encode_decode_invertibility() {
     // ±2 LSB budget that 8-bit chroma quantisation permits (full-range
     // red/blue clip half an LSB of Cr/Cb at the 255 code cap, which is
     // unrecoverable by design and stays inside the same budget).
-    use oxideav_pixfmt::yuv::{rgb_to_yuv, yuv_to_rgb, YuvMatrix};
+    use oxideav_pixfmt::yuv::{YuvMatrix, rgb_to_yuv, yuv_to_rgb};
     for limited in [true, false] {
         let m = YuvMatrix::BT2020.with_range(limited);
         for (r, g, b) in [

@@ -2,7 +2,7 @@
 //! conversions. Every pair tested here must be lossless.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, supports, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert, supports};
 
 fn synth_rgba(w: u32, h: u32) -> (VideoFrame, FrameInfo) {
     let mut data = Vec::with_capacity((w * h * 4) as usize);

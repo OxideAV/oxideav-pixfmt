@@ -478,7 +478,7 @@ mod tests {
         let mut dst = vec![0u8; stride * dst_h as usize];
         // Make destination fully opaque black so we can verify the
         // result without alpha math.
-        for px in dst.chunks_exact_mut(4) {
+        for px in dst.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
         let mask_w = 8u32;
@@ -523,11 +523,11 @@ mod tests {
         let dst_h = 4u32;
         let stride = (dst_w * 4) as usize;
         let mut dst = vec![0u8; stride * dst_h as usize];
-        for px in dst.chunks_exact_mut(4) {
+        for px in dst.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
         let mask = vec![255u8; 16]; // 4×4
-                                    // Place 4×4 mask at (-2, -2): only the bottom-right 2×2 is visible.
+        // Place 4×4 mask at (-2, -2): only the bottom-right 2×2 is visible.
         blit_alpha_mask(
             &mut dst,
             dst_w,
@@ -565,7 +565,7 @@ mod tests {
         let dst_h = 4u32;
         let stride = (dst_w * 4) as usize;
         let mut dst = vec![0u8; stride * dst_h as usize];
-        for px in dst.chunks_exact_mut(4) {
+        for px in dst.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
         let mask = vec![255u8; 16];
@@ -649,16 +649,16 @@ mod tests {
         let stride = (w * 4) as usize;
         let mut dst = vec![0u8; stride * h as usize];
         let mut src = vec![0u8; stride * h as usize];
-        for px in dst.chunks_exact_mut(4) {
+        for px in dst.as_chunks_mut::<4>().0 {
             px[2] = 255;
             px[3] = 255;
         }
-        for px in src.chunks_exact_mut(4) {
+        for px in src.as_chunks_mut::<4>().0 {
             px[0] = 128;
             px[3] = 128;
         }
         over_buffer(&mut dst, &src, w, h, stride, true);
-        for px in dst.chunks_exact(4) {
+        for px in dst.as_chunks::<4>().0 {
             assert_eq!(px[0], 128);
             assert_eq!(px[1], 0);
             assert!((px[2] as i32 - 127).abs() <= 1, "blue was {}", px[2]);
@@ -673,17 +673,17 @@ mod tests {
         let stride = (w * 4) as usize;
         let mut dst = vec![0u8; stride * h as usize];
         let mut src = vec![0u8; stride * h as usize];
-        for px in dst.chunks_exact_mut(4) {
+        for px in dst.as_chunks_mut::<4>().0 {
             px[2] = 255;
             px[3] = 255;
         }
         // Straight-alpha 50% red.
-        for px in src.chunks_exact_mut(4) {
+        for px in src.as_chunks_mut::<4>().0 {
             px[0] = 255;
             px[3] = 128;
         }
         over_buffer(&mut dst, &src, w, h, stride, false);
-        for px in dst.chunks_exact(4) {
+        for px in dst.as_chunks::<4>().0 {
             assert!((px[0] as i32 - 128).abs() <= 2, "red was {}", px[0]);
             assert_eq!(px[1], 0);
             assert!((px[2] as i32 - 127).abs() <= 2, "blue was {}", px[2]);

@@ -6,10 +6,10 @@
 //! numbers compare directly against the YUV benches. Frames are
 //! synthesised once outside the measured region.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use oxideav_pixfmt::{
     gray,
-    rgb::{self, Rgb3, Rgba4, ABGR_POS, ARGB_POS, BGRA_POS, BGR_POS, RGBA_POS, RGB_POS},
+    rgb::{self, ABGR_POS, ARGB_POS, BGR_POS, BGRA_POS, RGB_POS, RGBA_POS, Rgb3, Rgba4},
     yuv,
 };
 
@@ -299,7 +299,7 @@ fn bench_chroma_resample16(c: &mut Criterion) {
 /// what a codec pipeline pays.
 fn bench_planar_family(c: &mut Criterion) {
     use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-    use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+    use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert};
 
     let (w, h) = (1920usize, 1080usize);
     let opts = ConvertOptions::default();
@@ -387,14 +387,14 @@ fn bench_planar_family(c: &mut Criterion) {
 
 fn bench_float_family(c: &mut Criterion) {
     use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-    use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+    use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert};
 
     let (w, h) = (1920usize, 1080usize);
     let opts = ConvertOptions::default();
     // In-range float RGBA (a smooth ramp) so the quantiser takes the
     // common path rather than the saturating branches.
     let mut data = vec![0u8; w * h * 16];
-    for (i, word) in data.chunks_exact_mut(4).enumerate() {
+    for (i, word) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let v = ((i % 977) as f32) / 977.0;
         word.copy_from_slice(&v.to_le_bytes());
     }

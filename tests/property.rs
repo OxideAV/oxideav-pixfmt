@@ -20,8 +20,8 @@
 //! case so every failure is exactly reproducible from its seed.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::yuv::{rgb_to_yuv, yuv_to_rgb, YuvMatrix};
-use oxideav_pixfmt::{convert, premultiply, unpremultiply, ColorSpace, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::yuv::{YuvMatrix, rgb_to_yuv, yuv_to_rgb};
+use oxideav_pixfmt::{ColorSpace, ConvertOptions, FrameInfo, convert, premultiply, unpremultiply};
 
 /// Deterministic xorshift64* PRNG — same family the palette tests use,
 /// kept local so this file has zero added dependencies.
@@ -116,11 +116,7 @@ const MATRICES: [YuvMatrix; 3] = [YuvMatrix::BT601, YuvMatrix::BT709, YuvMatrix:
 /// native run's job; miri's job is exercising each code path's memory
 /// model once.
 fn cases(native: u32, miri: u32) -> u32 {
-    if cfg!(miri) {
-        miri
-    } else {
-        native
-    }
+    if cfg!(miri) { miri } else { native }
 }
 
 // ---------------------------------------------------------------------
@@ -766,7 +762,7 @@ fn prop_float_family_roundtrips_and_saturates() {
             }
             if dst == fmt && bits > 8 && bits < 16 {
                 for plane in &got.planes {
-                    for word in plane.data.chunks_exact(2) {
+                    for word in plane.data.as_chunks::<2>().0 {
                         let v = u16::from_le_bytes([word[0], word[1]]) as u32;
                         assert!(
                             v < (1u32 << bits),

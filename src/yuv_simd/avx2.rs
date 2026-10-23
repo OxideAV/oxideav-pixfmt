@@ -10,7 +10,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::yuv::{
-    rgb_to_yuv_fp, yuv_to_rgb_fp, DecodeParams, EncodeParams, YuvMatrix, FP_HALF, FP_SHIFT,
+    DecodeParams, EncodeParams, FP_HALF, FP_SHIFT, YuvMatrix, rgb_to_yuv_fp, yuv_to_rgb_fp,
 };
 use core::arch::x86_64::*;
 

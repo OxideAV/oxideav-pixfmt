@@ -136,11 +136,7 @@ impl Packed16Layout {
     /// Mask of the green component at bit 0 (`0x1F` or `0x3F`).
     #[inline]
     const fn g_mask(&self) -> u16 {
-        if self.g_bits == 6 {
-            0x3F
-        } else {
-            0x1F
-        }
+        if self.g_bits == 6 { 0x3F } else { 0x1F }
     }
 
     /// Read the word at the start of `px` (two bytes) in this layout's
@@ -247,11 +243,7 @@ pub const fn quantise6(v: u8) -> u8 {
 /// Widen a `bits`-wide (5 or 6) component to 8 bits by replication.
 #[inline]
 const fn expand(v: u8, bits: u8) -> u8 {
-    if bits == 6 {
-        expand6(v)
-    } else {
-        expand5(v)
-    }
+    if bits == 6 { expand6(v) } else { expand5(v) }
 }
 
 // -------------------------------------------------------------------------
@@ -267,7 +259,7 @@ const fn expand(v: u8, bits: u8) -> u8 {
 // orders falls back to a generic scatter.
 
 macro_rules! specialise {
-    ($l:expr, $f:ident, $o:literal, ($($arg:expr),*)) => {
+    ($l:expr_2021, $f:ident, $o:literal, ($($arg:expr_2021),*)) => {
         match ($l.g_bits == 6, $l.big_endian) {
             (false, false) => $f::<false, false, $o>($($arg),*),
             (false, true) => $f::<false, true, $o>($($arg),*),
@@ -307,11 +299,7 @@ fn encode_px<const G6: bool, const BE: bool>(
 ) -> [u8; 2] {
     let gq = if G6 { quantise6(g) } else { quantise5(g) } as u16;
     let w = ((quantise5(r) as u16) << rs) | (gq << gs) | ((quantise5(b) as u16) << bs);
-    if BE {
-        w.to_be_bytes()
-    } else {
-        w.to_le_bytes()
-    }
+    if BE { w.to_be_bytes() } else { w.to_le_bytes() }
 }
 
 #[inline(always)]
@@ -423,8 +411,10 @@ pub fn to_packed3(src: &[u8], l: Packed16Layout, dst: &mut [u8], pos: Rgb3, pixe
             let (rs, gs, bs) = shifts(l);
             let (pr, pg, pb) = (pos.r.min(2), pos.g.min(2), pos.b.min(2));
             for (s, d) in src[..pixels * 2]
-                .chunks_exact(2)
-                .zip(dst[..pixels * 3].chunks_exact_mut(3))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(dst[..pixels * 3].as_chunks_mut::<3>().0)
             {
                 let (r, g, b) = decode_generic(s, l, rs, gs, bs);
                 d[pr] = r;
@@ -456,7 +446,12 @@ fn to_packed3_impl<const G6: bool, const BE: bool, const ORDER: usize>(
     let (rs, gs, bs) = shifts(l);
     let src = &src[..pixels * 2];
     let dst = &mut dst[..pixels * 3];
-    for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(3)) {
+    for (s, d) in src
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<3>().0)
+    {
         let (r, g, b) = decode_px::<G6, BE>(s, rs, gs, bs);
         put3::<ORDER>(d, r, g, b);
     }
@@ -482,8 +477,10 @@ pub fn to_packed4(
             let (rs, gs, bs) = shifts(l);
             let (pr, pg, pb, pa) = (pos.r & 3, pos.g & 3, pos.b & 3, pos.a & 3);
             for (s, d) in src[..pixels * 2]
-                .chunks_exact(2)
-                .zip(dst[..pixels * 4].chunks_exact_mut(4))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(dst[..pixels * 4].as_chunks_mut::<4>().0)
             {
                 let (r, g, b) = decode_generic(s, l, rs, gs, bs);
                 d[pa] = fill;
@@ -506,7 +503,12 @@ fn to_packed4_impl<const G6: bool, const BE: bool, const ORDER: usize>(
     let (rs, gs, bs) = shifts(l);
     let src = &src[..pixels * 2];
     let dst = &mut dst[..pixels * 4];
-    for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0)
+    {
         let (r, g, b) = decode_px::<G6, BE>(s, rs, gs, bs);
         put4::<ORDER>(d, r, g, b, fill);
     }
@@ -520,8 +522,10 @@ pub fn from_packed3(src: &[u8], pos: Rgb3, dst: &mut [u8], l: Packed16Layout, pi
         None => {
             let (pr, pg, pb) = (pos.r.min(2), pos.g.min(2), pos.b.min(2));
             for (s, d) in src[..pixels * 3]
-                .chunks_exact(3)
-                .zip(dst[..pixels * 2].chunks_exact_mut(2))
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(dst[..pixels * 2].as_chunks_mut::<2>().0)
             {
                 l.write_word(d, l.pack(s[pr], s[pg], s[pb]));
             }
@@ -539,7 +543,12 @@ fn from_packed3_impl<const G6: bool, const BE: bool, const ORDER: usize>(
     let (rs, gs, bs) = shifts(l);
     let src = &src[..pixels * 3];
     let dst = &mut dst[..pixels * 2];
-    for (s, d) in src.chunks_exact(3).zip(dst.chunks_exact_mut(2)) {
+    for (s, d) in src
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<2>().0)
+    {
         let (r, g, b) = get3::<ORDER>(s);
         d.copy_from_slice(&encode_px::<G6, BE>(r, g, b, rs, gs, bs));
     }
@@ -556,8 +565,10 @@ pub fn from_packed4(src: &[u8], pos: Rgba4, dst: &mut [u8], l: Packed16Layout, p
         None => {
             let (pr, pg, pb) = (pos.r & 3, pos.g & 3, pos.b & 3);
             for (s, d) in src[..pixels * 4]
-                .chunks_exact(4)
-                .zip(dst[..pixels * 2].chunks_exact_mut(2))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(dst[..pixels * 2].as_chunks_mut::<2>().0)
             {
                 l.write_word(d, l.pack(s[pr], s[pg], s[pb]));
             }
@@ -575,7 +586,12 @@ fn from_packed4_impl<const G6: bool, const BE: bool, const ORDER: usize>(
     let (rs, gs, bs) = shifts(l);
     let src = &src[..pixels * 4];
     let dst = &mut dst[..pixels * 2];
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(2)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<2>().0)
+    {
         let (r, g, b) = get4::<ORDER>(s);
         d.copy_from_slice(&encode_px::<G6, BE>(r, g, b, rs, gs, bs));
     }
@@ -588,7 +604,12 @@ fn from_packed4_impl<const G6: bool, const BE: bool, const ORDER: usize>(
 pub fn relayout(src: &[u8], sl: Packed16Layout, dst: &mut [u8], dl: Packed16Layout, pixels: usize) {
     let src = &src[..pixels * 2];
     let dst = &mut dst[..pixels * 2];
-    for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+    for (s, d) in src
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<2>().0)
+    {
         let (r, g, b) = sl.split(sl.read_word(s));
         let g = move_green(g, sl.g_bits, dl.g_bits);
         dl.write_word(d, dl.join(r, g, b));
@@ -711,7 +732,7 @@ pub fn quantise_rows_at(
     let dst = &mut dst[..w * h * 2];
     match dither {
         Dither::None => {
-            for (s, d) in src.chunks_exact(src_bpp).zip(dst.chunks_exact_mut(2)) {
+            for (s, d) in src.chunks_exact(src_bpp).zip(dst.as_chunks_mut::<2>().0) {
                 l.write_word(d, l.pack(s[r], s[g], s[b]));
             }
         }
@@ -730,7 +751,7 @@ pub fn quantise_rows_at(
                 let (sr, sg, sb) = (8 - widths[0], 8 - widths[1], 8 - widths[2]);
                 for (x, (s, d)) in srow
                     .chunks_exact(src_bpp)
-                    .zip(drow.chunks_exact_mut(2))
+                    .zip(drow.as_chunks_mut::<2>().0)
                     .enumerate()
                 {
                     let rq = s[r].saturating_add(tr[x & 7]) >> sr;
@@ -749,7 +770,7 @@ pub fn quantise_rows_at(
             {
                 for (x, (s, d)) in srow
                     .chunks_exact(src_bpp)
-                    .zip(drow.chunks_exact_mut(2))
+                    .zip(drow.as_chunks_mut::<2>().0)
                     .enumerate()
                 {
                     let mut q = [0u8; 3];
@@ -796,8 +817,10 @@ pub fn relayout_rows(
                 .enumerate()
             {
                 for (x, (s, d)) in srow
-                    .chunks_exact(2)
-                    .zip(drow.chunks_exact_mut(2))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(drow.as_chunks_mut::<2>().0)
                     .enumerate()
                 {
                     let (r, g, b) = sl.split(sl.read_word(s));
@@ -810,8 +833,10 @@ pub fn relayout_rows(
             let mut err = Diffusion::new(w);
             for (srow, drow) in src.chunks_exact(w * 2).zip(dst.chunks_exact_mut(w * 2)) {
                 for (x, (s, d)) in srow
-                    .chunks_exact(2)
-                    .zip(drow.chunks_exact_mut(2))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .zip(drow.as_chunks_mut::<2>().0)
                     .enumerate()
                 {
                     let (r, g, b) = sl.split(sl.read_word(s));

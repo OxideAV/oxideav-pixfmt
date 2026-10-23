@@ -20,7 +20,7 @@
 
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use oxideav_pixfmt::{
     blit_alpha_mask, modulate_alpha, over_buffer, over_premul, over_straight, premultiply,
     unpremultiply,
@@ -47,7 +47,7 @@ fn synth(n: usize, seed: u64) -> Vec<u8> {
 fn synth_premul(n_pixels: usize, seed: u64) -> Vec<u8> {
     let raw = synth(n_pixels * 4, seed);
     let mut out = Vec::with_capacity(n_pixels * 4);
-    for px in raw.chunks_exact(4) {
+    for px in raw.as_chunks::<4>().0 {
         let a = px[3] as u32;
         for c in &px[..3] {
             out.push(((*c as u32 * a) / 255) as u8);

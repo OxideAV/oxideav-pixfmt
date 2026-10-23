@@ -12,9 +12,9 @@
 //!
 //! Run with `cargo bench --features bench --bench deep_gray_12mp`.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use oxideav_core::{ExecutionContext, PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, convert_with, ConvertContext, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertContext, ConvertOptions, FrameInfo, convert, convert_with};
 
 const W: u32 = 4032;
 const H: u32 = 3024;

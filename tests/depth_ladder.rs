@@ -8,7 +8,7 @@
 //! inverse, so widen → narrow round-trips are lossless.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert};
 
 fn le16_plane(values: &[u16]) -> Vec<u8> {
     let mut out = Vec::with_capacity(values.len() * 2);
@@ -189,13 +189,15 @@ fn yuv_cross_depth_odd_dims_use_rounded_up_chroma() {
     // A chroma plane shorter than the rounded-up grid is an error.
     let mut short = src.clone();
     short.planes[1].data.truncate(2);
-    assert!(convert(
-        &short,
-        FrameInfo::new(PixelFormat::Yuv420P10Le, 3, 3),
-        PixelFormat::Yuv420P12Le,
-        &ConvertOptions::default(),
-    )
-    .is_err());
+    assert!(
+        convert(
+            &short,
+            FrameInfo::new(PixelFormat::Yuv420P10Le, 3, 3),
+            PixelFormat::Yuv420P12Le,
+            &ConvertOptions::default(),
+        )
+        .is_err()
+    );
 }
 
 // ---------------------------------------------------------------------

@@ -12,7 +12,7 @@
 //! On top of the property sweep, classic anchor codes for the BT.601 and
 //! BT.709 limited-range primaries are pinned as literals.
 
-use oxideav_pixfmt::yuv::{rgb_to_yuv, yuv_to_rgb, YuvMatrix};
+use oxideav_pixfmt::yuv::{YuvMatrix, rgb_to_yuv, yuv_to_rgb};
 
 struct RefMatrix {
     kr: f64,

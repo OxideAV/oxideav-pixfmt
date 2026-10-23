@@ -134,20 +134,12 @@ fn bt2020_inverse_oetf_impl(e_prime: f32, alpha: f32, beta: f32) -> f32 {
 /// `v ∈ [0, 1]` (normalised video signal) → relative luminance `L`
 /// (also `[0, 1]`).
 pub fn bt1886_eotf(v: f32) -> f32 {
-    if v <= 0.0 {
-        0.0
-    } else {
-        v.powf(2.4)
-    }
+    if v <= 0.0 { 0.0 } else { v.powf(2.4) }
 }
 
 /// Inverse of [`bt1886_eotf`] (relative luminance → normalised signal).
 pub fn bt1886_inverse_eotf(l: f32) -> f32 {
-    if l <= 0.0 {
-        0.0
-    } else {
-        l.powf(1.0 / 2.4)
-    }
+    if l <= 0.0 { 0.0 } else { l.powf(1.0 / 2.4) }
 }
 
 /// Generalised BT.1886 EOTF that honours non-zero black / non-unity

@@ -10,7 +10,7 @@
 //! source has no alpha.
 
 use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-use oxideav_pixfmt::{convert, supports, ConvertOptions, FrameInfo};
+use oxideav_pixfmt::{ConvertOptions, FrameInfo, convert, supports};
 
 /// Deterministic planar YUVA frame: Y/A at full resolution, U/V on the
 /// (wsub, hsub) chroma grid.
@@ -200,7 +200,9 @@ fn from_rgb_alpha_split_and_opaque_synthesis() {
                 stride: w * 3,
                 data: rgba.planes[0]
                     .data
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .flat_map(|px| [px[0], px[1], px[2]])
                     .collect(),
             }],
