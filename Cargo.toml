@@ -22,6 +22,10 @@ nightly = []
 # (`Fatal glibc error: malloc.c sysmalloc assertion failed`). Run the
 # benches with `cargo bench --features bench`.
 bench = ["dep:criterion"]
+# ICC colour management (`oxideav_pixfmt::icc`): v2 / v4 profile
+# parsing and profile-to-profile transforms. No extra dependencies;
+# off by default so the default build is unchanged.
+icc = []
 
 [dependencies]
 oxideav-core = "0.1.41"

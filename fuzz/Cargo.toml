@@ -27,6 +27,7 @@ oxideav-core = "0.1"
 
 [dependencies.oxideav-pixfmt]
 path = ".."
+features = ["icc"]
 
 # Prevent this from interfering with the umbrella workspace.
 [workspace]
@@ -43,5 +44,13 @@ debug = 1
 [[bin]]
 name = "convert_geometry"
 path = "fuzz_targets/convert_geometry.rs"
+test = false
+doc = false
+
+# ICC profile parser harness — arbitrary bytes into `IccProfile::parse`,
+# and transforms between whatever parses.
+[[bin]]
+name = "icc_profile"
+path = "fuzz_targets/icc_profile.rs"
 test = false
 doc = false

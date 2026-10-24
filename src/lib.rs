@@ -39,6 +39,14 @@
 //! directly; 0 (identity) routes the planes as G, B, R through the
 //! planar GBR family; an unsignalled frame behaves exactly as before.
 //!
+//! # Colour spaces and ICC profiles
+//!
+//! [`colorspace`] holds floating-point colorimetry (RGB primaries →
+//! XYZ, Bradford adaptation, CIEDE2000). With the `icc` feature,
+//! `icc` parses ICC v2 / v4 profiles and builds profile-to-profile
+//! transforms (matrix/TRC, grayTRC, `mft1` / `mft2` / `mAB ` / `mBA `
+//! LUTs, all four rendering intents).
+//!
 //! # Odd dimensions
 //!
 //! Every subsampled planar / semi-planar layout accepts odd widths and
@@ -245,11 +253,15 @@
 
 pub mod alpha;
 pub mod cmyk;
+pub mod colorspace;
 pub mod convert;
 pub mod dither;
 pub mod float;
 pub mod format_info;
 pub mod gray;
+#[cfg(feature = "icc")]
+pub mod icc;
+mod mat3;
 pub mod packed16;
 pub mod pal8;
 pub mod palette;

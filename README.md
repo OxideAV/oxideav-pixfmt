@@ -523,6 +523,66 @@ inverse OETF returns relative scene light; pass it through
 `hlg_apply_ootf` with the user gain α and system gamma γ to obtain
 display-light values.
 
+## ICC colour management (feature `icc`)
+
+```toml
+oxideav-pixfmt = { version = "0.1", features = ["icc"] }
+```
+
+`oxideav_pixfmt::icc` parses version 2 and version 4 ICC profiles and
+transforms pixels from one profile's device space to another's through
+the profile connection space. It is written from ICC.1:2022 (profile
+version 4.4, technically identical to ISO 15076-1) and adds no
+dependencies; the default build does not compile it.
+
+```rust,ignore
+use oxideav_pixfmt::icc::{IccProfile, IccTransform, RenderingIntent};
+
+let src = IccProfile::parse(&std::fs::read("in.icc")?)?;   // or IccProfile::srgb()
+let dst = IccProfile::parse(&std::fs::read("cmyk.icc")?)?;
+let t = IccTransform::new(&src, &dst, RenderingIntent::RelativeColorimetric)?;
+let rgb16: Vec<u16> = vec![65535, 0, 0, 0, 0, 65535];   // two pixels
+let mut cmyk16 = vec![0u16; 2 * t.output_channels()];
+t.transform_u16(&rgb16, &mut cmyk16)?;                  // also _u8, _f32, transform_pixel (f64)
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+| piece | coverage (ICC.1:2022 clause) |
+| ----- | ---------------------------- |
+| header, tag table | §7.2, §7.3; `description()` / `copyright()` for `mluc` / `text` |
+| matrix/TRC, grayTRC | Annex F.3 / F.2, with the Annex F.1 curve-inversion rules |
+| curves | `curv` (identity, gamma, sampled) and all five `para` functions (Table 68) |
+| LUT tags | `mft1`, `mft2` (legacy 16-bit PCSLAB, Tables 42/43), `mAB ` / `mBA ` with every permitted element combination, 8- and 16-bit CLUTs, per-dimension grids; multilinear CLUT interpolation |
+| PCS | PCSXYZ ↔ PCSLAB (§6.4, Annex A, negative-XYZ extension), every PCS encoding of §6.3.4 |
+| intents | perceptual, media-relative, saturation, ICC-absolute (§6.2.3 white scaling; display media white = PCS white, §9.2.36); §8.10.2 tag fallback order |
+| device spaces | RGB, CMYK, Gray, Lab, XYZ, n-colour (anything a LUT carries) |
+| writing | `IccProfileBuilder` (header, tag table, `XYZ `, `curv` / `para`, `mluc`, `sf32`, B-curve `mAB ` / `mBA `) |
+| built-in profiles | `srgb()`, `display_p3()`, `adobe_rgb()`, `rec2020()`, `prophoto()` (v4 matrix/TRC, Bradford-adapted to D50 per Annex E), `gray(curve)`, `lab_d50()` |
+
+Agreement with `magick in -profile a.icc -profile b.icc` (ImageMagick
+7.1.2 Q16-HDRI, 16-bit raw pixels, all four intents; CIEDE2000 from CSS
+Color 4 §20.2, measured in the destination profile's PCSLAB):
+
+| profile pairs | max ΔE2000 | mean |
+| ------------- | ---------- | ---- |
+| synthesized sRGB / P3 / Adobe RGB / BT.2020 / ProPhoto, all pairs | 0.003 | < 0.002 |
+| macOS system RGB / Gray matrix profiles, all pairs and intents | 0.036 | < 0.025 |
+| into Generic CMYK (8-bit `mft1`), all intents | 0.007 | 0.002 |
+| synthesized `mAB ` (8/16-bit CLUT) / `mft2` / 4-D CMYK LUT profiles, both directions | 0.25 | — |
+| out of Generic CMYK (9-point 4-D `mft1`) | 1.19 (deep shadows) | 0.063 |
+
+On the CMYK CLUT's grid nodes the two agree to one 16-bit code; the
+remaining gap is between nodes, where ICC.1 prescribes "linear
+interpolation" without fixing the simplex scheme.
+
+Not covered yet: black-point compensation (its algorithm is ISO 18619,
+which is not staged), `DToBx` / `BToDx` multiProcessElements tables (the
+§8.10.2 fallback to `AToBx` / `BToAx` applies), NamedColor profiles, and
+DeviceLink / Abstract profiles as chain members.
+
+The module is self-contained (`std` only, its own error type) so it can
+be split into its own crate later without changing its API.
+
 ## Performance
 
 Every converter has a scalar Q15 fixed-point reference. The YUV ↔ RGB
