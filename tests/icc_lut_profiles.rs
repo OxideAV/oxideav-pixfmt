@@ -617,3 +617,49 @@ fn lut_profiles_match_magick() {
     let _ = std::fs::remove_file(&pc);
     let _ = std::fs::remove_file(&ps);
 }
+
+#[test]
+fn device_link_profile_applies_its_atob0_directly() {
+    // RGB → CMYK DeviceLink sampling the ISO 32000-2 §10.4.2.4 rule with
+    // BG = UCR = k (exact on the 17-point grid, linear in between up to
+    // the min() kinks).
+    let clut = |x: &[f64]| -> Vec<f64> {
+        let (c, m, y) = (1.0 - x[0], 1.0 - x[1], 1.0 - x[2]);
+        let k = c.min(m).min(y);
+        vec![c - k, m - k, y - k, k]
+    };
+    let id3 = [Curve::Identity, Curve::Identity, Curve::Identity];
+    let id4 = [
+        Curve::Identity,
+        Curve::Identity,
+        Curve::Identity,
+        Curve::Identity,
+    ];
+    let a2b = mab(true, 3, 4, &id3, &[17, 17, 17], 2, &clut, None, &id4);
+    let link = IccProfileBuilder::new(
+        ProfileClass::DeviceLink,
+        DataColorSpace::Rgb,
+        DataColorSpace::Cmyk,
+    )
+    .with_text(sig(b"desc"), "synth link")
+    .with_tag(sig(b"A2B0"), a2b)
+    .build_profile()
+    .unwrap();
+    let t = IccTransform::device_link(&link).unwrap();
+    assert_eq!((t.input_channels(), t.output_channels()), (3, 4));
+    assert_eq!(t.output_color_space(), DataColorSpace::Cmyk);
+    for (rgb, want) in [
+        ([1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]),
+        ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]),
+        ([0.25, 0.5, 0.75], [0.5, 0.25, 0.0, 0.25]),
+    ] {
+        let mut o = [0.0; 4];
+        t.transform_pixel(&rgb, &mut o);
+        for c in 0..4 {
+            assert!((o[c] - want[c]).abs() < 1e-4, "{rgb:?} → {o:?}");
+        }
+    }
+    // A DeviceLink is not a transform endpoint.
+    assert!(IccTransform::new(&link, &IccProfile::srgb(), RenderingIntent::Perceptual).is_err());
+    assert!(IccTransform::device_link(&IccProfile::srgb()).is_err());
+}

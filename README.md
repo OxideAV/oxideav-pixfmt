@@ -592,6 +592,9 @@ t.transform_u16(&rgb16, &mut cmyk16)?;                  // also _u8, _f32, trans
 | PCS | PCSXYZ ↔ PCSLAB (§6.4, Annex A, negative-XYZ extension), every PCS encoding of §6.3.4 |
 | intents | perceptual, media-relative, saturation, ICC-absolute (§6.2.3 white scaling; display media white = PCS white, §9.2.36); §8.10.2 tag fallback order |
 | device spaces | RGB, CMYK, Gray, Lab, XYZ, n-colour (anything a LUT carries) |
+| DeviceLink | `IccTransform::device_link(&p)` runs a link's `AToB0` directly (§8.6) |
+| frames | `icc::transform_frame` over packed `Gray8` / `Ya8` / `Gray16Le` / `Ya16Le` / `GrayF32Le` / `Rgb24` / `Rgba` / `Rgb48Le` / `Rgba64Le` / `RgbF32Le` / `RgbaF32Le` / `Cmyk` / `CmykInverted` (alpha carried or synthesised, the ICC blob replaced); `icc::frame_profile` parses a frame's `BlobKind::ICC` |
+| speed | first-stage curves tabulated per input code on 8-bit and large 16-bit buffers; `TransformOptions::with_threads(n)` splits buffers over scoped threads with identical output. 1 MP 8-bit, Apple M4 Max, serial: sRGB → P3 59 ms, sRGB → Generic CMYK 100 ms, Generic CMYK → sRGB 187 ms |
 | writing | `IccProfileBuilder` (header, tag table, `XYZ `, `curv` / `para`, `mluc`, `sf32`, B-curve `mAB ` / `mBA `) |
 | built-in profiles | `srgb()`, `display_p3()`, `adobe_rgb()`, `rec2020()`, `prophoto()` (v4 matrix/TRC, Bradford-adapted to D50 per Annex E), `gray(curve)`, `lab_d50()` |
 
@@ -613,8 +616,8 @@ interpolation" without fixing the simplex scheme.
 
 Not covered yet: black-point compensation (its algorithm is ISO 18619,
 which is not staged), `DToBx` / `BToDx` multiProcessElements tables (the
-§8.10.2 fallback to `AToBx` / `BToAx` applies), NamedColor profiles, and
-DeviceLink / Abstract profiles as chain members.
+§8.10.2 fallback to `AToBx` / `BToAx` applies), NamedColor profiles,
+Abstract profiles and chains of more than two profiles.
 
 The module is self-contained (`std` only, its own error type) so it can
 be split into its own crate later without changing its API.

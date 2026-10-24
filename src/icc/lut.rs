@@ -22,61 +22,49 @@ impl Clut {
     pub fn eval(&self, input: &[f64], out: &mut [f64]) {
         let n = self.grid.len();
         let o = self.out_ch;
-        // Per-dimension base index, fraction and stride.
-        let mut base = [0usize; 16];
+        // Per-dimension cell origin and fraction; dimensions whose
+        // fraction is zero (or whose grid has one point) contribute only
+        // their lower corner, so they drop out of the corner walk.
         let mut frac = [0f64; 16];
-        let mut stride = [0usize; 16];
-        let mut s = o;
-        for d in (0..n).rev() {
-            stride[d] = s;
-            s *= self.grid[d];
-        }
+        let mut step = [0usize; 16];
+        let mut live = 0usize;
         let mut origin = 0usize;
-        for d in 0..n {
+        let mut stride = o;
+        for d in (0..n).rev() {
             let g = self.grid[d];
-            let x = clamp01(input[d]);
-            if g < 2 {
-                base[d] = 0;
-                frac[d] = 0.0;
-                continue;
-            }
-            let pos = x * (g - 1) as f64;
-            let i = (pos.floor() as usize).min(g - 2);
-            base[d] = i;
-            frac[d] = pos - i as f64;
-            origin += i * stride[d];
-        }
-        for v in out.iter_mut().take(o) {
-            *v = 0.0;
-        }
-        // Visit the 2^n corners of the enclosing cell. Dimensions whose
-        // fraction is exactly zero contribute only their lower corner.
-        let corners = 1usize << n;
-        for mask in 0..corners {
-            let mut w = 1.0;
-            let mut off = origin;
-            let mut skip = false;
-            for d in 0..n {
-                if mask & (1 << d) != 0 {
-                    if frac[d] == 0.0 || self.grid[d] < 2 {
-                        skip = true;
-                        break;
-                    }
-                    w *= frac[d];
-                    off += stride[d];
-                } else {
-                    w *= 1.0 - frac[d];
+            if g >= 2 {
+                let x = clamp01(input[d]);
+                let pos = x * (g - 1) as f64;
+                let i = (pos.floor() as usize).min(g - 2);
+                let f = pos - i as f64;
+                origin += i * stride;
+                if f > 0.0 {
+                    frac[live] = f;
+                    step[live] = stride;
+                    live += 1;
                 }
             }
-            if skip || w == 0.0 {
-                continue;
+            stride *= g;
+        }
+        let mut acc = [0f64; 16];
+        for mask in 0..(1usize << live) {
+            let mut w = 1.0;
+            let mut off = origin;
+            for k in 0..live {
+                if mask & (1 << k) != 0 {
+                    w *= frac[k];
+                    off += step[k];
+                } else {
+                    w *= 1.0 - frac[k];
+                }
             }
-            for (c, v) in out.iter_mut().take(o).enumerate() {
-                *v += w * self.data[off + c] as f64;
+            let cell = &self.data[off..off + o];
+            for (a, &v) in acc.iter_mut().zip(cell) {
+                *a += w * v as f64;
             }
         }
-        for v in out.iter_mut().take(o) {
-            *v /= 65535.0;
+        for (v, a) in out.iter_mut().zip(&acc[..o]) {
+            *v = a / 65535.0;
         }
     }
 }
@@ -120,13 +108,28 @@ impl Lut {
     /// Run the pipeline. `input` holds `in_ch` normalised values;
     /// `output` receives `out_ch` normalised values.
     pub fn eval(&self, input: &[f64], output: &mut [f64]) {
+        self.eval_from(input, output, 0);
+    }
+
+    /// The per-channel curves of the first stage, when the pipeline
+    /// starts with one (callers may pre-tabulate them).
+    pub fn first_curves(&self) -> Option<&[Curve]> {
+        match self.stages.first() {
+            Some(Stage::Curves(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Run the pipeline from stage `start` (`input` already holds the
+    /// output of the stages before it).
+    pub fn eval_from(&self, input: &[f64], output: &mut [f64], start: usize) {
         let mut a = [0f64; 16];
         let mut b = [0f64; 16];
         let mut ch = self.in_ch;
         for (i, v) in input.iter().take(ch).enumerate() {
             a[i] = *v;
         }
-        for st in &self.stages {
+        for st in &self.stages[start..] {
             match st {
                 Stage::Curves(cs) => {
                     for (i, c) in cs.iter().enumerate().take(ch) {

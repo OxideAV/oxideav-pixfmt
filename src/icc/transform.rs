@@ -13,6 +13,9 @@ use crate::mat3::{Mat3, invert3, mul3v};
 pub struct TransformOptions {
     /// Rendering intent (Table 23). Default: perceptual.
     pub intent: RenderingIntent,
+    /// Worker threads for the buffer transforms (`0` and `1` both mean
+    /// serial, the default). The output does not depend on it.
+    pub threads: usize,
 }
 
 impl TransformOptions {
@@ -24,6 +27,12 @@ impl TransformOptions {
     /// Select the rendering intent.
     pub fn with_intent(mut self, intent: RenderingIntent) -> Self {
         self.intent = intent;
+        self
+    }
+
+    /// Run the buffer transforms on up to `threads` scoped threads.
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads;
         self
     }
 }
@@ -73,12 +82,15 @@ enum FromPcs {
 pub struct IccTransform {
     src: ToPcs,
     dst: FromPcs,
+    /// A DeviceLink's AToB0, evaluated directly (`src` / `dst` unused).
+    link: Option<Lut>,
     /// ICC-absolute scaling `src_wtpt / dst_wtpt`, applied in PCSXYZ.
     abs_scale: Option<[f64; 3]>,
     in_ch: usize,
     out_ch: usize,
     in_space: DataColorSpace,
     out_space: DataColorSpace,
+    threads: usize,
 }
 
 fn pcs_kind(p: &IccProfile) -> Result<PcsKind, IccError> {
@@ -141,24 +153,38 @@ impl ToPcs {
         ))
     }
 
-    /// Returns the PCS value and whether it is Lab (`true`) or XYZ.
-    fn eval(&self, d: &[f64]) -> ([f64; 3], PcsKind) {
+    /// The per-channel curves applied first to the device values.
+    fn first_curves(&self) -> Option<&[Curve]> {
+        match self {
+            ToPcs::Lut { lut, .. } => lut.first_curves(),
+            ToPcs::Matrix { curves, .. } => Some(curves),
+            ToPcs::Gray { curve, .. } => Some(core::slice::from_ref(curve)),
+        }
+    }
+
+    /// Returns the PCS value and its encoding. With `pre`, `d` already
+    /// holds the output of [`Self::first_curves`].
+    fn eval(&self, d: &[f64], pre: bool) -> ([f64; 3], PcsKind) {
         match self {
             ToPcs::Lut { lut, pcs } => {
                 let mut n = [0.0; 3];
-                lut.eval(d, &mut n);
+                lut.eval_from(d, &mut n, usize::from(pre));
                 (pcs::decode_pcs(*pcs, lut.kind, n), *pcs)
             }
             ToPcs::Matrix { m, curves } => {
-                let lin = [
-                    curves[0].eval(d[0]),
-                    curves[1].eval(d[1]),
-                    curves[2].eval(d[2]),
-                ];
+                let lin = if pre {
+                    [d[0], d[1], d[2]]
+                } else {
+                    [
+                        curves[0].eval(d[0]),
+                        curves[1].eval(d[1]),
+                        curves[2].eval(d[2]),
+                    ]
+                };
                 (mul3v(m, lin), PcsKind::Xyz)
             }
             ToPcs::Gray { curve, pcs } => {
-                let v = curve.eval(d[0]);
+                let v = if pre { d[0] } else { curve.eval(d[0]) };
                 match pcs {
                     PcsKind::Xyz => (
                         [v * PCS_WHITE[0], v * PCS_WHITE[1], v * PCS_WHITE[2]],
@@ -289,11 +315,54 @@ impl IccTransform {
         Ok(Self {
             src: s,
             dst: d,
+            link: None,
             abs_scale,
             in_ch,
             out_ch,
             in_space: src.header.color_space,
             out_space: dst.header.color_space,
+            threads: opts.threads.max(1),
+        })
+    }
+
+    /// The single transform of a DeviceLink profile (§8.6): its AToB0
+    /// table maps the header's data colour space straight to the colour
+    /// space named in its PCS field. (`DToB0`, which §8.10.3 would
+    /// prefer, is not evaluated.)
+    pub fn device_link(link: &IccProfile) -> Result<Self, IccError> {
+        if link.header.class != ProfileClass::DeviceLink {
+            return Err(IccError::Unsupported("not a DeviceLink profile"));
+        }
+        let in_ch = device_channels(link)?;
+        let out_ch = link
+            .header
+            .pcs
+            .channels()
+            .ok_or(IccError::Unsupported("unknown output colour space"))?;
+        let lut = link.a2b[0]
+            .clone()
+            .ok_or(IccError::Unsupported("DeviceLink without AToB0"))?;
+        if lut.in_ch != in_ch || lut.out_ch != out_ch {
+            return Err(IccError::Malformed("AToB0 channel counts"));
+        }
+        // Placeholders: never evaluated while `link` is set.
+        let id = Curve::Identity;
+        Ok(Self {
+            src: ToPcs::Gray {
+                curve: id.clone(),
+                pcs: PcsKind::Xyz,
+            },
+            dst: FromPcs::Gray {
+                curve: id,
+                pcs: PcsKind::Xyz,
+            },
+            link: Some(lut),
+            abs_scale: None,
+            in_ch,
+            out_ch,
+            in_space: link.header.color_space,
+            out_space: link.header.pcs,
+            threads: 1,
         })
     }
 
@@ -322,7 +391,15 @@ impl IccTransform {
     /// [`Self::input_channels`] values and `output` at least
     /// [`Self::output_channels`].
     pub fn transform_pixel(&self, input: &[f64], output: &mut [f64]) {
-        let (v, kind) = self.src.eval(input);
+        self.pixel(input, output, false);
+    }
+
+    fn pixel(&self, input: &[f64], output: &mut [f64], pre: bool) {
+        if let Some(l) = &self.link {
+            l.eval_from(input, output, usize::from(pre));
+            return;
+        }
+        let (v, kind) = self.src.eval(input, pre);
         let want = self.dst.wants();
         let v = match self.abs_scale {
             Some(s) => {
@@ -358,54 +435,118 @@ impl IccTransform {
         Ok(px)
     }
 
+    /// Shared batch driver: optional pre-tabulated first-stage curves
+    /// (`tables[c][code]`), split over `self.threads` scoped threads.
+    #[allow(clippy::too_many_arguments)]
+    fn run<S, D>(
+        &self,
+        src: &[S],
+        dst: &mut [D],
+        px: usize,
+        norm: impl Fn(S) -> f64 + Sync,
+        code: impl Fn(S) -> usize + Sync,
+        tables: Option<&[Vec<f64>]>,
+        quant: impl Fn(f64) -> D + Sync,
+    ) where
+        S: Copy + Sync,
+        D: Send,
+    {
+        let (ic, oc) = (self.in_ch, self.out_ch);
+        let work = |src: &[S], dst: &mut [D]| {
+            let mut i = [0f64; 15];
+            let mut o = [0f64; 15];
+            for (s, d) in src.chunks_exact(ic).zip(dst.chunks_exact_mut(oc)) {
+                match tables {
+                    Some(t) => {
+                        for c in 0..ic {
+                            i[c] = t[c][code(s[c])];
+                        }
+                        self.pixel(&i, &mut o, true);
+                    }
+                    None => {
+                        for c in 0..ic {
+                            i[c] = norm(s[c]);
+                        }
+                        self.pixel(&i, &mut o, false);
+                    }
+                }
+                for c in 0..oc {
+                    d[c] = quant(o[c]);
+                }
+            }
+        };
+        let threads = self.threads.clamp(1, px.max(1));
+        if threads == 1 {
+            work(&src[..px * ic], &mut dst[..px * oc]);
+            return;
+        }
+        let per = px.div_ceil(threads);
+        std::thread::scope(|sc| {
+            for (s, d) in src[..px * ic]
+                .chunks(per * ic)
+                .zip(dst[..px * oc].chunks_mut(per * oc))
+            {
+                let work = &work;
+                sc.spawn(move || work(s, d));
+            }
+        });
+    }
+
+    /// Tabulate the first-stage curves for every input code `0..=max`.
+    fn tables(&self, max: usize) -> Option<Vec<Vec<f64>>> {
+        let curves = match &self.link {
+            Some(l) => l.first_curves()?,
+            None => self.src.first_curves()?,
+        };
+        Some(
+            curves
+                .iter()
+                .map(|c| (0..=max).map(|k| c.eval(k as f64 / max as f64)).collect())
+                .collect(),
+        )
+    }
+
     /// Transform interleaved `f32` pixels (normalised device values).
     pub fn transform_f32(&self, src: &[f32], dst: &mut [f32]) -> Result<(), IccError> {
         let px = self.check_len(src.len(), dst.len())?;
-        let mut i = [0f64; 15];
-        let mut o = [0f64; 15];
-        for p in 0..px {
-            for c in 0..self.in_ch {
-                i[c] = src[p * self.in_ch + c] as f64;
-            }
-            self.transform_pixel(&i, &mut o);
-            for c in 0..self.out_ch {
-                dst[p * self.out_ch + c] = o[c] as f32;
-            }
-        }
+        self.run(src, dst, px, |v| v as f64, |_| 0, None, |v| v as f32);
         Ok(())
     }
 
     /// Transform interleaved 16-bit pixels (`0..=65535` full scale).
     pub fn transform_u16(&self, src: &[u16], dst: &mut [u16]) -> Result<(), IccError> {
         let px = self.check_len(src.len(), dst.len())?;
-        let mut i = [0f64; 15];
-        let mut o = [0f64; 15];
-        for p in 0..px {
-            for c in 0..self.in_ch {
-                i[c] = src[p * self.in_ch + c] as f64 / 65535.0;
-            }
-            self.transform_pixel(&i, &mut o);
-            for c in 0..self.out_ch {
-                dst[p * self.out_ch + c] = (o[c].clamp(0.0, 1.0) * 65535.0).round() as u16;
-            }
-        }
+        // Tabulating 65536 codes per channel pays off on larger images.
+        let tables = if px >= 1 << 15 {
+            self.tables(65535)
+        } else {
+            None
+        };
+        self.run(
+            src,
+            dst,
+            px,
+            |v| v as f64 / 65535.0,
+            |v| v as usize,
+            tables.as_deref(),
+            |v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16,
+        );
         Ok(())
     }
 
     /// Transform interleaved 8-bit pixels (`0..=255` full scale).
     pub fn transform_u8(&self, src: &[u8], dst: &mut [u8]) -> Result<(), IccError> {
         let px = self.check_len(src.len(), dst.len())?;
-        let mut i = [0f64; 15];
-        let mut o = [0f64; 15];
-        for p in 0..px {
-            for c in 0..self.in_ch {
-                i[c] = src[p * self.in_ch + c] as f64 / 255.0;
-            }
-            self.transform_pixel(&i, &mut o);
-            for c in 0..self.out_ch {
-                dst[p * self.out_ch + c] = (o[c].clamp(0.0, 1.0) * 255.0).round() as u8;
-            }
-        }
+        let tables = if px >= 256 { self.tables(255) } else { None };
+        self.run(
+            src,
+            dst,
+            px,
+            |v| v as f64 / 255.0,
+            |v| v as usize,
+            tables.as_deref(),
+            |v| (v.clamp(0.0, 1.0) * 255.0).round() as u8,
+        );
         Ok(())
     }
 }

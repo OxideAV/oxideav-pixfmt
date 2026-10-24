@@ -283,3 +283,145 @@ fn buffer_length_checks() {
         .unwrap();
     assert!((f[0] - 1.0).abs() < 1e-6 && f[1].abs() < 1e-6);
 }
+
+#[test]
+fn threads_and_tabulated_curves_do_not_change_results() {
+    use oxideav_pixfmt::icc::TransformOptions;
+    let s = IccProfile::srgb();
+    let d = IccProfile::display_p3();
+    let serial = IccTransform::new(&s, &d, RenderingIntent::Perceptual).unwrap();
+    let par = IccTransform::with_options(
+        &s,
+        &d,
+        TransformOptions::new()
+            .with_intent(RenderingIntent::Perceptual)
+            .with_threads(4),
+    )
+    .unwrap();
+    // ≥ 2^15 pixels: the u16 path tabulates the input curves.
+    let n = 40_000usize;
+    let src: Vec<u16> = (0..n * 3)
+        .map(|i| ((i as u32).wrapping_mul(2654435761) >> 16) as u16)
+        .collect();
+    let mut a = vec![0u16; n * 3];
+    let mut b = vec![0u16; n * 3];
+    serial.transform_u16(&src, &mut a).unwrap();
+    par.transform_u16(&src, &mut b).unwrap();
+    assert_eq!(a, b);
+    // Per-pixel reference (no tables).
+    for p in (0..n).step_by(997) {
+        let i: Vec<f64> = src[p * 3..p * 3 + 3]
+            .iter()
+            .map(|&v| v as f64 / 65535.0)
+            .collect();
+        let mut o = [0.0; 3];
+        serial.transform_pixel(&i, &mut o);
+        for c in 0..3 {
+            assert_eq!(
+                a[p * 3 + c],
+                (o[c].clamp(0.0, 1.0) * 65535.0).round() as u16
+            );
+        }
+    }
+    let src8: Vec<u8> = src.iter().map(|&v| (v >> 8) as u8).collect();
+    let mut a8 = vec![0u8; n * 3];
+    let mut b8 = vec![0u8; n * 3];
+    serial.transform_u8(&src8, &mut a8).unwrap();
+    par.transform_u8(&src8, &mut b8).unwrap();
+    assert_eq!(a8, b8);
+    // A short buffer (no tables) agrees with the long one.
+    let mut c8 = vec![0u8; 30];
+    serial.transform_u8(&src8[..30], &mut c8).unwrap();
+    assert_eq!(&c8[..], &a8[..30]);
+}
+
+#[test]
+fn frame_transform_carries_alpha_and_replaces_the_icc_blob() {
+    use oxideav_core::{BlobKind, MetadataBlob, PixelFormat, VideoFrame, VideoPlane};
+    use oxideav_pixfmt::FrameInfo;
+    use oxideav_pixfmt::icc::{frame_profile, transform_frame};
+    let s = IccProfile::srgb();
+    let g = IccProfile::gray(&Curve::srgb());
+    // 2×2 RGBA with a padded stride and an embedded sRGB profile.
+    let px: [[u8; 4]; 4] = [
+        [255, 255, 255, 10],
+        [0, 0, 0, 20],
+        [128, 128, 128, 30],
+        [255, 0, 0, 40],
+    ];
+    let stride = 12;
+    let mut data = vec![0xAAu8; stride * 2];
+    for (k, p) in px.iter().enumerate() {
+        let o = (k / 2) * stride + (k % 2) * 4;
+        data[o..o + 4].copy_from_slice(p);
+    }
+    let mut f = VideoFrame {
+        pts: Some(7),
+        planes: vec![VideoPlane { stride, data }],
+    };
+    f.set_blobs(vec![
+        MetadataBlob::new(BlobKind::ICC, s.as_bytes().to_vec()),
+        MetadataBlob::new(BlobKind::EXIF, vec![1, 2, 3]),
+    ]);
+    let src_profile = frame_profile(&f).unwrap().unwrap();
+    let t = IccTransform::new(&src_profile, &g, RenderingIntent::RelativeColorimetric).unwrap();
+    let out = transform_frame(
+        &t,
+        &f,
+        FrameInfo::new(PixelFormat::Rgba, 2, 2),
+        PixelFormat::Ya8,
+        Some(&g),
+    )
+    .unwrap();
+    assert_eq!(out.pts, Some(7));
+    let plane = &out.image_planes()[0];
+    assert_eq!(plane.stride, 4);
+    // White → 255, black → 0, neutral 128 stays 128 (same sRGB curve);
+    // alpha carried.
+    assert_eq!(&plane.data[0..2], &[255, 10]);
+    assert_eq!(&plane.data[2..4], &[0, 20]);
+    assert!((plane.data[4] as i32 - 128).abs() <= 1 && plane.data[5] == 30);
+    assert_eq!(plane.data[7], 40);
+    assert_eq!(out.blob(&BlobKind::ICC).unwrap().data, g.as_bytes());
+    assert_eq!(out.blob(&BlobKind::EXIF).unwrap().data, vec![1, 2, 3]);
+    // Gray8 → Rgba64Le synthesises opaque alpha.
+    let back = IccTransform::new(&g, &s, RenderingIntent::RelativeColorimetric).unwrap();
+    let gray = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: 1,
+            data: vec![255],
+        }],
+    };
+    let o = transform_frame(
+        &back,
+        &gray,
+        FrameInfo::new(PixelFormat::Gray8, 1, 1),
+        PixelFormat::Rgba64Le,
+        None,
+    )
+    .unwrap();
+    assert_eq!(o.image_planes()[0].data, vec![255; 8]);
+    // Channel mismatch is an error, not a panic.
+    assert!(
+        transform_frame(
+            &back,
+            &gray,
+            FrameInfo::new(PixelFormat::Rgb24, 1, 1),
+            PixelFormat::Rgb24,
+            None
+        )
+        .is_err()
+    );
+    // Short plane.
+    assert!(
+        transform_frame(
+            &t,
+            &gray,
+            FrameInfo::new(PixelFormat::Rgba, 4, 4),
+            PixelFormat::Gray8,
+            None
+        )
+        .is_err()
+    );
+}

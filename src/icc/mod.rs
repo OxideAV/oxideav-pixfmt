@@ -20,7 +20,9 @@
 //!   the §8.10.2 fallback order, and ICC-absolute colorimetric via the
 //!   media-white-point scaling of §6.2.3 (equations 1–6);
 //! - RGB, CMYK, Gray, Lab, XYZ and n-colour device spaces, on `f32`,
-//!   8-bit and 16-bit interleaved buffers ([`IccTransform`]);
+//!   8-bit and 16-bit interleaved buffers ([`IccTransform`]), and on
+//!   packed `VideoFrame`s with alpha carry and the frame's own ICC blob
+//!   ([`transform_frame`], [`frame_profile`]);
 //! - a small profile writer and synthesized matrix/TRC profiles of the
 //!   sRGB, Display P3, Adobe RGB (1998), BT.2020 and ProPhoto shapes
 //!   ([`IccProfileBuilder`], [`IccProfile::srgb`] …).
@@ -35,6 +37,7 @@
 
 mod build;
 mod curve;
+mod frame;
 mod lut;
 mod pcs;
 mod profile;
@@ -42,6 +45,7 @@ mod transform;
 
 pub use build::IccProfileBuilder;
 pub use curve::Curve;
+pub use frame::{frame_formats, frame_profile, transform_frame};
 pub use pcs::{PCS_WHITE, lab_to_xyz, xyz_to_lab};
 pub use profile::{DataColorSpace, IccHeader, IccProfile, ProfileClass, RenderingIntent, TagEntry};
 pub use transform::{IccTransform, TransformOptions};
