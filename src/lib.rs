@@ -41,8 +41,10 @@
 //!
 //! # Colour spaces and ICC profiles
 //!
-//! [`colorspace`] holds floating-point colorimetry (RGB primaries →
-//! XYZ, Bradford adaptation, CIEDE2000). With the `icc` feature,
+//! [`colorspace`] holds floating-point colour models (linear sRGB, XYZ,
+//! xyY, CIELAB / LCh, Oklab / OkLCh, HSL, HWB, CMY / CMYK, gray,
+//! Y′PbPr / Y′CbCr) and colorimetry (RGB primaries → XYZ, Bradford
+//! adaptation, CIEDE2000). With the `icc` feature,
 //! `icc` parses ICC v2 / v4 profiles and builds profile-to-profile
 //! transforms (matrix/TRC, grayTRC, `mft1` / `mft2` / `mAB ` / `mBA `
 //! LUTs, all four rendering intents).

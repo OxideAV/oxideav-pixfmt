@@ -523,6 +523,42 @@ inverse OETF returns relative scene light; pass it through
 `hlg_apply_ootf` with the user gain α and system gamma γ to obtain
 display-light values.
 
+## Colour models — `colorspace`
+
+`colorspace::ColorModel` converts gamma-encoded sRGB to and from other
+colour models on `f64`, unclamped, in natural units (hues in degrees,
+`L*` 0..100, XYZ with white at `Y = 1`):
+
+| model | `ColorModel` | staged source |
+| ----- | ------------ | ------------- |
+| linear sRGB | `LinearSrgb` | CSS Color 4 §10.2–10.3 |
+| CIE XYZ (D65, or D50 via Bradford) | `XyzD65`, `XyzD50` | Khronos Data Format 1.4 §14, ICC.1:2022 Annex E |
+| CIE xyY | `XyY` | Khronos Data Format 1.4 §14 |
+| CIELAB, LCh(ab) (D65 or D50 white) | `Lab(_)`, `Lch(_)` | ICC.1:2022 Annex A, CSS Color 4 §9 |
+| Oklab, OkLCh | `Oklab`, `Oklch` | CSS Color 4 §9.2, §19 |
+| HSL, HWB | `Hsl`, `Hwb` | CSS Color 4 §7, §8 |
+| device CMY | `Cmy` | ISO 32000-2 §10.4.2.4 |
+| gray / linear gray (any luma weights) | `Gray(_)`, `LinearGray(_)` | BT.601 / BT.709 / BT.2020 weights, ISO 32000-2 §10.4.2.2 |
+| Y′PbPr, full-range Y′CbCr | `YPbPr(_)`, `YCbCr(_)` | ITU-T H.273 eq. 37, 44–46 |
+
+Device CMYK has four-channel functions: `rgb_to_cmyk_with(rgb, bg,
+ucr)` takes the black-generation and undercolour-removal functions of
+ISO 32000-2 §10.4.2.4 (GCR / UCR strength), `rgb_to_cmyk` uses
+`BG(k) = UCR(k) = k`, and `cmyk_to_rgb` is §10.4.2.5. `delta_e2000`
+is the CIEDE2000 difference (CSS Color 4 §20.2).
+
+Every model round-trips sRGB within ±1 LSB at 16 bits with the model
+values held as `f32` (`tests/colorspace_models.rs`). Against
+`magick -colorspace X` (Q16-HDRI float I/O, after ImageMagick's own
+channel scaling) the values agree within 1e-4 for RGB, Gray,
+LinearGray, XYZ, xyY, Lab, LCHab, Oklab, Oklch, HSL, HWB, CMY and
+Rec709YCbCr, and within 4e-4 for Rec601YCbCr / YPbPr, where
+ImageMagick's luma weights differ slightly from BT.601's 0.299 / 0.114.
+
+Not provided, because the defining formulas are not in the staged
+references: HSV / HSB, HSI, HCL, HCLp, CIELUV / LCHuv, LMS, YIQ, YUV,
+YDbDr, Kodak YCC, OHTA, Jzazbz and the Cineon "Log" encoding.
+
 ## ICC colour management (feature `icc`)
 
 ```toml
