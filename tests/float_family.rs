@@ -375,10 +375,7 @@ fn gray_broadcast_and_linear_luminance() {
             &src,
             FrameInfo::new(PixelFormat::RgbaF32Le, 1, 1),
             PixelFormat::GrayF32Le,
-            &ConvertOptions {
-                color_space: cs,
-                ..Default::default()
-            },
+            &ConvertOptions::default().with_color_space(cs),
         )
         .unwrap();
         let y = f32s(&out.planes[0].data)[0];

@@ -254,23 +254,31 @@
 //! attached — see the policy section on [`convert`] for the details.
 
 pub mod alpha;
+#[doc(hidden)]
 pub mod cmyk;
 pub mod colorspace;
 pub mod convert;
+#[doc(hidden)]
 pub mod dither;
+#[doc(hidden)]
 pub mod float;
 pub mod format_info;
+#[doc(hidden)]
 pub mod gray;
 #[cfg(feature = "icc")]
 pub mod icc;
 mod mat3;
+#[doc(hidden)]
 pub mod packed16;
+#[doc(hidden)]
 pub mod pal8;
 pub mod palette;
 mod planar8;
+#[doc(hidden)]
 pub mod rgb;
 mod simd_dispatch;
 pub mod transfer;
+#[doc(hidden)]
 pub mod yuv;
 mod yuv_simd;
 

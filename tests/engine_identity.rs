@@ -196,10 +196,7 @@ fn matrix_for(cs: ColorSpace, full_range: bool) -> YuvMatrix {
 }
 
 fn opts(cs: ColorSpace) -> ConvertOptions {
-    ConvertOptions {
-        color_space: cs,
-        ..Default::default()
-    }
+    ConvertOptions::default().with_color_space(cs)
 }
 
 #[test]

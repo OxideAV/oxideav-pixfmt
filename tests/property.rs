@@ -357,10 +357,7 @@ fn prop_full_frame_yuv_roundtrip_psnr_floor() {
     // of dimensions.
     let mut rng = Rng::new(0xC0FF_EE11);
     for cs in COLOR_SPACES {
-        let opts = ConvertOptions {
-            color_space: cs,
-            ..Default::default()
-        };
+        let opts = ConvertOptions::default().with_color_space(cs);
         for _ in 0..cases(8, 1) {
             // Keep the lower dimension bound at native size under miri
             // (smaller frames steepen the gradient and would erode the

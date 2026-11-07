@@ -8,6 +8,7 @@ use oxideav_core::PixelFormat;
 
 /// Compact description of a pixel format's layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FormatInfo {
     /// Component bit depth (before packing). 8 for Rgb24, 16 for Gray16Le,
     /// 10 for Yuv420P10Le, … For the packed 16-bit RGB words it is the

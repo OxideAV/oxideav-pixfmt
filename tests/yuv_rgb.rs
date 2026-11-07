@@ -340,10 +340,7 @@ fn subsampled_yuv_to_rgb_rejects_odd_dimensions() {
 
 #[test]
 fn bt2020_limited_yuv444_roundtrip_is_near_lossless() {
-    let opts = ConvertOptions {
-        color_space: ColorSpace::Bt2020Limited,
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_color_space(ColorSpace::Bt2020Limited);
     let (src, src_info) = synth_rgb24(64, 48);
     let yuv = convert(&src, src_info, PixelFormat::Yuv444P, &opts).unwrap();
     let yuv_info = FrameInfo::new(PixelFormat::Yuv444P, src_info.width, src_info.height);
@@ -355,10 +352,7 @@ fn bt2020_limited_yuv444_roundtrip_is_near_lossless() {
 
 #[test]
 fn bt2020_full_yuv444_roundtrip_is_lossless_for_neutrals() {
-    let opts = ConvertOptions {
-        color_space: ColorSpace::Bt2020Full,
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_color_space(ColorSpace::Bt2020Full);
     let (src, src_info) = synth_rgb24(32, 32);
     let yuv = convert(&src, src_info, PixelFormat::Yuv444P, &opts).unwrap();
     let yuv_info = FrameInfo::new(PixelFormat::Yuv444P, src_info.width, src_info.height);

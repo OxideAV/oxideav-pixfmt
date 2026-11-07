@@ -142,10 +142,7 @@ fn opts() -> ConvertOptions {
     let colors: Vec<[u8; 4]> = (0..=255u16)
         .map(|i| [i as u8, i as u8, i as u8, 255])
         .collect();
-    ConvertOptions {
-        palette: Some(Palette { colors }),
-        ..Default::default()
-    }
+    ConvertOptions::default().with_palette(Some(Palette { colors }))
 }
 
 #[test]

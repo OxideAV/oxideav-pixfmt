@@ -30,6 +30,7 @@ use crate::yuv::{self, YuvMatrix};
 /// through every conversion so the helpers know how to interpret the
 /// raw plane bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FrameInfo {
     pub format: PixelFormat,
     pub width: u32,
@@ -48,6 +49,7 @@ impl FrameInfo {
 
 /// Dither strategy selected when down-quantising to a palette.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Dither {
     #[default]
     None,
@@ -61,6 +63,7 @@ pub enum Dither {
 /// from ITU-R BT.2020-2 Table 4 (kr=0.2627, kb=0.0593). The same
 /// coefficients are reused by ITU-R BT.2100-3 Table 6 for HDR video.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ColorSpace {
     #[default]
     Bt601Limited,
@@ -83,10 +86,36 @@ pub enum ColorSpace {
 /// [`ConvertContext::signal`] passed to [`convert_with`] — takes
 /// precedence over both; see [`convert_with`].
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct ConvertOptions {
     pub dither: Dither,
     pub palette: Option<Palette>,
     pub color_space: ColorSpace,
+}
+
+impl ConvertOptions {
+    /// Default options: no dithering, no palette, BT.601 limited.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the dither strategy.
+    pub fn with_dither(mut self, dither: Dither) -> Self {
+        self.dither = dither;
+        self
+    }
+
+    /// Set (or clear) the target palette for `Pal8` output.
+    pub fn with_palette(mut self, palette: Option<Palette>) -> Self {
+        self.palette = palette;
+        self
+    }
+
+    /// Set the YUV / RGB matrix selection.
+    pub fn with_color_space(mut self, color_space: ColorSpace) -> Self {
+        self.color_space = color_space;
+        self
+    }
 }
 
 /// Per-call context for [`convert_with`]: the pieces of a conversion

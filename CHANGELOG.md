@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ConvertOptions::new` plus `with_dither` / `with_palette` / `with_color_space` builders.
+- `PaletteGenOptions::new` plus `with_strategy` / `with_max_colors` / `with_transparency` builders.
+
+### Changed
+
+- `#[non_exhaustive]` on the `Dither`, `ColorSpace`, `PaletteStrategy` and `TransferFunction` enums and on the `FrameInfo`, `FormatInfo`, `ConvertOptions` and `PaletteGenOptions` records. Build them with `FrameInfo::new`, `FormatInfo::of`, `Default` / `new()` and the `with_*` builders. `RenderingIntent` stays exhaustive (ICC.1 Table 23 fixes its four values).
+- `#[doc(hidden)]` on the internal kernel modules `cmyk`, `dither`, `float`, `gray`, `packed16`, `pal8`, `rgb` and `yuv`. They stay `pub` for the crate's tests and benches; reach the conversions through `convert` / `convert_with`.
+
 ## [0.1.12](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.11...v0.1.12) - 2026-10-24
 
 ### Added

@@ -107,10 +107,7 @@ fn gray16_ramp_round_trips_through_rgb48_bit_exact() {
         ColorSpace::Bt709Full,
         ColorSpace::Bt2020Limited,
     ] {
-        let opts = ConvertOptions {
-            color_space: cs,
-            ..Default::default()
-        };
+        let opts = ConvertOptions::default().with_color_space(cs);
         for mid in [PixelFormat::Rgb48Le, PixelFormat::Rgba64Le] {
             let rgb = convert(
                 &src,
@@ -144,6 +141,7 @@ fn kr_kb(cs: ColorSpace) -> (f64, f64) {
         ColorSpace::Bt601Limited | ColorSpace::Bt601Full => (0.299, 0.114),
         ColorSpace::Bt709Limited | ColorSpace::Bt709Full => (0.2126, 0.0722),
         ColorSpace::Bt2020Limited | ColorSpace::Bt2020Full => (0.2627, 0.0593),
+        other => panic!("no weights for {other:?}"),
     }
 }
 
@@ -176,10 +174,7 @@ fn check_luma(pixels: &[(u16, u16, u16)], cs: ColorSpace, alpha: bool) {
         PixelFormat::Rgb48Le
     };
     let src = frame(w as usize * comps * 2, le16(&words));
-    let opts = ConvertOptions {
-        color_space: cs,
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_color_space(cs);
     let out = convert(&src, FrameInfo::new(sf, w, h), PixelFormat::Gray16Le, &opts).unwrap();
     let got = rd16(&out.planes[0].data);
     let mut max_err = 0.0f64;
@@ -281,10 +276,7 @@ fn gray16_projection_ignores_the_range_half() {
         (ColorSpace::Bt2020Limited, ColorSpace::Bt2020Full),
     ] {
         let run = |cs| {
-            let opts = ConvertOptions {
-                color_space: cs,
-                ..Default::default()
-            };
+            let opts = ConvertOptions::default().with_color_space(cs);
             convert(
                 &src,
                 FrameInfo::new(PixelFormat::Rgb48Le, w, h),

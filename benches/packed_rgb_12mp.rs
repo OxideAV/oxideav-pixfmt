@@ -88,10 +88,7 @@ fn bench_packed_rgb_12mp(c: &mut Criterion) {
         });
     }
     for dither in [Dither::Bayer8x8, Dither::FloydSteinberg] {
-        let opts = ConvertOptions {
-            dither,
-            ..Default::default()
-        };
+        let opts = ConvertOptions::default().with_dither(dither);
         let info = FrameInfo::new(PixelFormat::Rgb24, W, H);
         group.throughput(Throughput::Bytes((W as u64) * (H as u64) * 5));
         group.bench_function(format!("Rgb24_to_Rgb565Le_{dither:?}"), |b| {

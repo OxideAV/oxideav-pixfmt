@@ -141,10 +141,7 @@ fn yuv444_to_rgb24_matches_validator() {
             &src,
             FrameInfo::new(PixelFormat::Yuv444P, W as u32, H as u32),
             PixelFormat::Rgb24,
-            &ConvertOptions {
-                color_space: cs,
-                ..Default::default()
-            },
+            &ConvertOptions::default().with_color_space(cs),
         )
         .expect("convert");
         let diff = max_abs_diff(&ours.planes[0].data, &theirs);

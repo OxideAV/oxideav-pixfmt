@@ -105,11 +105,10 @@ fn octree_palette_respects_max_and_roundtrips() {
     let (src, src_info) = gradient_rgb24(dim, dim);
     let palette = generate_palette(
         &[(&src, src_info)],
-        &PaletteGenOptions {
-            strategy: PaletteStrategy::Octree,
-            max_colors: 64,
-            transparency: None,
-        },
+        &PaletteGenOptions::default()
+            .with_strategy(PaletteStrategy::Octree)
+            .with_max_colors(64)
+            .with_transparency(None),
     )
     .unwrap();
     assert!(
@@ -122,22 +121,20 @@ fn octree_palette_respects_max_and_roundtrips() {
         palette.colors.len()
     );
 
-    let opts = ConvertOptions {
-        dither: Dither::FloydSteinberg,
-        palette: Some(palette.clone()),
-        color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
-    };
+    let opts = ConvertOptions::default()
+        .with_dither(Dither::FloydSteinberg)
+        .with_palette(Some(palette.clone()))
+        .with_color_space(oxideav_pixfmt::ColorSpace::Bt601Limited);
     let pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
     let pal8_info = FrameInfo::new(PixelFormat::Pal8, src_info.width, src_info.height);
     let back = convert(
         &pal8,
         pal8_info,
         PixelFormat::Rgb24,
-        &ConvertOptions {
-            dither: Dither::None,
-            palette: Some(palette),
-            color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
-        },
+        &ConvertOptions::default()
+            .with_dither(Dither::None)
+            .with_palette(Some(palette))
+            .with_color_space(oxideav_pixfmt::ColorSpace::Bt601Limited),
     )
     .unwrap();
     let psnr = psnr_rgb(&src.planes[0].data, &back.planes[0].data);
@@ -153,11 +150,10 @@ fn octree_palette_small_max_caps_output() {
     let (frame, info) = deterministic_rgba(dim, dim, 0xCAFEF00D);
     let palette = generate_palette(
         &[(&frame, info)],
-        &PaletteGenOptions {
-            strategy: PaletteStrategy::Octree,
-            max_colors: 16,
-            transparency: None,
-        },
+        &PaletteGenOptions::default()
+            .with_strategy(PaletteStrategy::Octree)
+            .with_max_colors(16)
+            .with_transparency(None),
     )
     .unwrap();
     assert!(palette.colors.len() <= 16);
@@ -173,11 +169,10 @@ fn uniform_palette_has_256_entries() {
     #[cfg(not(miri))]
     let dim = 64;
     let (frame, info) = deterministic_rgba(dim, dim, 0xB16B00B5);
-    let opts = PaletteGenOptions {
-        strategy: PaletteStrategy::Uniform,
-        max_colors: 255, // u8 max
-        transparency: None,
-    };
+    let opts = PaletteGenOptions::default()
+        .with_strategy(PaletteStrategy::Uniform)
+        .with_max_colors(255) // u8 max
+        .with_transparency(None);
     let palette = generate_palette(&[(&frame, info)], &opts).unwrap();
     assert_eq!(palette.colors.len(), 255);
 }
@@ -191,19 +186,17 @@ fn pal8_roundtrip_exceeds_24_db() {
     let (src, src_info) = gradient_rgb24(dim, dim);
     let palette = generate_palette(
         &[(&src, src_info)],
-        &PaletteGenOptions {
-            strategy: PaletteStrategy::MedianCut,
-            max_colors: 64,
-            transparency: None,
-        },
+        &PaletteGenOptions::default()
+            .with_strategy(PaletteStrategy::MedianCut)
+            .with_max_colors(64)
+            .with_transparency(None),
     )
     .unwrap();
 
-    let opts = ConvertOptions {
-        dither: Dither::FloydSteinberg,
-        palette: Some(palette.clone()),
-        color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
-    };
+    let opts = ConvertOptions::default()
+        .with_dither(Dither::FloydSteinberg)
+        .with_palette(Some(palette.clone()))
+        .with_color_space(oxideav_pixfmt::ColorSpace::Bt601Limited);
 
     let pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
     let pal8_info = FrameInfo::new(PixelFormat::Pal8, src_info.width, src_info.height);
@@ -211,11 +204,10 @@ fn pal8_roundtrip_exceeds_24_db() {
         &pal8,
         pal8_info,
         PixelFormat::Rgb24,
-        &ConvertOptions {
-            dither: Dither::None,
-            palette: Some(palette),
-            color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
-        },
+        &ConvertOptions::default()
+            .with_dither(Dither::None)
+            .with_palette(Some(palette))
+            .with_color_space(oxideav_pixfmt::ColorSpace::Bt601Limited),
     )
     .unwrap();
     let psnr = psnr_rgb(&src.planes[0].data, &back.planes[0].data);
@@ -228,18 +220,16 @@ fn pal8_decode_missing_palette_errors() {
     let (src, src_info) = gradient_rgb24(8, 4);
     let palette = generate_palette(
         &[(&src, src_info)],
-        &PaletteGenOptions {
-            strategy: PaletteStrategy::MedianCut,
-            max_colors: 16,
-            transparency: None,
-        },
+        &PaletteGenOptions::default()
+            .with_strategy(PaletteStrategy::MedianCut)
+            .with_max_colors(16)
+            .with_transparency(None),
     )
     .unwrap();
-    let opts = ConvertOptions {
-        dither: Dither::None,
-        palette: Some(palette),
-        color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
-    };
+    let opts = ConvertOptions::default()
+        .with_dither(Dither::None)
+        .with_palette(Some(palette))
+        .with_color_space(oxideav_pixfmt::ColorSpace::Bt601Limited);
     let mut pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
     let pal8_info = FrameInfo::new(PixelFormat::Pal8, src_info.width, src_info.height);
     // RGB → Pal8 attaches the colour table as the frame's palette
@@ -284,10 +274,7 @@ fn pal8_side_channel_takes_precedence_and_roundtrips() {
     let red = oxideav_pixfmt::Palette {
         colors: (0..16).map(|_| [255, 0, 0, 255]).collect(),
     };
-    let opts = ConvertOptions {
-        palette: Some(red),
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_palette(Some(red));
     let rgb = convert(&frame, info, PixelFormat::Rgb24, &opts).unwrap();
     for (i, px) in rgb.planes[0].data.as_chunks::<3>().0.iter().enumerate() {
         let want = (i as u8) * 16;
@@ -306,18 +293,16 @@ fn rgb_to_pal8_attaches_matching_side_channel() {
     let (src, src_info) = gradient_rgb24(16, 8);
     let palette = generate_palette(
         &[(&src, src_info)],
-        &PaletteGenOptions {
-            strategy: PaletteStrategy::MedianCut,
-            max_colors: 32,
-            transparency: None,
-        },
+        &PaletteGenOptions::default()
+            .with_strategy(PaletteStrategy::MedianCut)
+            .with_max_colors(32)
+            .with_transparency(None),
     )
     .unwrap();
-    let opts = ConvertOptions {
-        dither: Dither::None,
-        palette: Some(palette.clone()),
-        color_space: oxideav_pixfmt::ColorSpace::Bt601Limited,
-    };
+    let opts = ConvertOptions::default()
+        .with_dither(Dither::None)
+        .with_palette(Some(palette.clone()))
+        .with_color_space(oxideav_pixfmt::ColorSpace::Bt601Limited);
     let pal8 = convert(&src, src_info, PixelFormat::Pal8, &opts).unwrap();
     // The attached side-channel mirrors the quantisation palette's RGB
     // columns entry-for-entry (alpha is not representable there).

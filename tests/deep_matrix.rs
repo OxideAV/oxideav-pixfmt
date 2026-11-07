@@ -173,10 +173,7 @@ fn deep_444_roundtrip_within_2lsb_16bit() {
         }],
     };
     for cs in SPACES {
-        let opts = ConvertOptions {
-            color_space: cs,
-            ..Default::default()
-        };
+        let opts = ConvertOptions::default().with_color_space(cs);
         let yuv = convert(
             &src,
             FrameInfo::new(PixelFormat::Rgb48Le, w as u32, h as u32),

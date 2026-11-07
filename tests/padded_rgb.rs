@@ -284,12 +284,9 @@ fn gray8_and_pal8_hops() {
             ]
         })
         .collect();
-    let opts = ConvertOptions {
-        palette: Some(Palette {
-            colors: colors.clone(),
-        }),
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_palette(Some(Palette {
+        colors: colors.clone(),
+    }));
     let pal = tight(random_bytes(n, &mut seed), w as usize);
     for &pf in &PADDED {
         let [pr, pg, pb, px] = pos4(pf);

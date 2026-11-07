@@ -419,12 +419,9 @@ fn gray8_and_pal8_hops() {
             ]
         })
         .collect();
-    let opts = ConvertOptions {
-        palette: Some(Palette {
-            colors: colors.clone(),
-        }),
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_palette(Some(Palette {
+        colors: colors.clone(),
+    }));
     let pal = tight(random_bytes(w as usize * h as usize, &mut seed), w as usize);
     for &wf in &WORDS {
         let l = layout(wf);
@@ -481,10 +478,7 @@ fn ordered_dither_to_565_is_pinned() {
     // 13 exactly when t ≥ 4, i.e. m ≥ 32. Green (6 bits): 100 = 25 · 4
     // + 0, and t = m >> 4 ≤ 3 never reaches the next code.
     let rgb = tight(vec![100u8; 8 * 8 * 3], 24);
-    let opts = ConvertOptions {
-        dither: Dither::Bayer8x8,
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_dither(Dither::Bayer8x8);
     let out = conv_opts(&rgb, PixelFormat::Rgb24, PixelFormat::Rgb565Le, 8, 8, &opts);
     for y in 0..8 {
         for x in 0..8 {
@@ -542,10 +536,7 @@ fn ordered_dither_on_a_565_to_555_relayout_touches_green_only() {
         px.copy_from_slice(&word.to_le_bytes());
     }
     let src = tight(data, 16);
-    let opts = ConvertOptions {
-        dither: Dither::Bayer8x8,
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_dither(Dither::Bayer8x8);
     let out = conv_opts(
         &src,
         PixelFormat::Rgb565Le,
@@ -625,10 +616,7 @@ fn reference_floyd_steinberg(
 
 #[test]
 fn floyd_steinberg_to_565_is_pinned() {
-    let opts = ConvertOptions {
-        dither: Dither::FloydSteinberg,
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_dither(Dither::FloydSteinberg);
     // Hand-walked row of four [128, 128, 128] pixels (see the module
     // doc of `packed16` for the rule): red / blue alternate 16, 15,
     // 16, 15 as the −4 / +4 residuals ripple right; green stays 32.
@@ -803,10 +791,7 @@ fn odd_widths_on_odd_strides() {
                 }
                 let tight_src = tight(tight_data, w as usize * 3);
                 for dither in [Dither::None, Dither::Bayer8x8, Dither::FloydSteinberg] {
-                    let opts = ConvertOptions {
-                        dither,
-                        ..Default::default()
-                    };
+                    let opts = ConvertOptions::default().with_dither(dither);
                     let a = conv_opts(&padded, PixelFormat::Bgr24, wf, w, h, &opts);
                     let b = conv_opts(&tight_src, PixelFormat::Bgr24, wf, w, h, &opts);
                     assert_eq!(
@@ -841,10 +826,7 @@ fn short_planes_are_errors_not_panics() {
     let short = tight(vec![0u8; 5], 12);
     for &wf in &WORDS {
         for dither in [Dither::None, Dither::FloydSteinberg] {
-            let opts = ConvertOptions {
-                dither,
-                ..Default::default()
-            };
+            let opts = ConvertOptions::default().with_dither(dither);
             let r = convert(&short, FrameInfo::new(PixelFormat::Rgb24, 4, 2), wf, &opts);
             assert!(r.is_err(), "Rgb24 → {wf:?} on a short plane");
         }

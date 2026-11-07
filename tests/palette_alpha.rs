@@ -88,12 +88,9 @@ fn no_record_or_malformed_record_is_opaque() {
     );
     // An options-bundle palette (no side-channel) keeps its own alpha
     // column, as before.
-    let opts = ConvertOptions {
-        palette: Some(Palette {
-            colors: vec![[255, 0, 0, 0], [0, 255, 0, 255]],
-        }),
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_palette(Some(Palette {
+        colors: vec![[255, 0, 0, 0], [0, 255, 0, 255]],
+    }));
     let bare = pal8_frame(2, 1, vec![0, 1]);
     let rgba = convert(
         &bare,
@@ -115,10 +112,7 @@ fn writer_attaches_the_alpha_record_and_round_trips() {
             [0, 0, 255, 255],
         ],
     };
-    let opts = ConvertOptions {
-        palette: Some(palette),
-        ..Default::default()
-    };
+    let opts = ConvertOptions::default().with_palette(Some(palette));
     let (w, h) = (4u32, 1u32);
     let rgba = VideoFrame {
         pts: None,
@@ -150,12 +144,9 @@ fn writer_attaches_the_alpha_record_and_round_trips() {
     .unwrap();
     assert_eq!(back.planes[0].data, rgba.planes[0].data);
     // An all-opaque palette attaches no record.
-    let opaque = ConvertOptions {
-        palette: Some(Palette {
-            colors: vec![[0, 0, 0, 255], [255, 255, 255, 255]],
-        }),
-        ..Default::default()
-    };
+    let opaque = ConvertOptions::default().with_palette(Some(Palette {
+        colors: vec![[0, 0, 0, 255], [255, 255, 255, 255]],
+    }));
     let pal = convert(
         &rgba,
         FrameInfo::new(PixelFormat::Rgba, w, h),

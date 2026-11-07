@@ -29,6 +29,7 @@ pub struct Palette {
 
 /// Palette-generation strategies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PaletteStrategy {
     MedianCut,
     /// Reserved for v2 — returns `Unsupported` in v1.
@@ -39,6 +40,7 @@ pub enum PaletteStrategy {
 
 /// Options governing [`generate_palette`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct PaletteGenOptions {
     pub strategy: PaletteStrategy,
     /// Maximum palette entries. A value of 0 is treated as 1.
@@ -55,6 +57,31 @@ impl Default for PaletteGenOptions {
             max_colors: 255,
             transparency: None,
         }
+    }
+}
+
+impl PaletteGenOptions {
+    /// Default options: median cut, 255 colours, no transparency slot.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the palette-generation strategy.
+    pub fn with_strategy(mut self, strategy: PaletteStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Set the maximum palette size.
+    pub fn with_max_colors(mut self, max_colors: u8) -> Self {
+        self.max_colors = max_colors;
+        self
+    }
+
+    /// Reserve (or stop reserving) a transparent palette index.
+    pub fn with_transparency(mut self, transparency: Option<u8>) -> Self {
+        self.transparency = transparency;
+        self
     }
 }
 

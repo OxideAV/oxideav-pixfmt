@@ -34,6 +34,7 @@
 /// belong to. The 12-bit variant uses the more-precise `α = 1.0993,
 /// β = 0.0181` constants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransferFunction {
     /// BT.709-style OETF (10-bit constants). Source: BT.2020-2 Table 4.
     Bt709Oetf,

@@ -75,10 +75,7 @@ fn unsignalled_frames_convert_exactly_as_before() {
     let (w, h) = (10, 6);
     let f = yuv_frame(w, h, 2, 2, true);
     let info = FrameInfo::new(PixelFormat::Yuva420P, w as u32, h as u32);
-    let o = ConvertOptions {
-        color_space: ColorSpace::Bt709Limited,
-        ..Default::default()
-    };
+    let o = ConvertOptions::default().with_color_space(ColorSpace::Bt709Limited);
     let plain = convert(&f, info, PixelFormat::Rgba, &o).unwrap();
     assert_eq!(
         plain.planes[0].data,
@@ -447,10 +444,7 @@ fn matrix_range_depth_cross_product() {
                     ColorRange::Full => false,
                     _ => !label_full,
                 };
-                let o = ConvertOptions {
-                    color_space: cs,
-                    ..Default::default()
-                };
+                let o = ConvertOptions::default().with_color_space(cs);
                 let ctx = ConvertContext::new().with_range(range);
                 let mx = m(kr, kb, limited);
                 // 8-bit RGBA row.

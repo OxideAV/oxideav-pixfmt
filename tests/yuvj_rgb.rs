@@ -12,10 +12,7 @@ use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 use oxideav_pixfmt::{ColorSpace, ConvertOptions, FrameInfo, convert};
 
 fn opts(cs: ColorSpace) -> ConvertOptions {
-    ConvertOptions {
-        color_space: cs,
-        ..Default::default()
-    }
+    ConvertOptions::default().with_color_space(cs)
 }
 
 /// Build a planar YUV frame with the given plane dimensions and constant
