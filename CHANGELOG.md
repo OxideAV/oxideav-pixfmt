@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.11...v0.1.12) - 2026-10-24
+
+### Added
+
+- *(icc)* DeviceLink transforms, VideoFrame integration, threads and tabulated input curves
+- *(colorspace)* ColorModel — linear sRGB, XYZ, xyY, Lab / LCh, Oklab / OkLCh, HSL, HWB, CMY / CMYK, gray, Y'PbPr / Y'CbCr
+- *(icc)* ICC v2/v4 profile parsing and profile-to-profile transforms behind the `icc` feature
+- *(convert)* core 0.1.41 packed RGB tier — 16-bit words + padded 32-bit layouts close the 82-format matrix
+
+### Fixed
+
+- unsafe blocks in x86_64 SIMD paths (edition 2024 unsafe_op_in_unsafe_fn)
+- *(rgb)* enumerate the AVX2 fill-swizzle mask lanes (clippy 1.99 needless_range_loop on the x86_64 cfg)
+
+### Other
+
+- edition 2024, MSRV 1.95
+- *(crosscheck)* the eight words and the padded layouts against the black-box validator; ordered dither on row bands
+- the 82-format matrix, the packed 16-bit word rules and the padded layouts in the README and crate doc
+- *(packed16)* monomorphised word kernels, branch-free fill swizzles, banded packed rows, alpha-less 8-bit pivot order
+
 ### Added
 
 - *(icc)* new `icc` module behind the non-default `icc` feature (no new dependencies; the default build is unchanged): ICC v2 / v4 profile parsing and profile-to-profile transforms, clean-room from ICC.1:2022 (profile version 4.4). Header and tag table (§7.2 / §7.3), matrix/TRC and grayTRC models with the Annex F.1 inversion rules, `curv` and all five `para` functions, `mft1` / `mft2` (legacy 16-bit PCSLAB) / `mAB ` / `mBA ` LUTs with multilinear CLUTs, PCSXYZ ↔ PCSLAB (§6.4 / Annex A), the four rendering intents with the §8.10.2 tag fallback and ICC-absolute media-white scaling (§6.2.3; a display's media white is the PCS white per §9.2.36). `IccTransform::transform_{u8,u16,f32,pixel}` over RGB, CMYK, Gray, Lab, XYZ and n-colour device spaces (issue #15)
