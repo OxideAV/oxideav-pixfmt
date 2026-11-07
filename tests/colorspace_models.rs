@@ -23,10 +23,19 @@ fn models() -> Vec<ColorModel> {
         ColorModel::Hsl,
         ColorModel::Hwb,
         ColorModel::Cmy,
+        ColorModel::Hsv,
+        ColorModel::Hsi,
+        ColorModel::Yiq,
+        ColorModel::Yuv,
+        ColorModel::YDbDr,
+        ColorModel::Ohta,
+        ColorModel::Lms,
     ];
     for w in [LumaWeights::BT601, LumaWeights::BT709, LumaWeights::BT2020] {
         v.push(ColorModel::YPbPr(w));
         v.push(ColorModel::YCbCr(w));
+        v.push(ColorModel::Hcl(w));
+        v.push(ColorModel::Hclp(w));
     }
     v
 }
@@ -172,4 +181,60 @@ fn ciede2000_basic_properties() {
     // Symmetric in its arguments for these inputs.
     let b = [55.0, 10.0, 20.0];
     assert!((delta_e2000(a, b) - delta_e2000(b, a)).abs() < 1e-9);
+}
+
+#[test]
+fn hclp_pulls_out_of_gamut_values_toward_grey() {
+    let w = LumaWeights::BT601;
+    // In gamut: identical to HCL.
+    let v = ColorModel::Hcl(w).from_srgb([0.2, 0.5, 0.7]);
+    assert_eq!(
+        ColorModel::Hclp(w).to_srgb(v),
+        ColorModel::Hcl(w).to_srgb(v)
+    );
+    // Out of gamut: hue and luma kept, chroma reduced, inside 0..1.
+    for hcl in [[0.0, 1.0, 0.9], [120.0, 1.0, 0.1], [250.0, 0.9, 0.5]] {
+        let rgb = ColorModel::Hclp(w).to_srgb(hcl);
+        assert!(rgb.iter().all(|c| (0.0..=1.0).contains(c)), "{rgb:?}");
+        let back = ColorModel::Hcl(w).from_srgb(rgb);
+        assert!((back[2] - hcl[2]).abs() < 1e-12, "luma {back:?}");
+        assert!(back[1] <= hcl[1] + 1e-12, "chroma {back:?}");
+        let dh = (back[0] - hcl[0]).rem_euclid(360.0);
+        assert!(dh.min(360.0 - dh) < 1e-9, "hue {back:?}");
+        // At least one component sits on the gamut boundary.
+        assert!(rgb.iter().any(|&c| c == 0.0 || c == 1.0), "{rgb:?}");
+    }
+}
+
+#[test]
+fn hue_model_reference_points() {
+    // HSV of pure colours and greys.
+    assert_eq!(ColorModel::Hsv.from_srgb([1.0, 0.0, 0.0]), [0.0, 1.0, 1.0]);
+    assert_eq!(ColorModel::Hsv.from_srgb([0.5, 0.5, 0.5]), [0.0, 0.0, 0.5]);
+    let hsv = ColorModel::Hsv.from_srgb([0.2, 0.4, 0.6]);
+    assert!((hsv[0] - 210.0).abs() < 1e-9 && (hsv[1] - 2.0 / 3.0).abs() < 1e-12);
+    // HSI: the primaries sit 120° apart with I = 1/3.
+    for (rgb, h) in [
+        ([1.0, 0.0, 0.0], 0.0),
+        ([0.0, 1.0, 0.0], 120.0),
+        ([0.0, 0.0, 1.0], 240.0),
+    ] {
+        let v = ColorModel::Hsi.from_srgb(rgb);
+        assert!(
+            (v[0] - h).abs() < 1e-9 && (v[1] - 1.0).abs() < 1e-12,
+            "{v:?}"
+        );
+        assert!((v[2] - 1.0 / 3.0).abs() < 1e-12);
+    }
+    // Ohta: I1 is the mean, I2 / I3 vanish on greys.
+    let o = ColorModel::Ohta.from_srgb([0.3, 0.3, 0.3]);
+    assert!((o[0] - 0.3).abs() < 1e-12 && o[1].abs() < 1e-12 && o[2].abs() < 1e-12);
+    // Y′IQ / Y′UV / Y′DbDr: greys carry no chroma.
+    for m in [ColorModel::Yiq, ColorModel::Yuv, ColorModel::YDbDr] {
+        let v = m.from_srgb([0.7, 0.7, 0.7]);
+        assert!(
+            (v[0] - 0.7).abs() < 1e-6 && v[1].abs() < 2e-3 && v[2].abs() < 2e-3,
+            "{m:?} {v:?}"
+        );
+    }
 }

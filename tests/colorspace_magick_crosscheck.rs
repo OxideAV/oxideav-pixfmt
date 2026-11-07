@@ -9,6 +9,9 @@ use std::process::Command;
 
 use oxideav_pixfmt::colorspace::{ColorModel, LabWhite, LumaWeights};
 
+/// The luma weights ImageMagick's HCL / YIQ / YUV rows use (measured).
+const MAGICK_LUMA: LumaWeights = LumaWeights::new(0.298839, 0.114350);
+
 fn magick_available() -> bool {
     Command::new("magick")
         .arg("-version")
@@ -30,25 +33,33 @@ fn probes() -> Vec<[f32; 3]> {
 }
 
 fn magick_colorspace(px: &[[f32; 3]], cs: &str) -> Vec<[f64; 3]> {
+    magick_run(px, cs, false)
+}
+
+/// Pixels holding `cs` values → `magick -colorspace sRGB`.
+fn magick_to_srgb(px: &[[f32; 3]], cs: &str) -> Vec<[f64; 3]> {
+    magick_run(px, cs, true)
+}
+
+fn magick_run(px: &[[f32; 3]], cs: &str, inverse: bool) -> Vec<[f64; 3]> {
+    let (tag_in, target) = if inverse { (cs, "sRGB") } else { ("sRGB", cs) };
     let dir = std::env::temp_dir();
-    let i = dir.join(format!("oxideav-pixfmt-cs-{}-{cs}.in", std::process::id()));
-    let o = dir.join(format!("oxideav-pixfmt-cs-{}-{cs}.out", std::process::id()));
+    let i = dir.join(format!(
+        "oxideav-pixfmt-cs-{}-{cs}-{inverse}.in",
+        std::process::id()
+    ));
+    let o = dir.join(format!(
+        "oxideav-pixfmt-cs-{}-{cs}-{inverse}.out",
+        std::process::id()
+    ));
     let bytes: Vec<u8> = px.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
     std::fs::write(&i, bytes).unwrap();
     let st = Command::new("magick")
         .args(["-size", &format!("{}x1", px.len()), "-depth", "32"])
         .args(["-define", "quantum:format=floating-point", "-endian", "LSB"])
         .arg(format!("rgb:{}", i.display()))
-        .args([
-            "-set",
-            "colorspace",
-            "sRGB",
-            "-colorspace",
-            cs,
-            "-set",
-            "colorspace",
-            "sRGB",
-        ])
+        .args(["-set", "colorspace", tag_in, "-colorspace", target])
+        .args(["-set", "colorspace", "sRGB"])
         .args([
             "-depth",
             "32",
@@ -83,7 +94,7 @@ fn models_match_magick_colorspace() {
     // (ImageMagick name, our model, scaling of ours into IM's storage,
     // tolerance, compare hue channel?)
     type Scale = fn([f64; 3]) -> [f64; 3];
-    let cases: [(&str, ColorModel, Scale, f64); 15] = [
+    let cases: [(&str, ColorModel, Scale, f64); 25] = [
         ("RGB", ColorModel::LinearSrgb, |v| v, 1e-5),
         ("Gray", ColorModel::Gray(LumaWeights::BT709), |v| v, 1e-4),
         (
@@ -142,6 +153,48 @@ fn models_match_magick_colorspace() {
             |v| [v[0], v[1] + 0.5, v[2] + 0.5],
             5e-4,
         ),
+        ("HSV", ColorModel::Hsv, |v| [v[0] / 360.0, v[1], v[2]], 1e-5),
+        ("HSB", ColorModel::Hsv, |v| [v[0] / 360.0, v[1], v[2]], 1e-5),
+        ("HSI", ColorModel::Hsi, |v| [v[0] / 360.0, v[1], v[2]], 1e-5),
+        (
+            "HCL",
+            ColorModel::Hcl(MAGICK_LUMA),
+            |v| [v[0] / 360.0, v[1], v[2]],
+            1e-5,
+        ),
+        (
+            "HCLp",
+            ColorModel::Hclp(MAGICK_LUMA),
+            |v| [v[0] / 360.0, v[1], v[2]],
+            1e-5,
+        ),
+        (
+            "YIQ",
+            ColorModel::Yiq,
+            |v| [v[0], v[1] + 0.5, v[2] + 0.5],
+            1e-5,
+        ),
+        (
+            "YUV",
+            ColorModel::Yuv,
+            |v| [v[0], v[1] + 0.5, v[2] + 0.5],
+            1e-5,
+        ),
+        (
+            "YDbDr",
+            ColorModel::YDbDr,
+            |v| [v[0], v[1] + 0.5, v[2] + 0.5],
+            1e-5,
+        ),
+        // ImageMagick offsets I2 / I3 by 32768 / 65535 and rounds the
+        // I1 weights to five decimals.
+        (
+            "OHTA",
+            ColorModel::Ohta,
+            |v| [v[0], v[1] + 0.5, v[2] + 0.5],
+            3e-5,
+        ),
+        ("LMS", ColorModel::Lms, |v| v, 2e-4),
     ];
     for (name, model, scale, tol) in cases {
         let theirs = magick_colorspace(&px, name);
@@ -158,7 +211,7 @@ fn models_match_magick_colorspace() {
                 // near-zero chroma makes it numerically arbitrary).
                 let achromatic = p[0] == p[1] && p[1] == p[2];
                 let hue_slot = match name {
-                    "HSL" | "HWB" => 0,
+                    "HSL" | "HWB" | "HSV" | "HSB" | "HSI" | "HCL" | "HCLp" => 0,
                     "LCHab" | "Oklch" => 2,
                     _ => 3,
                 };
@@ -174,6 +227,95 @@ fn models_match_magick_colorspace() {
             }
         }
         eprintln!("{name}: max |Δ| {worst:.2e}");
+        assert!(worst < tol, "{name}: {worst}");
+    }
+}
+
+#[test]
+fn inverse_models_match_magick() {
+    if !magick_available() {
+        eprintln!("magick not found; skipping");
+        return;
+    }
+    // Model values (in ImageMagick's storage scaling) on a grid; both
+    // sides convert them back to sRGB.
+    let mut grid = Vec::new();
+    for a in 0..5 {
+        for b in 0..5 {
+            for c in 0..5 {
+                grid.push([
+                    0.1 + 0.2 * a as f32,
+                    0.1 + 0.2 * b as f32,
+                    0.1 + 0.2 * c as f32,
+                ]);
+            }
+        }
+    }
+    // ImageMagick's way back from Y′IQ / Y′UV / Y′DbDr / OHTA uses its
+    // own rounded inverse coefficients; ours is the exact inverse of
+    // the forward matrix (so our round trips stay within ±1 LSB at 16
+    // bits), which puts the two up to ~2.5e-4 apart.
+    type Unscale = fn([f64; 3]) -> [f64; 3];
+    let cases: [(&str, ColorModel, Unscale, f64); 10] = [
+        ("HSV", ColorModel::Hsv, |v| [v[0] * 360.0, v[1], v[2]], 1e-5),
+        ("HSI", ColorModel::Hsi, |v| [v[0] * 360.0, v[1], v[2]], 1e-5),
+        (
+            "HCL",
+            ColorModel::Hcl(MAGICK_LUMA),
+            |v| [v[0] * 360.0, v[1], v[2]],
+            1e-5,
+        ),
+        ("HSL", ColorModel::Hsl, |v| [v[0] * 360.0, v[1], v[2]], 1e-5),
+        (
+            "HCLp",
+            ColorModel::Hclp(MAGICK_LUMA),
+            |v| [v[0] * 360.0, v[1], v[2]],
+            1e-5,
+        ),
+        (
+            "YIQ",
+            ColorModel::Yiq,
+            |v| [v[0], v[1] - 0.5, v[2] - 0.5],
+            3e-4,
+        ),
+        (
+            "YUV",
+            ColorModel::Yuv,
+            |v| [v[0], v[1] - 0.5, v[2] - 0.5],
+            3e-4,
+        ),
+        (
+            "YDbDr",
+            ColorModel::YDbDr,
+            |v| [v[0], v[1] - 0.5, v[2] - 0.5],
+            3e-4,
+        ),
+        (
+            "OHTA",
+            ColorModel::Ohta,
+            |v| [v[0], v[1] - 0.5, v[2] - 0.5],
+            3e-5,
+        ),
+        ("LMS", ColorModel::Lms, |v| v, 1e-3),
+    ];
+    for (name, model, unscale, tol) in cases {
+        let theirs = magick_to_srgb(&grid, name);
+        let (mut worst, mut n): (f64, usize) = (0.0, 0);
+        for (g, t) in grid.iter().zip(&theirs) {
+            let ours = model.to_srgb(unscale(g.map(|v| v as f64)));
+            // Compare in gamut only: out-of-gamut results may be
+            // clipped on the way out.
+            let inside = |v: &[f64; 3]| v.iter().all(|c| (0.0..=1.0).contains(c));
+            if !inside(&ours) || !inside(t) {
+                continue;
+            }
+            n += 1;
+            for c in 0..3 {
+                worst = worst.max((ours[c] - t[c]).abs());
+            }
+        }
+        eprintln!("{name} inverse: max |Δ| {worst:.2e} over {n} in-gamut values");
+        assert!(n > 10, "{name}: only {n} in-gamut values");
         assert!(worst < tol, "{name}: {worst}");
     }
 }

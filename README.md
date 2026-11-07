@@ -540,6 +540,9 @@ colour models on `f64`, unclamped, in natural units (hues in degrees,
 | device CMY | `Cmy` | ISO 32000-2 §10.4.2.4 |
 | gray / linear gray (any luma weights) | `Gray(_)`, `LinearGray(_)` | BT.601 / BT.709 / BT.2020 weights, ISO 32000-2 §10.4.2.2 |
 | Y′PbPr, full-range Y′CbCr | `YPbPr(_)`, `YCbCr(_)` | ITU-T H.273 eq. 37, 44–46 |
+| HSV / HSB, HSI, HCL, HCLp | `Hsv`, `Hsi`, `Hcl(_)`, `Hclp(_)` | Khronos Data Format 1.4 §5.5.8–5.5.11 (hexagonal / angular hue), CSS Color 4 §7; pinned against `magick -colorspace` |
+| Y′IQ, Y′UV, Y′DbDr, Ohta I1I2I3 | `Yiq`, `Yuv`, `YDbDr`, `Ohta` | matrices measured from black-box `magick -colorspace` (chroma centred on zero) |
+| LMS (from D65 XYZ) | `Lms` | matrix measured from black-box `magick -colorspace LMS` |
 
 Device CMYK has four-channel functions: `rgb_to_cmyk_with(rgb, bg,
 ucr)` takes the black-generation and undercolour-removal functions of
@@ -547,17 +550,36 @@ ISO 32000-2 §10.4.2.4 (GCR / UCR strength), `rgb_to_cmyk` uses
 `BG(k) = UCR(k) = k`, and `cmyk_to_rgb` is §10.4.2.5. `delta_e2000`
 is the CIEDE2000 difference (CSS Color 4 §20.2).
 
+HSV hue is hexagonal, `S = (max − min) / max`, `V = max`. HSI hue is
+the angle of the colour's projection onto the `R + G + B = 0` plane,
+`atan2(√3·(G − B), 2R − G − B)`, with `S = 1 − min / I` and `I` the
+channel mean. HCL is hexagonal hue, chroma `max − min` and luma; HCLp
+converts the same way but its inverse pulls an out-of-gamut result
+toward the grey of the same luma until it fits (`hclp_to_rgb`). Every
+hue is in degrees; an achromatic colour's hue is 0.
+
+ImageMagick's `scRGB` is linear sRGB: `LinearSrgb`, which is unclamped
+and uses the extended transfer of Khronos Data Format 1.4 §13.3.4 for
+values outside 0..1. `Rec601YCbCr` / `Rec709YCbCr` are
+`YCbCr(LumaWeights::BT601 / BT709)`.
+
 Every model round-trips sRGB within ±1 LSB at 16 bits with the model
 values held as `f32` (`tests/colorspace_models.rs`). Against
 `magick -colorspace X` (Q16-HDRI float I/O, after ImageMagick's own
 channel scaling) the values agree within 1e-4 for RGB, Gray,
-LinearGray, XYZ, xyY, Lab, LCHab, Oklab, Oklch, HSL, HWB, CMY and
-Rec709YCbCr, and within 4e-4 for Rec601YCbCr / YPbPr, where
+LinearGray, XYZ, xyY, Lab, LCHab, Oklab, Oklch, HSL, HWB, CMY,
+Rec709YCbCr and LMS, within 1e-6 for HSV, HSB, HSI, HCL, HCLp, YIQ, YUV
+and YDbDr, within 1e-5 for OHTA (ImageMagick offsets its chroma by
+32768 / 65535), and within 4e-4 for Rec601YCbCr / YPbPr, where
 ImageMagick's luma weights differ slightly from BT.601's 0.299 / 0.114.
+Back to sRGB (`magick -set colorspace X -colorspace sRGB`) the hue
+models and LMS agree within 2e-7; ImageMagick inverts YIQ, YUV, YDbDr
+and OHTA with its own rounded coefficients, so those differ by up to
+2.5e-4 (ours is the exact inverse of the forward matrix).
 
-Not provided, because the defining formulas are not in the staged
-references: HSV / HSB, HSI, HCL, HCLp, CIELUV / LCHuv, LMS, YIQ, YUV,
-YDbDr, Kodak YCC, OHTA, Jzazbz and the Cineon "Log" encoding.
+Not provided, because the defining formulas are neither in the staged
+references nor recoverable from black-box output by measurement alone:
+CIELUV / LCHuv, Kodak PhotoYCC, Jzazbz and the Cineon "Log" encoding.
 
 ## ICC colour management (feature `icc`)
 

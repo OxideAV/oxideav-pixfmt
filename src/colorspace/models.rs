@@ -255,6 +255,168 @@ pub fn hwb_to_rgb(hwb: [f64; 3]) -> [f64; 3] {
 }
 
 // --------------------------------------------------------------------
+// HSV / HSI / HCL: the hue-based models of the Khronos Data Format 1.4
+// §5.5.8–5.5.11 (hexagonal and angular hue), with the hexagonal hue
+// of CSS Color 4 §7. The defining formulas below were checked against
+// black-box `magick -colorspace HSV / HSI / HCL` output
+// (`tests/colorspace_magick_crosscheck.rs`).
+
+/// sRGB → HSV (also called HSB): hexagonal hue in degrees, `S = (max −
+/// min) / max`, `V = max`. An achromatic colour's hue is returned as 0.
+pub fn rgb_to_hsv(rgb: [f64; 3]) -> [f64; 3] {
+    let [r, g, b] = rgb;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    let mut hue = if d != 0.0 {
+        hue_of(r, g, b, max, d)
+    } else {
+        0.0
+    };
+    if hue >= 360.0 {
+        hue -= 360.0;
+    }
+    let sat = if max != 0.0 { d / max } else { 0.0 };
+    [hue, sat, max]
+}
+
+/// Hexagonal hue + chroma → the RGB triple with `max − min = chroma`
+/// and `min = 0`.
+fn hex_hue_chroma(hue: f64, chroma: f64) -> [f64; 3] {
+    let f = |n: f64| {
+        let k = (n + hue / 60.0).rem_euclid(6.0);
+        chroma - chroma * k.min(4.0 - k).clamp(0.0, 1.0)
+    };
+    [f(5.0), f(3.0), f(1.0)]
+}
+
+/// HSV → sRGB.
+pub fn hsv_to_rgb(hsv: [f64; 3]) -> [f64; 3] {
+    let [hue, sat, val] = hsv;
+    let c = val * sat;
+    hex_hue_chroma(hue, c).map(|v| v + val - c)
+}
+
+/// sRGB → HSI: the angular hue of the colour's projection onto the
+/// `R + G + B = 0` plane, `atan2(√3·(G − B), 2R − G − B)` in degrees,
+/// `S = 1 − min / I` and the intensity `I = (R + G + B) / 3`. An
+/// achromatic colour's hue is returned as 0.
+pub fn rgb_to_hsi(rgb: [f64; 3]) -> [f64; 3] {
+    let [r, g, b] = rgb;
+    let i = (r + g + b) / 3.0;
+    let min = r.min(g).min(b);
+    let sat = if i != 0.0 { 1.0 - min / i } else { 0.0 };
+    let alpha = 2.0 * r - g - b;
+    let beta = 3f64.sqrt() * (g - b);
+    let mut hue = if alpha == 0.0 && beta == 0.0 {
+        0.0
+    } else {
+        beta.atan2(alpha).to_degrees()
+    };
+    if hue < 0.0 {
+        hue += 360.0;
+    }
+    if hue >= 360.0 {
+        hue -= 360.0;
+    }
+    [hue, sat, i]
+}
+
+/// HSI → sRGB: `I` plus the hue's unit direction in the `R + G + B =
+/// 0` plane, scaled so that the smallest component is `I·(1 − S)`.
+pub fn hsi_to_rgb(hsi: [f64; 3]) -> [f64; 3] {
+    let [hue, sat, i] = hsi;
+    let (s, c) = hue.to_radians().sin_cos();
+    let k = 1.0 / 3f64.sqrt();
+    let d = [2.0 / 3.0 * c, -c / 3.0 + k * s, -c / 3.0 - k * s];
+    let m = d[0].min(d[1]).min(d[2]);
+    // `m < 0` for every hue (the direction sums to zero).
+    let t = -i * sat / m;
+    d.map(|v| i + t * v)
+}
+
+/// sRGB → HCL: hexagonal hue in degrees, chroma `max − min` and the
+/// luma `w.luma(rgb)` of the gamma-encoded values.
+pub fn rgb_to_hcl(rgb: [f64; 3], w: LumaWeights) -> [f64; 3] {
+    let [h, _, v] = rgb_to_hsv(rgb);
+    let min = rgb[0].min(rgb[1]).min(rgb[2]);
+    [h, v - min, w.luma(rgb)]
+}
+
+/// HCL → sRGB: the hue / chroma triple lifted by a grey so its luma is
+/// `L` (unclamped; out-of-gamut results are left to the caller).
+pub fn hcl_to_rgb(hcl: [f64; 3], w: LumaWeights) -> [f64; 3] {
+    let base = hex_hue_chroma(hcl[0], hcl[1]);
+    let m = hcl[2] - w.luma(base);
+    base.map(|v| v + m)
+}
+
+/// HCL → sRGB, keeping the result in gamut: the [`hcl_to_rgb`] triple is
+/// pulled toward the grey of the same luma (hue and luma kept, chroma
+/// reduced) until every component lies in 0..1. A luma outside 0..1
+/// yields that luma's clamped grey. This is the behaviour black-box
+/// `magick -colorspace HCLp` shows on the way back to sRGB.
+pub fn hclp_to_rgb(hcl: [f64; 3], w: LumaWeights) -> [f64; 3] {
+    let y = hcl[2];
+    if !(0.0..=1.0).contains(&y) {
+        return [y.clamp(0.0, 1.0); 3];
+    }
+    let rgb = hcl_to_rgb(hcl, w);
+    let mut s: f64 = 1.0;
+    for &c in &rgb {
+        if c > 1.0 {
+            s = s.min((1.0 - y) / (c - y));
+        } else if c < 0.0 {
+            s = s.min(y / (y - c));
+        }
+    }
+    rgb.map(|c| (y + s * (c - y)).clamp(0.0, 1.0))
+}
+
+// --------------------------------------------------------------------
+// Fixed-matrix luma / chroma models. The broadcast colour-difference
+// standards that define YIQ, YUV and YDbDr are not staged, so these
+// are the matrices measured from black-box `magick -colorspace YIQ /
+// YUV / YDbDr` output on the unit primaries (every entry resolves to
+// three decimals in the chroma rows; the luma row is the measured
+// 0.298839 / 0.586811 / 0.114350). Chroma is centred on zero here;
+// ImageMagick stores it offset by +0.5.
+
+const YIQ_M: Mat3 = [
+    [0.298839, 0.586811, 0.114350],
+    [0.595716, -0.274453, -0.321263],
+    [0.211456, -0.522591, 0.311135],
+];
+const YUV_M: Mat3 = [
+    [0.298839, 0.586811, 0.114350],
+    [-0.147, -0.289, 0.436],
+    [0.615, -0.515, -0.100],
+];
+const YDBDR_M: Mat3 = [
+    [0.298839, 0.586811, 0.114350],
+    [-0.450, -0.883, 1.333],
+    [-1.333, 1.116, 0.217],
+];
+/// Ohta's I1 I2 I3: `(R + G + B) / 3`, `(R − B) / 2`, `(2G − R − B) / 4`.
+const OHTA_M: Mat3 = [
+    [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+    [0.5, 0.0, -0.5],
+    [-0.25, 0.5, -0.25],
+];
+/// CIE XYZ (D65) → LMS cone response, measured from black-box `magick
+/// -colorspace LMS` output (linear-light input; the entries resolve to
+/// four decimals once the sRGB → XYZ matrix is factored out).
+const XYZ_TO_LMS_CAT: Mat3 = [
+    [0.7328, 0.4296, -0.1624],
+    [-0.7036, 1.6975, 0.0061],
+    [0.0030, 0.0136, 0.9834],
+];
+
+fn apply_inv(m: &Mat3, v: [f64; 3]) -> [f64; 3] {
+    mul3v(&invert3(m).expect("model matrix is invertible"), v)
+}
+
+// --------------------------------------------------------------------
 // Device CMY / CMYK / gray (ISO 32000-2 §10.4.2).
 
 /// RGB → CMY (`c = 1 − red`, …; §10.4.2.4).
@@ -376,7 +538,10 @@ pub enum LabWhite {
 /// with `Y = 1` for white; `L*` 0..100 with `a*`, `b*`, `C*` unscaled;
 /// Oklab `L` 0..1; Y′PbPr chroma in −0.5..0.5 and Y′CbCr chroma offset
 /// by +0.5 (the full-range digital form of H.273 equation 37,
-/// normalised). Gray models return the luma in all three slots.
+/// normalised); HSV / HSI / HCL in degrees and 0..1; Y′IQ, Y′UV,
+/// Y′DbDr and Ohta chroma centred on zero; LMS with the D65 white near
+/// `(0.95, 1.04, 1.09)`. Gray models return the luma in all three
+/// slots.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum ColorModel {
@@ -412,6 +577,24 @@ pub enum ColorModel {
     YPbPr(LumaWeights),
     /// Full-range Y′CbCr (`Cb = Pb + 0.5`, `Cr = Pr + 0.5`).
     YCbCr(LumaWeights),
+    /// HSV / HSB (hexagonal hue, `S = C / V`, `V = max`).
+    Hsv,
+    /// HSI (angular hue, `S = 1 − min / I`, `I` the channel mean).
+    Hsi,
+    /// HCL (hexagonal hue, chroma `max − min`, luma with these weights).
+    Hcl(LumaWeights),
+    /// HCL whose inverse stays in gamut ([`hclp_to_rgb`]).
+    Hclp(LumaWeights),
+    /// Y′IQ (chroma centred on zero).
+    Yiq,
+    /// Y′UV (chroma centred on zero).
+    Yuv,
+    /// Y′DbDr (chroma centred on zero).
+    YDbDr,
+    /// Ohta's I1 I2 I3 (I2, I3 centred on zero).
+    Ohta,
+    /// LMS cone response of the linear-light colour (from D65 XYZ).
+    Lms,
 }
 
 fn d65() -> [f64; 3] {
@@ -454,6 +637,14 @@ impl ColorModel {
                 let v = rgb_to_ypbpr(rgb, w);
                 [v[0], v[1] + 0.5, v[2] + 0.5]
             }
+            ColorModel::Hsv => rgb_to_hsv(rgb),
+            ColorModel::Hsi => rgb_to_hsi(rgb),
+            ColorModel::Hcl(w) | ColorModel::Hclp(w) => rgb_to_hcl(rgb, w),
+            ColorModel::Yiq => mul3v(&YIQ_M, rgb),
+            ColorModel::Yuv => mul3v(&YUV_M, rgb),
+            ColorModel::YDbDr => mul3v(&YDBDR_M, rgb),
+            ColorModel::Ohta => mul3v(&OHTA_M, rgb),
+            ColorModel::Lms => mul3v(&XYZ_TO_LMS_CAT, xyz65()),
         }
     }
 
@@ -488,6 +679,15 @@ impl ColorModel {
             ColorModel::LinearGray(_) => [linear_to_srgb(v[0]); 3],
             ColorModel::YPbPr(w) => ypbpr_to_rgb(v, w),
             ColorModel::YCbCr(w) => ypbpr_to_rgb([v[0], v[1] - 0.5, v[2] - 0.5], w),
+            ColorModel::Hsv => hsv_to_rgb(v),
+            ColorModel::Hsi => hsi_to_rgb(v),
+            ColorModel::Hcl(w) => hcl_to_rgb(v, w),
+            ColorModel::Hclp(w) => hclp_to_rgb(v, w),
+            ColorModel::Yiq => apply_inv(&YIQ_M, v),
+            ColorModel::Yuv => apply_inv(&YUV_M, v),
+            ColorModel::YDbDr => apply_inv(&YDBDR_M, v),
+            ColorModel::Ohta => apply_inv(&OHTA_M, v),
+            ColorModel::Lms => from_xyz65(apply_inv(&XYZ_TO_LMS_CAT, v)),
         }
     }
 

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `ConvertOptions::new` plus `with_dither` / `with_palette` / `with_color_space` builders.
 - `PaletteGenOptions::new` plus `with_strategy` / `with_max_colors` / `with_transparency` builders.
+- *(colorspace)* `ColorModel::Hsv` (HSV / HSB), `Hsi`, `Hcl(_)`, `Hclp(_)`, `Yiq`, `Yuv`, `YDbDr`, `Ohta` and `Lms`, with `rgb_to_hsv` / `hsv_to_rgb`, `rgb_to_hsi` / `hsi_to_rgb`, `rgb_to_hcl` / `hcl_to_rgb` and the gamut-keeping `hclp_to_rgb`. Hue models from the Khronos Data Format 1.4 §5.5.8–5.5.11 hexagonal / angular hue; the Y′IQ / Y′UV / Y′DbDr / LMS matrices measured from black-box `magick -colorspace` output. All round-trip sRGB within ±1 LSB at 16 bits and match `magick -colorspace X` within 1e-6 (hue and broadcast models), 1e-5 (OHTA) and 1e-4 (LMS); `tests/colorspace_magick_crosscheck.rs` now checks the way back to sRGB too (#15)
 
 ### Changed
 
