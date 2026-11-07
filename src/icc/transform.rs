@@ -100,6 +100,8 @@ pub struct IccTransform {
     /// A DeviceLink's DToB0 / AToB0, evaluated directly (`src` / `dst`
     /// unused).
     link: Option<Link>,
+    /// Abstract / device profiles between `src` and `dst` (chains).
+    mid: Vec<Mid>,
     /// ICC-absolute scaling `src_wtpt / dst_wtpt`, applied in PCSXYZ.
     abs_scale: Option<[f64; 3]>,
     in_ch: usize,
@@ -107,6 +109,50 @@ pub struct IccTransform {
     in_space: DataColorSpace,
     out_space: DataColorSpace,
     threads: usize,
+}
+
+/// A profile between the two endpoints of a chain.
+#[derive(Clone, Debug)]
+enum Mid {
+    /// An Abstract profile (§8.8): a PCS → PCS table, the input in the
+    /// header's colour space, the output in its PCS.
+    Abstract {
+        table: Link,
+        input: PcsKind,
+        output: PcsKind,
+    },
+    /// A device profile in the middle (e.g. a proofing target): PCS →
+    /// device → PCS, with the ICC-absolute rescaling into it.
+    Device {
+        from: Box<FromPcs>,
+        to: Box<ToPcs>,
+        scale: Option<[f64; 3]>,
+    },
+}
+
+/// Bring a PCS value of encoding `kind` to `want`, rescaling it in
+/// PCSXYZ by `scale` (ICC-absolute media-white ratios) on the way.
+fn connect(v: [f64; 3], kind: PcsKind, want: PcsKind, scale: Option<[f64; 3]>) -> [f64; 3] {
+    match scale {
+        Some(s) => {
+            let xyz = if kind == PcsKind::Lab {
+                pcs::lab_to_xyz(v)
+            } else {
+                v
+            };
+            let xyz = [xyz[0] * s[0], xyz[1] * s[1], xyz[2] * s[2]];
+            if want == PcsKind::Lab {
+                pcs::xyz_to_lab(xyz)
+            } else {
+                xyz
+            }
+        }
+        None => match (kind, want) {
+            (PcsKind::Xyz, PcsKind::Lab) => pcs::xyz_to_lab(v),
+            (PcsKind::Lab, PcsKind::Xyz) => pcs::lab_to_xyz(v),
+            _ => v,
+        },
+    }
 }
 
 /// The single table of a DeviceLink.
@@ -346,45 +392,117 @@ impl IccTransform {
         dst: &IccProfile,
         opts: TransformOptions,
     ) -> Result<Self, IccError> {
-        check_class(src)?;
-        check_class(dst)?;
-        let in_ch = device_channels(src)?;
-        let out_ch = device_channels(dst)?;
-        let s = ToPcs::build(src, opts.intent, in_ch)?;
-        let d = FromPcs::build(dst, opts.intent, out_ch)?;
-        let abs_scale = if opts.intent == RenderingIntent::AbsoluteColorimetric {
-            // Media-relative → ICC-absolute on the source side
-            // (`× media white / PCS white`) and back on the destination
-            // side; a DToB3 / BToD3 tag is absolute already.
-            let src_abs = matches!(s, ToPcs::Mpe { absolute: true, .. });
-            let dst_abs = matches!(d, FromPcs::Mpe { absolute: true, .. });
-            let sw = if src_abs {
-                PCS_WHITE
-            } else {
-                absolute_white(src)
+        Self::chain(&[src, dst], opts)
+    }
+
+    /// Build a transform through a chain of profiles: the first one's
+    /// device space to the last one's, through every profile in
+    /// between. A middle profile is either an Abstract profile (§8.8;
+    /// its DToB0 or AToB0 runs PCS → PCS, §8.10.3) or a device profile,
+    /// which the colours pass through (PCS → device → PCS, e.g. to see
+    /// a print simulation on a display). Every table follows the
+    /// options' intent with the §8.10.2 precedence; under the
+    /// ICC-absolute intent each step into a device profile rescales by
+    /// the media whites of the device profiles on either side (§6.2.3),
+    /// and an Abstract profile works on the values as they arrive.
+    ///
+    /// Endpoints must be device, ColorSpace or Lab-style profiles (not
+    /// Abstract, DeviceLink or NamedColor); a chain of two profiles is
+    /// [`IccTransform::with_options`].
+    pub fn chain(profiles: &[&IccProfile], opts: TransformOptions) -> Result<Self, IccError> {
+        let [first, middle @ .., last] = profiles else {
+            return Err(IccError::Unsupported("a chain needs at least two profiles"));
+        };
+        for p in [first, last] {
+            check_class(p)?;
+            if p.header.class == ProfileClass::Abstract {
+                return Err(IccError::Unsupported("Abstract profile as an endpoint"));
+            }
+        }
+        let intent = opts.intent;
+        let absolute = intent == RenderingIntent::AbsoluteColorimetric;
+        // The media white a PCS value is relative to, and the scaling
+        // into a consumer (a DToB3 / BToD3 side is absolute already).
+        let produced = |to: &ToPcs, p: &IccProfile| match to {
+            ToPcs::Mpe { absolute: true, .. } => PCS_WHITE,
+            _ => absolute_white(p),
+        };
+        let scale_into = |from: &FromPcs, p: &IccProfile, cur: [f64; 3]| {
+            if !absolute {
+                return Ok(None);
+            }
+            let w = match from {
+                FromPcs::Mpe { absolute: true, .. } => PCS_WHITE,
+                _ => absolute_white(p),
             };
-            let dw = if dst_abs {
-                PCS_WHITE
-            } else {
-                absolute_white(dst)
-            };
-            if dw.iter().any(|&v| v <= 0.0) {
+            if w.iter().any(|&v| v <= 0.0) {
                 return Err(IccError::Malformed("media white point"));
             }
-            let k = [sw[0] / dw[0], sw[1] / dw[1], sw[2] / dw[2]];
-            (k != [1.0; 3]).then_some(k)
-        } else {
-            None
+            let k = [cur[0] / w[0], cur[1] / w[1], cur[2] / w[2]];
+            Ok((k != [1.0; 3]).then_some(k))
         };
+        let in_ch = device_channels(first)?;
+        let out_ch = device_channels(last)?;
+        let s = ToPcs::build(first, intent, in_ch)?;
+        let mut cur = produced(&s, first);
+        let mut mid = Vec::with_capacity(middle.len());
+        for p in middle {
+            match p.header.class {
+                ProfileClass::Abstract => {
+                    let input = match p.header.color_space {
+                        DataColorSpace::Xyz => PcsKind::Xyz,
+                        DataColorSpace::Lab => PcsKind::Lab,
+                        _ => return Err(IccError::Malformed("Abstract profile input space")),
+                    };
+                    let output = pcs_kind(p)?;
+                    let table = match &p.d2b[0] {
+                        Some(m) if m.in_ch == 3 && m.out_ch == 3 => Link::Mpe(m.clone()),
+                        _ => {
+                            let l = p.a2b[0]
+                                .clone()
+                                .ok_or(IccError::Unsupported("Abstract profile without AToB0"))?;
+                            if l.in_ch != 3 || l.out_ch != 3 {
+                                return Err(IccError::Malformed("AToB0 channel counts"));
+                            }
+                            Link::Lut(l)
+                        }
+                    };
+                    mid.push(Mid::Abstract {
+                        table,
+                        input,
+                        output,
+                    });
+                }
+                ProfileClass::DeviceLink => {
+                    return Err(IccError::Unsupported("DeviceLink profile inside a chain"));
+                }
+                _ => {
+                    check_class(p)?;
+                    let ch = device_channels(p)?;
+                    let from = FromPcs::build(p, intent, ch)?;
+                    let to = ToPcs::build(p, intent, ch)?;
+                    let scale = scale_into(&from, p, cur)?;
+                    cur = produced(&to, p);
+                    mid.push(Mid::Device {
+                        from: Box::new(from),
+                        to: Box::new(to),
+                        scale,
+                    });
+                }
+            }
+        }
+        let d = FromPcs::build(last, intent, out_ch)?;
+        let abs_scale = scale_into(&d, last, cur)?;
         Ok(Self {
             src: s,
             dst: d,
             link: None,
+            mid,
             abs_scale,
             in_ch,
             out_ch,
-            in_space: src.header.color_space,
-            out_space: dst.header.color_space,
+            in_space: first.header.color_space,
+            out_space: last.header.color_space,
             threads: opts.threads.max(1),
         })
     }
@@ -427,6 +545,7 @@ impl IccTransform {
                 pcs: PcsKind::Xyz,
             },
             link: Some(lut),
+            mid: Vec::new(),
             abs_scale: None,
             in_ch,
             out_ch,
@@ -476,28 +595,34 @@ impl IccTransform {
             }
             None => {}
         }
-        let (v, kind) = self.src.eval(input, pre);
-        let want = self.dst.wants();
-        let v = match self.abs_scale {
-            Some(s) => {
-                let xyz = if kind == PcsKind::Lab {
-                    pcs::lab_to_xyz(v)
-                } else {
-                    v
-                };
-                let xyz = [xyz[0] * s[0], xyz[1] * s[1], xyz[2] * s[2]];
-                if want == PcsKind::Lab {
-                    pcs::xyz_to_lab(xyz)
-                } else {
-                    xyz
+        let (mut v, mut kind) = self.src.eval(input, pre);
+        for m in &self.mid {
+            match m {
+                Mid::Abstract {
+                    table,
+                    input,
+                    output,
+                } => {
+                    let x = connect(v, kind, *input, None);
+                    let mut y = [0.0; 3];
+                    match table {
+                        Link::Lut(l) => {
+                            let n = pcs::encode_pcs(*input, l.kind, x).map(|c| c.clamp(0.0, 1.0));
+                            l.eval(&n, &mut y);
+                            y = pcs::decode_pcs(*output, l.kind, y);
+                        }
+                        Link::Mpe(mp) => mp.eval(&x, &mut y),
+                    }
+                    (v, kind) = (y, *output);
+                }
+                Mid::Device { from, to, scale } => {
+                    let mut dev = [0f64; 15];
+                    from.eval(connect(v, kind, from.wants(), *scale), &mut dev);
+                    (v, kind) = to.eval(&dev, false);
                 }
             }
-            None => match (kind, want) {
-                (PcsKind::Xyz, PcsKind::Lab) => pcs::xyz_to_lab(v),
-                (PcsKind::Lab, PcsKind::Xyz) => pcs::lab_to_xyz(v),
-                _ => v,
-            },
-        };
+        }
+        let v = connect(v, kind, self.dst.wants(), self.abs_scale);
         self.dst.eval(v, output);
     }
 

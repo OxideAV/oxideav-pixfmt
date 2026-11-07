@@ -21,6 +21,8 @@
 //!   ahead of the integer tags per §8.10.2 a) and §8.10.3 a) (DToB3 /
 //!   BToD3 as already ICC-absolute); a tag with an unknown element is
 //!   skipped and the integer tags are used;
+//! - chains of profiles ([`IccTransform::chain`]) with Abstract
+//!   profiles (§8.8) and pass-through device profiles in the middle;
 //! - the PCSXYZ ↔ PCSLAB conversion of §6.4 / Annex A and the PCS
 //!   encodings of §6.3.4;
 //! - all four rendering intents: the intent's AToBx / BToAx table with
@@ -36,7 +38,7 @@
 //!
 //! Not covered (see the crate README): black-point compensation (its
 //! algorithm is ISO 18619, not part of ICC.1), NamedColor profiles,
-//! DeviceLink / Abstract profiles as chain members.
+//! DeviceLink profiles as chain members.
 //!
 //! The module depends on nothing beyond `std` and could move into its
 //! own crate later without API changes.
