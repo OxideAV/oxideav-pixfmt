@@ -3,6 +3,7 @@
 use super::IccError;
 use super::curve::Curve;
 use super::lut::Lut;
+use super::mpe::Mpe;
 use super::pcs::{self, PCS_WHITE, PcsKind};
 use super::profile::{DataColorSpace, IccProfile, ProfileClass, RenderingIntent};
 use crate::mat3::{Mat3, invert3, mul3v};
@@ -46,6 +47,13 @@ enum ToPcs {
     Matrix { m: Mat3, curves: [Curve; 3] },
     /// Annex F.2: `connection = grayTRC(device)` scaled by the PCS white.
     Gray { curve: Curve, pcs: PcsKind },
+    /// DToBx (`mpet`, §10.16): actual PCS values out (§6.3.4.2). With
+    /// `absolute`, the tag is DToB3 and already ICC-absolute.
+    Mpe {
+        mpe: Mpe,
+        pcs: PcsKind,
+        absolute: bool,
+    },
 }
 
 /// PCS → device half of a transform.
@@ -65,6 +73,13 @@ enum FromPcs {
         curve: Curve,
         pcs: PcsKind,
     },
+    /// BToDx (`mpet`): actual PCS values in, unclipped device values
+    /// out. With `absolute`, the tag is BToD3.
+    Mpe {
+        mpe: Mpe,
+        pcs: PcsKind,
+        absolute: bool,
+    },
 }
 
 /// A colour transform from one profile's device space to another's,
@@ -72,18 +87,19 @@ enum FromPcs {
 ///
 /// Built with [`IccTransform::new`]; the tag chosen on each side follows
 /// the §8.10.2 precedence (the intent's AToBx / BToAx table, then the
-/// `x = 0` table, then matrix/TRC or grayTRC). `DToBx` / `BToDx`
-/// (multiProcessElementsType) tables are not evaluated, which §8.10.2 a)
-/// allows ("except where this tag is not … supported by the CMM").
-/// The ICC-absolute intent runs the media-relative tables and rescales
-/// the PCS by the ratio of the two `mediaWhitePointTag`s (§6.2.3,
-/// equations 1–6).
+/// `x = 0` table, then matrix/TRC or grayTRC), with the intent's own
+/// float `DToBx` / `BToDx` (multiProcessElementsType) tag ahead of all
+/// of them when it is present and evaluable. The ICC-absolute intent
+/// uses DToB3 / BToD3 directly when present; otherwise it runs the
+/// media-relative tables and rescales the PCS by the media white over
+/// the PCS white (§6.2.3, equations 1–6).
 #[derive(Clone, Debug)]
 pub struct IccTransform {
     src: ToPcs,
     dst: FromPcs,
-    /// A DeviceLink's AToB0, evaluated directly (`src` / `dst` unused).
-    link: Option<Lut>,
+    /// A DeviceLink's DToB0 / AToB0, evaluated directly (`src` / `dst`
+    /// unused).
+    link: Option<Link>,
     /// ICC-absolute scaling `src_wtpt / dst_wtpt`, applied in PCSXYZ.
     abs_scale: Option<[f64; 3]>,
     in_ch: usize,
@@ -91,6 +107,13 @@ pub struct IccTransform {
     in_space: DataColorSpace,
     out_space: DataColorSpace,
     threads: usize,
+}
+
+/// The single table of a DeviceLink.
+#[derive(Clone, Debug)]
+enum Link {
+    Lut(Lut),
+    Mpe(Mpe),
 }
 
 fn pcs_kind(p: &IccProfile) -> Result<PcsKind, IccError> {
@@ -123,6 +146,16 @@ fn pick_lut(tables: &[Option<Lut>; 3], intent: RenderingIntent) -> Option<&Lut> 
 impl ToPcs {
     fn build(p: &IccProfile, intent: RenderingIntent, ch: usize) -> Result<Self, IccError> {
         let pcs = pcs_kind(p)?;
+        if let Some(mpe) = &p.d2b[intent.float_table_index()]
+            && mpe.in_ch == ch
+            && mpe.out_ch == 3
+        {
+            return Ok(ToPcs::Mpe {
+                mpe: mpe.clone(),
+                pcs,
+                absolute: intent == RenderingIntent::AbsoluteColorimetric,
+            });
+        }
         if let Some(lut) = pick_lut(&p.a2b, intent) {
             if lut.in_ch != ch || lut.out_ch != 3 {
                 return Err(IccError::Malformed("AToB channel counts"));
@@ -159,6 +192,7 @@ impl ToPcs {
             ToPcs::Lut { lut, .. } => lut.first_curves(),
             ToPcs::Matrix { curves, .. } => Some(curves),
             ToPcs::Gray { curve, .. } => Some(core::slice::from_ref(curve)),
+            ToPcs::Mpe { .. } => None,
         }
     }
 
@@ -193,6 +227,11 @@ impl ToPcs {
                     PcsKind::Lab => ([v * 100.0, 0.0, 0.0], PcsKind::Lab),
                 }
             }
+            ToPcs::Mpe { mpe, pcs, .. } => {
+                let mut n = [0.0; 3];
+                mpe.eval(d, &mut n);
+                (n, *pcs)
+            }
         }
     }
 }
@@ -200,6 +239,16 @@ impl ToPcs {
 impl FromPcs {
     fn build(p: &IccProfile, intent: RenderingIntent, ch: usize) -> Result<Self, IccError> {
         let pcs = pcs_kind(p)?;
+        if let Some(mpe) = &p.b2d[intent.float_table_index()]
+            && mpe.in_ch == 3
+            && mpe.out_ch == ch
+        {
+            return Ok(FromPcs::Mpe {
+                mpe: mpe.clone(),
+                pcs,
+                absolute: intent == RenderingIntent::AbsoluteColorimetric,
+            });
+        }
         if let Some(lut) = pick_lut(&p.b2a, intent) {
             if lut.in_ch != 3 || lut.out_ch != ch {
                 return Err(IccError::Malformed("BToA channel counts"));
@@ -233,7 +282,7 @@ impl FromPcs {
 
     fn wants(&self) -> PcsKind {
         match self {
-            FromPcs::Lut { pcs, .. } | FromPcs::Gray { pcs, .. } => *pcs,
+            FromPcs::Lut { pcs, .. } | FromPcs::Gray { pcs, .. } | FromPcs::Mpe { pcs, .. } => *pcs,
             FromPcs::Matrix { .. } => PcsKind::Xyz,
         }
     }
@@ -261,6 +310,7 @@ impl FromPcs {
                 };
                 out[0] = curve.eval_inverse(conn.clamp(0.0, 1.0));
             }
+            FromPcs::Mpe { mpe, .. } => mpe.eval(&v, out),
         }
     }
 }
@@ -303,12 +353,26 @@ impl IccTransform {
         let s = ToPcs::build(src, opts.intent, in_ch)?;
         let d = FromPcs::build(dst, opts.intent, out_ch)?;
         let abs_scale = if opts.intent == RenderingIntent::AbsoluteColorimetric {
-            let sw = absolute_white(src);
-            let dw = absolute_white(dst);
+            // Media-relative → ICC-absolute on the source side
+            // (`× media white / PCS white`) and back on the destination
+            // side; a DToB3 / BToD3 tag is absolute already.
+            let src_abs = matches!(s, ToPcs::Mpe { absolute: true, .. });
+            let dst_abs = matches!(d, FromPcs::Mpe { absolute: true, .. });
+            let sw = if src_abs {
+                PCS_WHITE
+            } else {
+                absolute_white(src)
+            };
+            let dw = if dst_abs {
+                PCS_WHITE
+            } else {
+                absolute_white(dst)
+            };
             if dw.iter().any(|&v| v <= 0.0) {
                 return Err(IccError::Malformed("media white point"));
             }
-            Some([sw[0] / dw[0], sw[1] / dw[1], sw[2] / dw[2]])
+            let k = [sw[0] / dw[0], sw[1] / dw[1], sw[2] / dw[2]];
+            (k != [1.0; 3]).then_some(k)
         } else {
             None
         };
@@ -325,10 +389,10 @@ impl IccTransform {
         })
     }
 
-    /// The single transform of a DeviceLink profile (§8.6): its AToB0
-    /// table maps the header's data colour space straight to the colour
-    /// space named in its PCS field. (`DToB0`, which §8.10.3 would
-    /// prefer, is not evaluated.)
+    /// The single transform of a DeviceLink profile (§8.6): its DToB0
+    /// (when present and evaluable, §8.10.3 a) or AToB0 table maps the
+    /// header's data colour space straight to the colour space named in
+    /// its PCS field.
     pub fn device_link(link: &IccProfile) -> Result<Self, IccError> {
         if link.header.class != ProfileClass::DeviceLink {
             return Err(IccError::Unsupported("not a DeviceLink profile"));
@@ -339,12 +403,18 @@ impl IccTransform {
             .pcs
             .channels()
             .ok_or(IccError::Unsupported("unknown output colour space"))?;
-        let lut = link.a2b[0]
-            .clone()
-            .ok_or(IccError::Unsupported("DeviceLink without AToB0"))?;
-        if lut.in_ch != in_ch || lut.out_ch != out_ch {
-            return Err(IccError::Malformed("AToB0 channel counts"));
-        }
+        let lut = match &link.d2b[0] {
+            Some(m) if m.in_ch == in_ch && m.out_ch == out_ch => Link::Mpe(m.clone()),
+            _ => {
+                let lut = link.a2b[0]
+                    .clone()
+                    .ok_or(IccError::Unsupported("DeviceLink without AToB0"))?;
+                if lut.in_ch != in_ch || lut.out_ch != out_ch {
+                    return Err(IccError::Malformed("AToB0 channel counts"));
+                }
+                Link::Lut(lut)
+            }
+        };
         // Placeholders: never evaluated while `link` is set.
         let id = Curve::Identity;
         Ok(Self {
@@ -395,9 +465,16 @@ impl IccTransform {
     }
 
     fn pixel(&self, input: &[f64], output: &mut [f64], pre: bool) {
-        if let Some(l) = &self.link {
-            l.eval_from(input, output, usize::from(pre));
-            return;
+        match &self.link {
+            Some(Link::Lut(l)) => {
+                l.eval_from(input, output, usize::from(pre));
+                return;
+            }
+            Some(Link::Mpe(m)) => {
+                m.eval(input, output);
+                return;
+            }
+            None => {}
         }
         let (v, kind) = self.src.eval(input, pre);
         let want = self.dst.wants();
@@ -495,7 +572,8 @@ impl IccTransform {
     /// Tabulate the first-stage curves for every input code `0..=max`.
     fn tables(&self, max: usize) -> Option<Vec<Vec<f64>>> {
         let curves = match &self.link {
-            Some(l) => l.first_curves()?,
+            Some(Link::Lut(l)) => l.first_curves()?,
+            Some(Link::Mpe(_)) => return None,
             None => self.src.first_curves()?,
         };
         Some(

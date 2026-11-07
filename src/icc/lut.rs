@@ -20,53 +20,77 @@ impl Clut {
     /// clause of ICC.1:2022 prescribes) over all input dimensions. The
     /// first input channel varies least rapidly (§10.10, §10.12.3).
     pub fn eval(&self, input: &[f64], out: &mut [f64]) {
-        let n = self.grid.len();
-        let o = self.out_ch;
-        // Per-dimension cell origin and fraction; dimensions whose
-        // fraction is zero (or whose grid has one point) contribute only
-        // their lower corner, so they drop out of the corner walk.
-        let mut frac = [0f64; 16];
-        let mut step = [0usize; 16];
-        let mut live = 0usize;
-        let mut origin = 0usize;
-        let mut stride = o;
-        for d in (0..n).rev() {
-            let g = self.grid[d];
-            if g >= 2 {
-                let x = clamp01(input[d]);
-                let pos = x * (g - 1) as f64;
-                let i = (pos.floor() as usize).min(g - 2);
-                let f = pos - i as f64;
-                origin += i * stride;
-                if f > 0.0 {
-                    frac[live] = f;
-                    step[live] = stride;
-                    live += 1;
-                }
-            }
-            stride *= g;
+        let mut x = [0f64; 16];
+        for (d, v) in x.iter_mut().zip(input) {
+            *d = clamp01(*v);
         }
-        let mut acc = [0f64; 16];
-        for mask in 0..(1usize << live) {
-            let mut w = 1.0;
-            let mut off = origin;
-            for k in 0..live {
-                if mask & (1 << k) != 0 {
-                    w *= frac[k];
-                    off += step[k];
-                } else {
-                    w *= 1.0 - frac[k];
-                }
-            }
-            let cell = &self.data[off..off + o];
-            for (a, &v) in acc.iter_mut().zip(cell) {
-                *a += w * v as f64;
-            }
-        }
-        for (v, a) in out.iter_mut().zip(&acc[..o]) {
-            *v = a / 65535.0;
+        multilinear(
+            &self.grid,
+            self.out_ch,
+            &self.data,
+            &x[..self.grid.len()],
+            out,
+        );
+        for v in out.iter_mut().take(self.out_ch) {
+            *v /= 65535.0;
         }
     }
+}
+
+/// Multilinear interpolation into a grid table (first input dimension
+/// varies least rapidly; `out_ch` values per grid point). `input` must
+/// already lie in `[0, 1]`. Shared by the integer LUT tags and the
+/// float `mpet` CLUT element (§10.16.2.4).
+pub(crate) fn multilinear<T: Copy + Into<f64>>(
+    grid: &[usize],
+    out_ch: usize,
+    data: &[T],
+    input: &[f64],
+    out: &mut [f64],
+) {
+    let n = grid.len();
+    let o = out_ch;
+    // Per-dimension cell origin and fraction; dimensions whose
+    // fraction is zero (or whose grid has one point) contribute only
+    // their lower corner, so they drop out of the corner walk.
+    let mut frac = [0f64; 16];
+    let mut step = [0usize; 16];
+    let mut live = 0usize;
+    let mut origin = 0usize;
+    let mut stride = o;
+    for d in (0..n).rev() {
+        let g = grid[d];
+        if g >= 2 {
+            let pos = input[d] * (g - 1) as f64;
+            let i = (pos.floor() as usize).min(g - 2);
+            let f = pos - i as f64;
+            origin += i * stride;
+            if f > 0.0 {
+                frac[live] = f;
+                step[live] = stride;
+                live += 1;
+            }
+        }
+        stride *= g;
+    }
+    let mut acc = [0f64; 16];
+    for mask in 0..(1usize << live) {
+        let mut w = 1.0;
+        let mut off = origin;
+        for k in 0..live {
+            if mask & (1 << k) != 0 {
+                w *= frac[k];
+                off += step[k];
+            } else {
+                w *= 1.0 - frac[k];
+            }
+        }
+        let cell = &data[off..off + o];
+        for (a, &v) in acc.iter_mut().zip(cell) {
+            *a += w * v.into();
+        }
+    }
+    out[..o].copy_from_slice(&acc[..o]);
 }
 
 /// One processing element.

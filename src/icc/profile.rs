@@ -4,6 +4,7 @@
 use super::IccError;
 use super::curve::{Curve, parametric_param_count};
 use super::lut::{Clut, Lut, LutKind, Stage};
+use super::mpe::{Mpe, parse_mpet};
 
 /// Profile/device class (ICC.1:2022 §7.2.5, Table 18).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -187,6 +188,17 @@ impl RenderingIntent {
     /// Index of the AToBx / BToAx tag carrying this intent (Table 25:
     /// ICC-absolute uses the media-relative tables plus white-point
     /// scaling, §6.2.3).
+    /// Index of the intent's `DToBx` / `BToDx` tag (§9.2.9–9.2.12:
+    /// `x = 3` is ICC-absolute).
+    pub(crate) fn float_table_index(self) -> usize {
+        match self {
+            Self::Perceptual => 0,
+            Self::RelativeColorimetric => 1,
+            Self::Saturation => 2,
+            Self::AbsoluteColorimetric => 3,
+        }
+    }
+
     pub(crate) fn table_index(self) -> usize {
         match self {
             Self::Perceptual => 0,
@@ -265,6 +277,10 @@ pub struct IccProfile {
     pub(crate) gray_trc: Option<Curve>,
     pub(crate) a2b: [Option<Lut>; 3],
     pub(crate) b2a: [Option<Lut>; 3],
+    /// `D2B0..3` / `B2D0..3` (`mpet`); `None` when absent or when the
+    /// tag cannot be evaluated (§8.10.2 a) then falls back).
+    pub(crate) d2b: [Option<Mpe>; 4],
+    pub(crate) b2d: [Option<Mpe>; 4],
 }
 
 // --------------------------------------------------------------------
@@ -374,6 +390,8 @@ impl IccProfile {
             gray_trc: None,
             a2b: [None, None, None],
             b2a: [None, None, None],
+            d2b: [None, None, None, None],
+            b2d: [None, None, None, None],
         };
         p.decode_tags()?;
         Ok(p)
@@ -419,6 +437,16 @@ impl IccProfile {
             if let Some(t) = self.tag_data(b2a[i]) {
                 self.b2a[i] = Some(parse_lut(t, self.header.pcs == DataColorSpace::Xyz)?);
             }
+        }
+        // multiProcessElementsType tags are optional overrides: one that
+        // does not parse, or uses an element this implementation does not
+        // know, is "not supported by the CMM" (§8.10.2 a), §10.16.1) and
+        // the integer tags are used instead.
+        let d2b = [sig(b"D2B0"), sig(b"D2B1"), sig(b"D2B2"), sig(b"D2B3")];
+        let b2d = [sig(b"B2D0"), sig(b"B2D1"), sig(b"B2D2"), sig(b"B2D3")];
+        for i in 0..4 {
+            self.d2b[i] = self.tag_data(d2b[i]).and_then(|t| parse_mpet(t).ok());
+            self.b2d[i] = self.tag_data(b2d[i]).and_then(|t| parse_mpet(t).ok());
         }
         Ok(())
     }
@@ -482,6 +510,18 @@ impl IccProfile {
     /// `AToB0` fallback of §8.10.2 c).
     pub fn has_lut_to_pcs(&self, intent: RenderingIntent) -> bool {
         self.a2b[intent.table_index()].is_some() || self.a2b[0].is_some()
+    }
+
+    /// Whether the profile carries a usable `DToBx` (`mpet`) tag for
+    /// `intent` (§9.2.25–9.2.28; there is no fallback to `DToB0`).
+    pub fn has_float_to_pcs(&self, intent: RenderingIntent) -> bool {
+        self.d2b[intent.float_table_index()].is_some()
+    }
+
+    /// Whether the profile carries a usable `BToDx` (`mpet`) tag for
+    /// `intent` (§9.2.9–9.2.12; there is no fallback to `BToD0`).
+    pub fn has_float_from_pcs(&self, intent: RenderingIntent) -> bool {
+        self.b2d[intent.float_table_index()].is_some()
     }
 
     /// True when the profile has a `BToAx` table for `intent` (or the

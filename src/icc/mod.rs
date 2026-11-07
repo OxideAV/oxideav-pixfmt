@@ -14,6 +14,13 @@
 //!   including the legacy 16-bit PCSLAB encoding of Tables 42/43),
 //!   `lutAToBType` and `lutBToAType` (`mAB ` / `mBA `, any permitted
 //!   element combination, 8- or 16-bit CLUTs with per-dimension grids);
+//! - `multiProcessElementsType` (`mpet`, §10.16): the float `DToBx` /
+//!   `BToDx` tags with segmented curve sets (`parf` formula and `samf`
+//!   sampled segments), matrices with offsets, float CLUTs and the
+//!   `bACS` / `eACS` placeholders, unclipped between elements, taken
+//!   ahead of the integer tags per §8.10.2 a) and §8.10.3 a) (DToB3 /
+//!   BToD3 as already ICC-absolute); a tag with an unknown element is
+//!   skipped and the integer tags are used;
 //! - the PCSXYZ ↔ PCSLAB conversion of §6.4 / Annex A and the PCS
 //!   encodings of §6.3.4;
 //! - all four rendering intents: the intent's AToBx / BToAx table with
@@ -28,9 +35,8 @@
 //!   ([`IccProfileBuilder`], [`IccProfile::srgb`] …).
 //!
 //! Not covered (see the crate README): black-point compensation (its
-//! algorithm is ISO 18619, not part of ICC.1), `multiProcessElementsType`
-//! (`DToBx` / `BToDx`) evaluation, NamedColor profiles, DeviceLink /
-//! Abstract profiles as chain members.
+//! algorithm is ISO 18619, not part of ICC.1), NamedColor profiles,
+//! DeviceLink / Abstract profiles as chain members.
 //!
 //! The module depends on nothing beyond `std` and could move into its
 //! own crate later without API changes.
@@ -39,6 +45,7 @@ mod build;
 mod curve;
 mod frame;
 mod lut;
+mod mpe;
 mod pcs;
 mod profile;
 mod transform;
