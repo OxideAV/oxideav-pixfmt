@@ -172,7 +172,8 @@ fn css_color_4_reference_points() {
 #[test]
 fn ciede2000_basic_properties() {
     let a = [50.0, 2.6772, -79.7751];
-    assert_eq!(delta_e2000(a, a), 0.0);
+    // Not `== 0.0`: Miri perturbs transcendental results by a few ULP.
+    assert!(delta_e2000(a, a).abs() < 1e-12);
     // Pure lightness difference on the neutral axis: ΔL / S_L with
     // L̄ = 55 → S_L = 1 + 0.015·25 / √45.
     let d = delta_e2000([50.0, 0.0, 0.0], [60.0, 0.0, 0.0]);
