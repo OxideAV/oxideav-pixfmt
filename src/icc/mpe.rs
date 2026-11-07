@@ -211,11 +211,15 @@ pub(crate) fn parse_mpet(t: &[u8]) -> Result<Mpe, IccError> {
     }
     let mut elements = Vec::with_capacity(n);
     let mut ch = in_ch;
+    // Elements and curves may share data (§10.16.1, §10.16.2.2), so a
+    // small tag could name the same large CLUT many times; bound the
+    // values decoded in total by the tag's own size.
+    let mut budget = t.len() / 4 + 4096;
     for i in 0..n {
         let off = be32(t, 16 + 8 * i)?;
         let size = be32(t, 20 + 8 * i)?;
         let e = sub(t, off, size)?;
-        let (el, p, q) = parse_element(e)?;
+        let (el, p, q) = parse_element(e, &mut budget)?;
         if p != ch {
             return Err(IccError::Malformed("mpet element channel chain"));
         }
@@ -233,7 +237,7 @@ pub(crate) fn parse_mpet(t: &[u8]) -> Result<Mpe, IccError> {
 }
 
 /// One element (Table 56) → `(element, p, q)`.
-fn parse_element(e: &[u8]) -> Result<(Element, usize, usize), IccError> {
+fn parse_element(e: &[u8], budget: &mut usize) -> Result<(Element, usize, usize), IccError> {
     let sig = e.get(0..4).ok_or(IccError::Truncated)?;
     let p = check_channels(be16(e, 8)?)?;
     let q = check_channels(be16(e, 10)?)?;
@@ -246,12 +250,13 @@ fn parse_element(e: &[u8]) -> Result<(Element, usize, usize), IccError> {
             for c in 0..p {
                 let off = be32(e, 12 + 8 * c)?;
                 let size = be32(e, 16 + 8 * c)?;
-                curves.push(parse_curf(sub(e, off, size)?)?);
+                curves.push(parse_curf(sub(e, off, size)?, budget)?);
             }
             Element::Curves(curves)
         }
         b"matf" => {
             let count = q * (p + 1);
+            spend(budget, count)?;
             let mut v = Vec::with_capacity(count);
             for k in 0..count {
                 v.push(f32be(e, 12 + 4 * k)?);
@@ -275,6 +280,7 @@ fn parse_element(e: &[u8]) -> Result<(Element, usize, usize), IccError> {
                     .filter(|&t| t <= MAX_CLUT_SAMPLES)
                     .ok_or(IccError::Malformed("mpet CLUT too large"))?;
             }
+            spend(budget, total)?;
             let bytes = sub(e, 28, total * 4)?;
             let data = bytes
                 .as_chunks::<4>()
@@ -295,8 +301,15 @@ fn parse_element(e: &[u8]) -> Result<(Element, usize, usize), IccError> {
     Ok((el, p, q))
 }
 
+fn spend(budget: &mut usize, n: usize) -> Result<(), IccError> {
+    *budget = budget
+        .checked_sub(n)
+        .ok_or(IccError::Malformed("mpet data larger than its tag"))?;
+    Ok(())
+}
+
 /// A `curf` curve (Table 58) with its segments (Tables 59, 61).
-fn parse_curf(c: &[u8]) -> Result<SegmentedCurve, IccError> {
+fn parse_curf(c: &[u8], budget: &mut usize) -> Result<SegmentedCurve, IccError> {
     if c.get(0..4) != Some(b"curf") {
         return Err(IccError::Malformed("curve set entry is not curf"));
     }
@@ -307,6 +320,7 @@ fn parse_curf(c: &[u8]) -> Result<SegmentedCurve, IccError> {
     if n > MAX_ELEMENTS {
         return Err(IccError::Unsupported("curf with too many segments"));
     }
+    spend(budget, 6 * n)?;
     let mut breaks = Vec::with_capacity(n - 1);
     for k in 0..n - 1 {
         let b = f32be(c, 12 + 4 * k)?;
@@ -346,6 +360,7 @@ fn parse_curf(c: &[u8]) -> Result<SegmentedCurve, IccError> {
                 if count > (c.len().saturating_sub(off + 12)) / 4 {
                     return Err(IccError::Truncated);
                 }
+                spend(budget, count)?;
                 let (lo, hi) = (breaks[k - 1], breaks[k]);
                 let mut values = Vec::with_capacity(count + 1);
                 // The value at the lower break-point comes from the
@@ -408,5 +423,41 @@ mod tests {
         assert!((f(1, [1.0, 2.0, 5.0, 0.0, 1.0]) - 3.0).abs() < 1e-12);
         // a·b^(cX + d) + e = 1·10^(1·2 + 0) + 0
         assert!((f(2, [1.0, 10.0, 1.0, 0.0, 0.0]) - 100.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    fn be(v: &mut Vec<u8>, x: u32) {
+        v.extend_from_slice(&x.to_be_bytes());
+    }
+
+    #[test]
+    fn shared_clut_data_is_bounded_by_the_tag_size() {
+        // One 3→3 CLUT element (16³ grid) referenced 64 times.
+        let mut clut = b"clut\0\0\0\0\0\x03\0\x03".to_vec();
+        let mut g = [0u8; 16];
+        g[..3].fill(16);
+        clut.extend_from_slice(&g);
+        clut.resize(28 + 16 * 16 * 16 * 3 * 4, 0);
+        let n = 64u32;
+        let mut t = b"mpet\0\0\0\0\0\x03\0\x03".to_vec();
+        be(&mut t, n);
+        let off = 16 + 8 * n;
+        for _ in 0..n {
+            be(&mut t, off);
+            be(&mut t, clut.len() as u32);
+        }
+        t.extend_from_slice(&clut);
+        assert!(matches!(parse_mpet(&t), Err(IccError::Malformed(_))));
+        // A single reference is fine.
+        let mut one = b"mpet\0\0\0\0\0\x03\0\x03".to_vec();
+        be(&mut one, 1);
+        be(&mut one, 24);
+        be(&mut one, clut.len() as u32);
+        one.extend_from_slice(&clut);
+        assert!(parse_mpet(&one).is_ok());
     }
 }
