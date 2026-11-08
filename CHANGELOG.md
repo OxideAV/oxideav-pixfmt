@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.12...v0.1.13) - 2026-11-07
+
+### Added
+
+- *(icc)* IccTransform::chain — Abstract profiles and device profiles in the middle ([#15](https://github.com/OxideAV/oxideav-pixfmt/pull/15))
+- *(icc)* multiProcessElementsType (DToBx / BToDx) float tags ([#15](https://github.com/OxideAV/oxideav-pixfmt/pull/15))
+- *(colorspace)* HSV / HSB, HSI, HCL, HCLp, Y′IQ, Y′UV, Y′DbDr, Ohta and LMS colour models ([#15](https://github.com/OxideAV/oxideav-pixfmt/pull/15))
+
+### Fixed
+
+- *(icc)* bound the values an mpet tag may decode by its own size ([#15](https://github.com/OxideAV/oxideav-pixfmt/pull/15))
+
+### Other
+
+- *(colorspace)* CIEDE2000 identity within 1e-12, not exactly zero
+- API hygiene: non_exhaustive option/info records + enums, hide kernel modules
+
 ### Added
 
 - `ConvertOptions::new` plus `with_dither` / `with_palette` / `with_color_space` builders.
