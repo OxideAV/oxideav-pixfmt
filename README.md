@@ -597,6 +597,48 @@ Cineon log agree with the same black-box tool within 3e-4, 5e-6 and
 5e-5; PhotoYCC and the analogue-television matrices are checked
 against their defining constants (`tests/colorspace_models.rs`).
 
+### Buffers — `ModelConverter`
+
+`ColorModel::from_srgb` / `to_srgb` / `convert` work on one colour.
+`colorspace::ModelConverter` plans a conversion between any two models
+once (matrices derived and inverted at construction; two models on the
+same base domain fuse into a single 3 × 3 with no transfer function in
+between) and runs it over interleaved buffers:
+
+```rust
+use oxideav_pixfmt::colorspace::{ColorModel, GamutPolicy, LabWhite, ModelConverter};
+
+let to_lab = ModelConverter::new(ColorModel::Srgb, ColorModel::Lab(LabWhite::D50))
+    .with_channels(4)          // RGBA in, LabA out: extra channels are copied
+    .with_threads(4);          // serial unless asked; same output at any budget
+let rgba = vec![0.25f32; 4 * 1024];
+let mut lab = vec![0f32; rgba.len()];
+to_lab.convert_f32(&rgba, &mut lab)?;   // also convert_f64 / convert_u8 / convert_u16
+
+let back = ModelConverter::new(ColorModel::Lab(LabWhite::D50), ColorModel::Srgb)
+    .with_gamut(GamutPolicy::Clamp);    // default: Preserve
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+- **Float buffers** hold natural units and are exact: the sRGB transfer
+  function is evaluated per sample, nothing is clamped under
+  `GamutPolicy::Preserve` (out-of-gamut colours come back out of a round
+  trip unchanged), and `GamutPolicy::Clamp` limits the intermediate sRGB
+  value to 0..1 before it enters the destination model.
+- **Integer buffers** map each component's
+  `ColorModel::component_ranges()` interval onto the full code range,
+  round to nearest and saturate: unit components 0..1, hues 0..360°,
+  XYZ / LMS 0..2, `L*` 0..100 with `a*` / `b*` −128..127 (so 8-bit
+  `a* = code − 128`), `u*` −134..220, `v*` −140..122, Oklab / Jzazbz
+  `a`, `b` −0.5..0.5, scRGB the IEC 61966-2-2 rule
+  `code = 8192·v + 4096`. A plain sRGB source is linearised through an
+  exact per-code table; a plain sRGB destination is encoded through a
+  piecewise-linear table (nine binades × 128 chords) whose error is
+  below 2 × 10⁻⁶ — 0.13 of a 16-bit code (asserted in the unit tests).
+- **Threads**: `with_threads(n)` or
+  `with_execution(&ExecutionContext)`; the buffer is split into equal
+  parts on scoped threads.
+
 ## ICC colour management (feature `icc`)
 
 ```toml

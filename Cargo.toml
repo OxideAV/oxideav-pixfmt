@@ -65,3 +65,8 @@ required-features = ["bench"]
 name = "packed_rgb_12mp"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "colorspace_models"
+harness = false
+required-features = ["bench"]

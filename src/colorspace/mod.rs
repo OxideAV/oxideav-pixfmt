@@ -15,13 +15,19 @@
 //! with black generation and undercolour removal, has its own
 //! four-channel functions ([`rgb_to_cmyk_with`], [`cmyk_to_rgb`]).
 //!
-//! Everything is `f64` and unclamped, so a model → sRGB → model round
+//! [`ModelConverter`] plans a conversion between any two models once
+//! and runs it over interleaved `f32` / `f64` / 8-bit / 16-bit buffers
+//! (optionally on several threads, optionally clamping to the sRGB
+//! gamut).
+//!
+//! The per-colour functions are `f64` and unclamped, so a model → sRGB → model round
 //! trip is exact to rounding and out-of-gamut values survive; quantise
 //! (and clamp, if wanted) at the edges.
 
 mod cie;
 mod extra;
 mod models;
+mod rows;
 
 pub use cie::{BRADFORD, Chromaticity, D50, D65, RgbPrimaries, bradford_adaptation, delta_e2000};
 pub use extra::{
@@ -35,3 +41,4 @@ pub use models::{
     rgb_to_hsi, rgb_to_hsl, rgb_to_hsv, rgb_to_hwb, rgb_to_ypbpr, srgb_to_linear, xyy_to_xyz,
     xyz_d65_to_oklab, xyz_to_lab, xyz_to_xyy, ypbpr_to_rgb,
 };
+pub use rows::{GamutPolicy, ModelConverter};

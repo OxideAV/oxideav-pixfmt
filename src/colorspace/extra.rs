@@ -108,6 +108,12 @@ const JZ_LMS_TO_IAB: Mat3 = [
     [0.199076, 1.096799, -1.295875],
 ];
 
+/// `pq(0) = c1^p`, the value the non-linearity takes at zero signal.
+fn jz_pq_zero() -> f64 {
+    static ZERO: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *ZERO.get_or_init(|| JZ_C1.powf(JZ_P))
+}
+
 /// The paper's perceptual-quantiser non-linearity on a cone signal in
 /// cd/m², mirrored through zero for negative (out-of-gamut) signals.
 fn jz_pq(x: f64) -> f64 {
@@ -115,12 +121,11 @@ fn jz_pq(x: f64) -> f64 {
     let v = ((JZ_C1 + JZ_C2 * t) / (1.0 + JZ_C3 * t)).powf(JZ_P);
     // The curve does not pass through zero (`pq(0) = c1^p`), so the
     // mirror is taken about that point to stay continuous.
-    let zero = JZ_C1.powf(JZ_P);
-    if x < 0.0 { 2.0 * zero - v } else { v }
+    if x < 0.0 { 2.0 * jz_pq_zero() - v } else { v }
 }
 
 fn jz_pq_inv(v: f64) -> f64 {
-    let zero = JZ_C1.powf(JZ_P);
+    let zero = jz_pq_zero();
     let (neg, v) = if v < zero {
         (true, 2.0 * zero - v)
     } else {
@@ -155,10 +160,15 @@ pub fn xyz_abs_to_jzazbz(xyz: [f64; 3]) -> [f64; 3] {
 pub fn jzazbz_to_xyz_abs(jab: [f64; 3]) -> [f64; 3] {
     let j = jab[0] + JZ_D0;
     let iz = j / (1.0 + JZ_D - JZ_D * j);
-    let inv_iab = invert3(&JZ_LMS_TO_IAB).expect("Jzazbz opponent matrix is invertible");
-    let inv_lms = invert3(&JZ_XYZ_TO_LMS).expect("Jzazbz cone matrix is invertible");
-    let lms = mul3v(&inv_iab, [iz, jab[1], jab[2]]).map(jz_pq_inv);
-    let [xp, yp, z] = mul3v(&inv_lms, lms);
+    static INVERSES: std::sync::OnceLock<(Mat3, Mat3)> = std::sync::OnceLock::new();
+    let (inv_iab, inv_lms) = INVERSES.get_or_init(|| {
+        (
+            invert3(&JZ_LMS_TO_IAB).expect("Jzazbz opponent matrix is invertible"),
+            invert3(&JZ_XYZ_TO_LMS).expect("Jzazbz cone matrix is invertible"),
+        )
+    });
+    let lms = mul3v(inv_iab, [iz, jab[1], jab[2]]).map(jz_pq_inv);
+    let [xp, yp, z] = mul3v(inv_lms, lms);
     let x = (xp + (JZ_B - 1.0) * z) / JZ_B;
     let y = (yp + (JZ_G - 1.0) * x) / JZ_G;
     [x, y, z]

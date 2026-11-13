@@ -145,25 +145,25 @@ pub fn lch_to_lab(lch: [f64; 3]) -> [f64; 3] {
 // Oklab (CSS Color 4 §9.2 and §19 `XYZ_to_OKLab` / `OKLab_to_XYZ`).
 
 #[allow(clippy::excessive_precision)] // transcribed verbatim
-const XYZ_TO_LMS: Mat3 = [
+pub(super) const XYZ_TO_LMS: Mat3 = [
     [0.8190224379967030, 0.3619062600528904, -0.1288737815209879],
     [0.0329836539323885, 0.9292868615863434, 0.0361446663506424],
     [0.0481771893596242, 0.2642395317527308, 0.6335478284694309],
 ];
 #[allow(clippy::excessive_precision)] // transcribed verbatim
-const LMS_TO_OKLAB: Mat3 = [
+pub(super) const LMS_TO_OKLAB: Mat3 = [
     [0.2104542683093140, 0.7936177747023054, -0.0040720430116193],
     [1.9779985324311684, -2.4285922420485799, 0.4505937096174110],
     [0.0259040424655478, 0.7827717124575296, -0.8086757549230774],
 ];
 #[allow(clippy::excessive_precision)] // transcribed verbatim
-const LMS_TO_XYZ: Mat3 = [
+pub(super) const LMS_TO_XYZ: Mat3 = [
     [1.2268798758459243, -0.5578149944602171, 0.2813910456659647],
     [-0.0405757452148008, 1.1122868032803170, -0.0717110580655164],
     [-0.0763729366746601, -0.4214933324022432, 1.5869240198367816],
 ];
 #[allow(clippy::excessive_precision)] // transcribed verbatim
-const OKLAB_TO_LMS: Mat3 = [
+pub(super) const OKLAB_TO_LMS: Mat3 = [
     [1.0000000000000000, 0.3963377773761749, 0.2158037573099136],
     [1.0000000000000000, -0.1055613458156586, -0.0638541728258133],
     [1.0000000000000000, -0.0894841775298119, -1.2914855480194092],
@@ -403,14 +403,14 @@ fn colour_difference_matrix(s_b: f64, s_r: f64) -> Mat3 {
 /// 0.114)`, `V = 0.615·(R′ − Y′) / (1 − 0.299)`, i.e. the published
 /// `U ≈ 0.492·(B′ − Y′)`, `V ≈ 0.877·(R′ − Y′)` with peak excursions
 /// 0.436 and 0.615.
-fn yuv_matrix() -> Mat3 {
+pub(super) fn yuv_matrix() -> Mat3 {
     colour_difference_matrix(0.436 / (1.0 - 0.114), 0.615 / (1.0 - 0.299))
 }
 
 /// NTSC Y′IQ (FCC 1953 / SMPTE 170M): the Y′UV colour-difference pair
 /// rotated by 33°, `I = V·cos 33° − U·sin 33°`, `Q = V·sin 33° +
 /// U·cos 33°`.
-fn yiq_matrix() -> Mat3 {
+pub(super) fn yiq_matrix() -> Mat3 {
     let m = yuv_matrix();
     let (s, c) = 33f64.to_radians().sin_cos();
     let mut i = [0.0; 3];
@@ -424,12 +424,12 @@ fn yiq_matrix() -> Mat3 {
 
 /// SECAM Y′DbDr (BT.470 system L): `Db = 1.505·(B′ − Y′)`,
 /// `Dr = −1.902·(R′ − Y′)`.
-fn ydbdr_matrix() -> Mat3 {
+pub(super) fn ydbdr_matrix() -> Mat3 {
     colour_difference_matrix(1.505, -1.902)
 }
 
 /// Ohta's I1 I2 I3: `(R + G + B) / 3`, `(R − B) / 2`, `(2G − R − B) / 4`.
-const OHTA_M: Mat3 = [
+pub(super) const OHTA_M: Mat3 = [
     [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
     [0.5, 0.0, -0.5],
     [-0.25, 0.5, -0.25],
@@ -656,15 +656,15 @@ pub enum ColorModel {
     Log(CineonLog),
 }
 
-fn d65() -> [f64; 3] {
+pub(super) fn d65() -> [f64; 3] {
     super::cie::D65.to_xyz()
 }
 
-fn srgb_to_xyz_m() -> Mat3 {
+pub(super) fn srgb_to_xyz_m() -> Mat3 {
     RgbPrimaries::BT709.rgb_to_xyz()
 }
 
-fn d65_to_d50() -> Mat3 {
+pub(super) fn d65_to_d50() -> Mat3 {
     bradford_adaptation(d65(), super::cie::D50.to_xyz())
 }
 
