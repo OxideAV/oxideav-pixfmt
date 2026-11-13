@@ -867,3 +867,78 @@ fn precomputed_tables_track_the_exact_transform() {
         .unwrap();
     assert_eq!(&o[..3], &o[3..]);
 }
+
+#[test]
+fn legacy_perceptual_black_is_rescaled_on_request() {
+    // The synthesized table profile maps device black to PCS zero, as
+    // pre-version-4 perceptual tables commonly do; relabel it version 2.
+    let v4 = rgb_lut_profile("mft2");
+    let mut bytes = v4.as_bytes().to_vec();
+    bytes[8] = 2;
+    let v2 = IccProfile::parse(&bytes).unwrap();
+    assert_eq!(v2.header().version.0, 2);
+    let lab = IccProfile::lab_d50();
+    let on = |intent| {
+        TransformOptions::new()
+            .with_intent(intent)
+            .with_legacy_perceptual_black(true)
+    };
+    let perceptual = RenderingIntent::Perceptual;
+    let plain = IccTransform::new(&v2, &lab, perceptual).unwrap();
+    let scaled = IccTransform::with_options(&v2, &lab, on(perceptual)).unwrap();
+    // Black: zero without the option, the Table 16 black with it.
+    let black = [0u16; 3];
+    assert!(lab_of(&plain, &black)[0].abs() < 0.05);
+    let b = lab_of(&scaled, &black);
+    assert!((b[0] - 3.1373).abs() < 0.05, "{b:?}");
+    assert!(b[1].abs() < 0.1 && b[2].abs() < 0.1, "{b:?}");
+    // White does not move.
+    let white = [65535u16; 3];
+    let (w0, w1) = (lab_of(&plain, &white), lab_of(&scaled, &white));
+    assert!(delta_e2000(w0, w1) < 0.02, "{w0:?} {w1:?}");
+    // In between the mapping is linear in XYZ: mid grey is lifted by
+    // less than black is.
+    let grey = [32768u16; 3];
+    let lift = lab_of(&scaled, &grey)[0] - lab_of(&plain, &grey)[0];
+    assert!(lift > 0.0 && lift < 3.1373, "{lift}");
+
+    // Only version < 4 tables under the perceptual intent are touched.
+    let same = |a: &IccTransform, b: &IccTransform| {
+        probe_rgb()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .all(|px| delta_e2000(lab_of(a, px), lab_of(b, px)) < 1e-9)
+    };
+    let rel = RenderingIntent::RelativeColorimetric;
+    assert!(same(
+        &IccTransform::new(&v2, &lab, rel).unwrap(),
+        &IccTransform::with_options(&v2, &lab, on(rel)).unwrap()
+    ));
+    assert!(same(
+        &IccTransform::new(&v4, &lab, perceptual).unwrap(),
+        &IccTransform::with_options(&v4, &lab, on(perceptual)).unwrap()
+    ));
+    // A matrix/TRC profile is never adjusted, whatever its version.
+    let mut srgb2 = IccProfile::srgb().as_bytes().to_vec();
+    srgb2[8] = 2;
+    let srgb2 = IccProfile::parse(&srgb2).unwrap();
+    assert!(same(
+        &IccTransform::new(&srgb2, &lab, perceptual).unwrap(),
+        &IccTransform::with_options(&srgb2, &lab, on(perceptual)).unwrap()
+    ));
+    // Two legacy tables cancel: device → device is what it was.
+    let rt_plain = IccTransform::new(&v2, &v2, perceptual).unwrap();
+    let rt_scaled = IccTransform::with_options(&v2, &v2, on(perceptual)).unwrap();
+    let input = probe_rgb();
+    let (mut a, mut b) = (vec![0u16; input.len()], vec![0u16; input.len()]);
+    rt_plain.transform_u16(&input, &mut a).unwrap();
+    rt_scaled.transform_u16(&input, &mut b).unwrap();
+    let worst = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| (*x as i32 - *y as i32).abs())
+        .max()
+        .unwrap();
+    assert!(worst <= 1, "{worst}");
+}

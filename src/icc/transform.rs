@@ -20,6 +20,10 @@ pub struct TransformOptions {
     /// How the profiles' colour lookup tables are interpolated.
     /// Default: multilinear.
     pub interpolation: ClutInterpolation,
+    /// Rescale the black point of pre-version-4 perceptual tables (see
+    /// [`TransformOptions::with_legacy_perceptual_black`]). Default:
+    /// off.
+    pub legacy_perceptual_black: bool,
 }
 
 impl TransformOptions {
@@ -43,6 +47,27 @@ impl TransformOptions {
     /// Take the thread budget from an execution context.
     pub fn with_execution(self, execution: &oxideav_core::ExecutionContext) -> Self {
         self.with_threads(execution.threads)
+    }
+
+    /// Apply the black-point adjustment ICC.1:2022 §6.3.4.3 gives for
+    /// perceptual transforms written before profile version 4.
+    ///
+    /// Version 4 perceptual tables place the black of their reference
+    /// medium at the PCS value of Table 16 (PCSXYZ 0.003357, 0.003479,
+    /// 0.002869 — `L*` 3.1373); earlier ones "frequently use zero".
+    /// With this option, under the perceptual intent, an endpoint
+    /// profile whose header version is below 4 and whose perceptual
+    /// transform is a lookup table has its PCS values mapped linearly
+    /// in XYZ so that zero lands on that black and the PCS white stays
+    /// put (`Xp = Xt·(1 − Xb / Xi) + Xb` out of a source table, the
+    /// inverse into a destination table). Two such profiles cancel
+    /// out; a version 2 table meeting a version 4 one gets matching
+    /// blacks. Matrix/TRC and grayTRC models are never adjusted. Off by
+    /// default: the clause is advisory and a table may already use the
+    /// version 4 black.
+    pub fn with_legacy_perceptual_black(mut self, on: bool) -> Self {
+        self.legacy_perceptual_black = on;
+        self
     }
 
     /// Select how the profiles' integer colour lookup tables (`mft1`,
@@ -119,6 +144,10 @@ pub struct IccTransform {
     mid: Vec<Mid>,
     /// ICC-absolute scaling `src_wtpt / dst_wtpt`, applied in PCSXYZ.
     abs_scale: Option<[f64; 3]>,
+    /// §6.3.4.3 black adjustment out of the source / into the
+    /// destination (perceptual tables of pre-version-4 profiles).
+    lift_src_black: bool,
+    drop_dst_black: bool,
     in_ch: usize,
     out_ch: usize,
     in_space: DataColorSpace,
@@ -326,6 +355,37 @@ impl Baked {
                     .collect()
             })
             .collect()
+    }
+}
+
+/// PCS perceptual black point, ICC.1:2022 §6.3.4.3 Table 16 (PCSXYZ).
+const PERCEPTUAL_BLACK: [f64; 3] = [0.003357, 0.003479, 0.002869];
+
+/// §6.3.4.3: `Xp = Xt·(1 − Xb / Xi) + Xb` — zero-based PCSXYZ onto the
+/// perceptual reference medium's black, white unchanged.
+fn lift_black(xyz: [f64; 3]) -> [f64; 3] {
+    let mut out = [0.0; 3];
+    for c in 0..3 {
+        let (b, w) = (PERCEPTUAL_BLACK[c], PCS_WHITE[c]);
+        out[c] = xyz[c] * (1.0 - b / w) + b;
+    }
+    out
+}
+
+/// The inverse of [`lift_black`].
+fn drop_black(xyz: [f64; 3]) -> [f64; 3] {
+    let mut out = [0.0; 3];
+    for c in 0..3 {
+        let (b, w) = (PERCEPTUAL_BLACK[c], PCS_WHITE[c]);
+        out[c] = (xyz[c] - b) / (1.0 - b / w);
+    }
+    out
+}
+
+fn as_xyz(v: [f64; 3], kind: PcsKind) -> [f64; 3] {
+    match kind {
+        PcsKind::Xyz => v,
+        PcsKind::Lab => pcs::lab_to_xyz(v),
     }
 }
 
@@ -679,12 +739,22 @@ impl IccTransform {
         let mut d = FromPcs::build(last, intent, out_ch)?;
         d.set_interpolation(scheme);
         let abs_scale = scale_into(&d, last, cur)?;
+        let legacy = |p: &IccProfile, is_table: bool| {
+            opts.legacy_perceptual_black
+                && intent == RenderingIntent::Perceptual
+                && p.header.version.0 < 4
+                && is_table
+        };
+        let lift_src_black = legacy(first, matches!(s, ToPcs::Lut { .. }));
+        let drop_dst_black = legacy(last, matches!(d, FromPcs::Lut { .. }));
         Ok(Self {
             src: s,
             dst: d,
             link: None,
             mid,
             abs_scale,
+            lift_src_black,
+            drop_dst_black,
             in_ch,
             out_ch,
             in_space: first.header.color_space,
@@ -742,6 +812,8 @@ impl IccTransform {
             link: Some(lut),
             mid: Vec::new(),
             abs_scale: None,
+            lift_src_black: false,
+            drop_dst_black: false,
             in_ch,
             out_ch,
             in_space: link.header.color_space,
@@ -874,6 +946,9 @@ impl IccTransform {
             None => {}
         }
         let (mut v, mut kind) = self.src.eval(input, pre);
+        if self.lift_src_black {
+            (v, kind) = (lift_black(as_xyz(v, kind)), PcsKind::Xyz);
+        }
         for m in &self.mid {
             match m {
                 Mid::Abstract {
@@ -900,6 +975,9 @@ impl IccTransform {
                     (v, kind) = to.eval(&dev, false);
                 }
             }
+        }
+        if self.drop_dst_black {
+            (v, kind) = (drop_black(as_xyz(v, kind)), PcsKind::Xyz);
         }
         let v = connect(v, kind, self.dst.wants(), self.abs_scale);
         self.dst.eval(v, output);

@@ -4,7 +4,8 @@
 //! (`oxideav_pixfmt::icc`, feature `icc`).
 //!
 //! The first bytes choose the options (rendering intent, CLUT
-//! interpolation scheme, thread budget, precomputed-table grid size,
+//! interpolation scheme, thread budget, legacy perceptual black
+//! adjustment, precomputed-table grid size,
 //! which built-in profile sits on the other side); the rest is parsed
 //! as a profile, with a valid header spliced in front when the input
 //! does not carry one so the tag decoders are reached. Whatever parses
@@ -65,7 +66,8 @@ fuzz_target!(|data: &[u8]| {
     let opts = TransformOptions::new()
         .with_intent(intent)
         .with_interpolation(interpolation)
-        .with_threads(1 + ((a >> 3) & 3) as usize);
+        .with_threads(1 + ((a >> 3) & 3) as usize)
+        .with_legacy_perceptual_black(b & 4 != 0);
     let grid = 2 + ((a >> 5) & 3) as usize;
     let other = match b & 3 {
         0 => IccProfile::srgb(),

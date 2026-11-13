@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(icc)* `ClutInterpolation::Tetrahedral` via `TransformOptions::with_interpolation`: simplex interpolation of the integer CLUT tags for any number of inputs (the `n + 1` cell corners along the diagonal, ordered by descending fraction) next to the default multilinear; both exact on grid points. Brings the 9-point Generic CMYK table from 1.19 to 0.41 ΔE2000 of the black-box validator
 - *(icc)* `IccTransform::precompute(grid)`: any transform with 1–4 input channels sampled on a regular grid into an in-memory device-link table (at most 2²⁴ values, built on the transform's thread budget) and run by simplex interpolation on 8-bit / 16-bit / `f32` buffers; `is_precomputed()`. Measured error against the exact transform in the README
+- *(icc)* `TransformOptions::with_legacy_perceptual_black(true)`: the ICC.1:2022 §6.3.4.3 black-point adjustment for perceptual lookup tables of pre-version-4 profiles (zero-based PCS black mapped linearly in XYZ onto the Table 16 black, white unchanged; inverse into a destination table). Off by default
 - *(icc)* `TransformOptions::with_execution(&ExecutionContext)`; `IccTransform::device_link_with(profile, options)`
 - *(fuzz)* `icc_transform` harness: fuzz-chosen intent / interpolation / threads / table grid over a parsed profile as source, destination, chain member and DeviceLink, through every buffer path and the precomputed table
 - *(bench)* `icc_transform` (matrix/TRC and CLUT profiles, exact / tetrahedral / precomputed, 1 MP and 12 MP)

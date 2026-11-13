@@ -694,6 +694,7 @@ t.transform_u16(&rgb16, &mut cmyk16)?;                  // also _u8, _f32, trans
 | PCS | PCSXYZ ↔ PCSLAB (§6.4, Annex A, negative-XYZ extension), every PCS encoding of §6.3.4 |
 | intents | perceptual, media-relative, saturation, ICC-absolute (§6.2.3 white scaling; display media white = PCS white, §9.2.36); §8.10.2 tag fallback order |
 | device spaces | RGB, CMYK, Gray, Lab, XYZ, n-colour (anything a LUT carries) |
+| perceptual black | opt-in `TransformOptions::with_legacy_perceptual_black(true)`: the §6.3.4.3 adjustment `Xp = Xt·(1 − Xb / Xi) + Xb` (Table 16 black, PCS white fixed) out of / into the perceptual tables of pre-version-4 profiles |
 | float tags | `DToB0..3` / `BToD0..3` (`mpet`, §10.16): segmented curves (`parf` types 0–2, `samf`), `matf`, float `clut`, `bACS` / `eACS`; unclipped, ahead of the integer tags (§8.10.2 a); DToB3 / BToD3 already ICC-absolute); an unknown element sends the profile back to its integer tags; `has_float_to_pcs` / `has_float_from_pcs` |
 | chains | `IccTransform::chain(&[&a, &abstract, &proof, &b], opts)`: Abstract profiles (§8.8; DToB0 / AToB0 PCS → PCS, Lab or XYZ in and out) and device profiles passed through in the middle; ICC-absolute rescales at every step into a device profile |
 | DeviceLink | `IccTransform::device_link(&p)` runs a link's `DToB0` (§8.10.3 a) or `AToB0` directly (§8.6) |
