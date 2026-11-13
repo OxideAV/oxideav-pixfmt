@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(fuzz)* `icc_transform` harness: fuzz-chosen intent / interpolation / threads / table grid over a parsed profile as source, destination, chain member and DeviceLink, through every buffer path and the precomputed table
 - *(bench)* `icc_transform` (matrix/TRC and CLUT profiles, exact / tetrahedral / precomputed, 1 MP and 12 MP)
 
+### Performance
+
+- *(colorspace)* `ModelConverter` against the per-colour `ColorModel::convert` loop, 1 MP serial (Apple M4 Max, shared machine, best of three): sRGB → XYZ 36.3 ms → 4.8 ms at 8 bits (29.6 ms `f32`), sRGB → CIELAB 83.9 → 13.9 ms (54.5 ms `f32`), CIELAB → sRGB 165 → 20.8 ms (44.6 ms `f32`), sRGB → Y′CbCr 8.6 → 2.4 ms `f32`; with the host's threads 1.1 / 2.4 / 2.8 / 0.7 ms
+- *(icc)* precomputed tables, 1 MP 8-bit serial: sRGB → Display P3 98 → 22.7 ms, sRGB → Generic CMYK 118 → 28.7 ms, Generic CMYK → sRGB 294 → 36.6 ms (4.0 / 4.6 / 4.4 ms on the host's threads); tetrahedral interpolation alone 294 → 171 ms on the 4-D table
+
 ### Changed
 
 - *(colorspace)* `ColorModel::Yuv`, `Yiq` and `YDbDr` are now built from the constants of their broadcast standards on the 0.299 / 0.587 / 0.114 luma (`U = 0.436·(B′ − Y′) / 0.886`, `V = 0.615·(R′ − Y′) / 0.701`; I / Q the 33° rotation; `Db = 1.505·(B′ − Y′)`, `Dr = −1.902·(R′ − Y′)`) instead of matrices measured from a black-box tool; values move by up to 5e-4. `ColorModel::Lms` is named as the CIECAM02 `M_CAT02` matrix (same numbers)

@@ -639,6 +639,28 @@ let back = ModelConverter::new(ColorModel::Lab(LabWhite::D50), ColorModel::Srgb)
   `with_execution(&ExecutionContext)`; the buffer is split into equal
   parts on scoped threads.
 
+Speed, 1 MP of random in-gamut colours, Apple M4 Max, serial unless
+marked, best of three `cargo bench --features bench --bench
+colorspace_models` runs on a machine shared with other builds (the
+spread between runs was up to 2×). "Before" is the per-colour
+`ColorModel::convert` loop on `f64`, which was the only route:
+
+| conversion | per-colour loop | `convert_f32` | `convert_u8` | `convert_u16` | `convert_u8`, host threads |
+| ---------- | --------------- | ------------- | ------------ | ------------- | -------------------------- |
+| sRGB → linear sRGB | 55.5 ms | 35.6 ms | 5.1 ms | 5.7 ms | 1.0 ms |
+| linear sRGB → sRGB | 25.6 ms | 28.4 ms | 7.8 ms | 7.7 ms | 1.9 ms |
+| sRGB → XYZ | 36.3 ms | 29.6 ms | 4.8 ms | 5.4 ms | 1.1 ms |
+| sRGB → CIELAB (D50) | 83.9 ms | 54.5 ms | 13.9 ms | 16.4 ms | 2.4 ms |
+| CIELAB (D50) → sRGB | 165 ms | 44.6 ms | 20.8 ms | 27.5 ms | 2.8 ms |
+| sRGB → OkLCh | 107 ms | 116 ms | 55.3 ms | 71.6 ms | 7.4 ms |
+| sRGB → Y′CbCr (BT.709) | 8.6 ms | 2.4 ms | 3.9 ms | 4.2 ms | 0.7 ms |
+
+The float path keeps the exact transfer function (three `powf` per
+pixel), so where the transfer dominates it gains only what the planned
+matrices save; the integer paths replace it with the tables described
+above. At 12 MP: sRGB → XYZ 8-bit 52 ms serial / 8.1 ms threaded,
+CIELAB → sRGB 8-bit 148 ms / 21 ms, sRGB → Y′CbCr `f32` 31 ms / 4.4 ms.
+
 ## ICC colour management (feature `icc`)
 
 ```toml
@@ -717,6 +739,22 @@ the exact transform, over 20 000 random 16-bit colours
 | synthesized CMYK (`mAB `) → sRGB | 17⁴ | 1.76 | 0.067 |
 
 At 8 bits the 33³ sRGB → P3 table is within one code of the exact path.
+
+Speed, 1 MP, Apple M4 Max, one `cargo bench --features bench,icc
+--bench icc_transform` run on a machine shared with other builds
+(serial unless marked; "exact" is the transform as built, which was the
+only route):
+
+| transform | exact, 8-bit | precomputed table, 8-bit | table, 16-bit | table, `f32` | table, 8-bit, host threads | table build |
+| --------- | ------------ | ------------------------ | ------------- | ------------ | -------------------------- | ----------- |
+| sRGB → Display P3 (matrix/TRC), 33³ | 98 ms | 22.7 ms | 40.4 ms | 30.5 ms | 4.0 ms | 3.4 ms |
+| sRGB → Generic CMYK (`mft1`), 33³ | 118 ms | 28.7 ms | 44.4 ms | 36.7 ms | 4.6 ms | 6.0 ms |
+| Generic CMYK → sRGB (4-D `mft1`), 17⁴ | 294 ms | 36.6 ms | 35.9 ms | 31.6 ms | 4.4 ms | 16.5 ms |
+
+Tetrahedral interpolation alone takes the exact Generic CMYK → sRGB
+8-bit transform from 294 to 171 ms (5 table reads per pixel instead of
+16). At 12 MP sRGB → Display P3 8-bit runs in 1.04 s exact, 284 ms
+through the table and 28 ms through the table on the host's threads.
 
 Not covered: black-point compensation (ICC.1:2022 does not define it —
 its algorithm is ISO 18619, which is not among the project's reference
@@ -894,6 +932,8 @@ cargo bench --features bench --bench alpha              # Porter-Duff over/blit/
 cargo bench --features bench --bench depth_gray        # bit-depth ladder + RGB→Gray8 projection
 cargo bench --features bench --bench heif_12mp         # 12 MP still: the production-HEIF conversion set through convert()
 cargo bench --features bench --bench deep_gray_12mp    # 12 MP still: the depth-preserving grey / packed-16 / 16-bit YUV routes, before and after
+cargo bench --features bench --bench colorspace_models # colour-model buffers (8 / 16-bit / f32, 1 MP and 12 MP) next to the per-colour loop
+cargo bench --features bench,icc --bench icc_transform # ICC transforms: exact, tetrahedral and precomputed-table paths
 OXIDEAV_PIXFMT_FORCE_SCALAR=1 cargo bench --features bench  # scalar baseline for comparison
 ```
 
