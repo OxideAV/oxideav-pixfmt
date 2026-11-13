@@ -1666,10 +1666,10 @@ fn gbr_alpha_crossing_deep_packed() {
         &opts,
     )
     .expect("gbrp8 → rgba64");
-    for i in 0..n {
+    for (i, &red) in src8.planes[2].data.iter().enumerate().take(n) {
         assert_eq!(
             read16le(&rgba64.planes[0].data, i * 8),
-            src8.planes[2].data[i] as u16 * 257,
+            red as u16 * 257,
             "R {i}"
         );
         assert_eq!(read16le(&rgba64.planes[0].data, i * 8 + 6), 65535, "A {i}");
@@ -1724,15 +1724,15 @@ fn gbr_gray8_broadcast_projection_roundtrip() {
         assert_eq!(gbr.planes.len(), if alpha { 4 } else { 3 }, "{fmt:?}");
         for i in 0..n {
             let v = gray.planes[0].data[i];
-            for p in 0..3 {
+            for (p, plane) in gbr.planes.iter().enumerate().take(3) {
                 if bits > 8 {
                     assert_eq!(
-                        read16le(&gbr.planes[p].data, i * 2),
+                        read16le(&plane.data, i * 2),
                         widen(v, bits),
                         "{fmt:?} plane {p} sample {i}"
                     );
                 } else {
-                    assert_eq!(gbr.planes[p].data[i], v, "{fmt:?} plane {p} sample {i}");
+                    assert_eq!(plane.data[i], v, "{fmt:?} plane {p} sample {i}");
                 }
             }
             if alpha {
@@ -1918,10 +1918,10 @@ fn gbrap8_alpha_crossing_rows() {
     // Gbrap8 ↔ Rgba64Le: exact ×257 widen / top-byte truncation on all
     // four components — the round-trip is bit-exact.
     let deep = convert(&src, info, PixelFormat::Rgba64Le, &opts).expect("→ rgba64");
-    for i in 0..n {
+    for (i, &alpha) in src.planes[3].data.iter().enumerate().take(n) {
         assert_eq!(
             read16le(&deep.planes[0].data, i * 8 + 6),
-            src.planes[3].data[i] as u16 * 257,
+            alpha as u16 * 257,
             "alpha word {i}"
         );
     }
@@ -2010,8 +2010,8 @@ fn gbrap8_gray8_roundtrip_and_alpha_ignored() {
     )
     .expect("gray → gbrap8");
     assert_eq!(gbra.planes.len(), 4);
-    for p in 0..3 {
-        assert_eq!(gbra.planes[p].data, gray.planes[0].data, "plane {p}");
+    for (p, plane) in gbra.planes.iter().enumerate().take(3) {
+        assert_eq!(plane.data, gray.planes[0].data, "plane {p}");
     }
     assert!(gbra.planes[3].data.iter().all(|&a| a == 255));
     let back = convert(

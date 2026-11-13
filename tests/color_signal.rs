@@ -242,8 +242,8 @@ fn identity_matrix_routes_planes_as_gbr() {
         .with_range(ColorRange::Limited)
         .with_matrix(MatrixCoefficients::IDENTITY);
     let mut black_white = yuv_frame(2, 1, 1, 1, false);
-    for p in 0..3 {
-        black_white.planes[p].data = vec![16, 235];
+    for plane in black_white.planes.iter_mut().take(3) {
+        plane.data = vec![16, 235];
     }
     let bw = convert(
         &black_white.with_color_signal(lim),

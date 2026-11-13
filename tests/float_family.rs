@@ -492,8 +492,8 @@ fn staged_routes_keep_full_precision() {
     };
     // Neutral chroma at 10 bits is 512.
     let mut ramp = ramp;
-    for p in 1..3 {
-        for c in ramp.planes[p].data.chunks_mut(2) {
+    for plane in ramp.planes.iter_mut().skip(1).take(2) {
+        for c in plane.data.chunks_mut(2) {
             c.copy_from_slice(&512u16.to_le_bytes());
         }
     }

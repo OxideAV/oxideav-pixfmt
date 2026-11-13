@@ -591,8 +591,8 @@ fn identity_planes(
         ));
     }
     let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut data = tight_plane(&frame.planes[i], w * sb, h)?.into_owned();
+    for (i, plane) in frame.planes.iter().enumerate().take(n) {
+        let mut data = tight_plane(plane, w * sb, h)?.into_owned();
         if limited && i < 3 {
             if to_rgb {
                 range_limited_to_full(&mut data, bits);

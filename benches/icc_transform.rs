@@ -49,7 +49,7 @@ fn bench_pair(
     let table = exact.precompute(grid).unwrap();
     let table_mt = exact_mt.precompute(grid).unwrap();
     let (ic, oc) = (exact.input_channels(), exact.output_channels());
-    c.bench_function(format!("icc_{name}/build_table_{grid}"), |b| {
+    c.bench_function(&format!("icc_{name}/build_table_{grid}"), |b| {
         b.iter(|| exact.precompute(grid).unwrap())
     });
     for &(label, px) in sizes {

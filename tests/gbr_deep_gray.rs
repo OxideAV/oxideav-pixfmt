@@ -179,8 +179,8 @@ fn gray16_gbrp16_ramp_is_exact() {
     let src = one_plane(w * 2, le16(&ramp));
     for f in [PixelFormat::Gbrp16Le, PixelFormat::Gbrap16Le] {
         let gbr = conv(&src, PixelFormat::Gray16Le, w, h, f);
-        for p in 0..3 {
-            assert_eq!(rd16(&gbr.planes[p].data), ramp);
+        for plane in gbr.planes.iter().take(3) {
+            assert_eq!(rd16(&plane.data), ramp);
         }
         let back = conv(&gbr, f, w, h, PixelFormat::Gray16Le);
         assert_eq!(rd16(&back.planes[0].data), ramp, "{f:?}");

@@ -215,8 +215,8 @@ fn sub_8bit_record_on_byte_surface() {
         &ConvertOptions::default(),
     )
     .expect("gray8[4] → gray16");
-    for i in 0..w * h {
-        let v4 = (src.planes[0].data[i] & 0xF) as u32;
+    for (i, &sample) in src.planes[0].data.iter().enumerate().take(w * h) {
+        let v4 = (sample & 0xF) as u32;
         let v8 = widen(v4, 4, 8);
         // Gray8 → Gray16Le is the exact ×257 widen of the normalised
         // 8-bit value.

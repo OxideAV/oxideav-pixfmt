@@ -222,12 +222,9 @@ fn deep_gray_to_byte_family_luma_range_at_depth() {
             assert_eq!(y[0], 16);
             assert_eq!(y[1], 235);
             let (cw, ch) = (w.div_ceil(wsub), h.div_ceil(hsub));
-            for p in 1..=2 {
-                assert_eq!(out.planes[p].stride, cw);
-                assert!(
-                    out.planes[p].data.len() == cw * ch
-                        && out.planes[p].data.iter().all(|&c| c == 128)
-                );
+            for plane in out.planes.iter().skip(1).take(2) {
+                assert_eq!(plane.stride, cw);
+                assert!(plane.data.len() == cw * ch && plane.data.iter().all(|&c| c == 128));
             }
             if alpha {
                 assert!(out.planes[3].data.iter().all(|&a| a == 255));
@@ -309,12 +306,12 @@ fn deep_gray_to_deep_family_luma_range_at_depth() {
             assert_eq!(y[0] as u32, 16 * s, "{g:?} → {f:?} black rail");
             assert_eq!(y[1] as u32, 235 * s, "{g:?} → {f:?} white rail");
             let (cw, ch) = (w.div_ceil(wsub), h.div_ceil(hsub));
-            for p in 1..=2 {
-                assert_eq!(out.planes[p].stride, cw * 2);
-                assert_eq!(out.planes[p].data.len(), cw * ch * 2);
+            for plane in out.planes.iter().skip(1).take(2) {
+                assert_eq!(plane.stride, cw * 2);
+                assert_eq!(plane.data.len(), cw * ch * 2);
                 let mid = 1u16 << (bits - 1);
                 assert!(
-                    rd16(&out.planes[p].data).iter().all(|&c| c == mid),
+                    rd16(&plane.data).iter().all(|&c| c == mid),
                     "{g:?} → {f:?} chroma"
                 );
             }

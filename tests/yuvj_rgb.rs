@@ -150,8 +150,8 @@ fn direct_yuvj_matches_two_step_staging() {
         for (i, s) in src.planes[0].data.iter_mut().enumerate() {
             *s = ((i * 7) % 256) as u8;
         }
-        for p in 1..=2 {
-            for (i, s) in src.planes[p].data.iter_mut().enumerate() {
+        for (p, plane) in src.planes.iter_mut().enumerate().skip(1).take(2) {
+            for (i, s) in plane.data.iter_mut().enumerate() {
                 *s = ((i * 11 + p * 40) % 256) as u8;
             }
         }

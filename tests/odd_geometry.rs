@@ -173,10 +173,9 @@ fn every_supported_pair_converts_at_odd_sizes() {
                     Err(e) => panic!("{src_fmt:?} → {dst_fmt:?} at {w}x{h}: {e:?}"),
                 };
                 assert!(out.planes.len() >= dst_fmt.plane_count());
-                for p in 0..dst_fmt.plane_count() {
+                for (p, pl) in out.planes.iter().enumerate().take(dst_fmt.plane_count()) {
                     let row = dst_fmt.plane_row_bytes(p, w).unwrap();
                     let (_, ph) = dst_fmt.plane_dimensions(p, w, h).unwrap();
-                    let pl = &out.planes[p];
                     assert!(
                         pl.stride >= row && pl.data.len() >= pl.stride * (ph as usize - 1) + row,
                         "{src_fmt:?} → {dst_fmt:?} at {w}x{h}: plane {p} is {} bytes / stride {} (need {row} x {ph})",
