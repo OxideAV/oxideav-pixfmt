@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use oxideav_pixfmt::colorspace::delta_e2000;
-use oxideav_pixfmt::icc::{DataColorSpace, IccProfile, IccTransform, RenderingIntent};
+use oxideav_pixfmt::icc::{
+    ClutInterpolation, DataColorSpace, IccProfile, IccTransform, RenderingIntent, TransformOptions,
+};
 
 fn magick_available() -> bool {
     Command::new("magick")
@@ -139,6 +141,17 @@ fn compare(
     a: &Path,
     b: &Path,
 ) -> Stats {
+    compare_with(src, dst, intent, a, b, ClutInterpolation::Multilinear)
+}
+
+fn compare_with(
+    src: &IccProfile,
+    dst: &IccProfile,
+    intent: RenderingIntent,
+    a: &Path,
+    b: &Path,
+    interpolation: ClutInterpolation,
+) -> Stats {
     let src_cs = src.header().color_space;
     let dst_cs = dst.header().color_space;
     let input = probes(src_cs.channels().unwrap());
@@ -149,7 +162,10 @@ fn compare(
         RenderingIntent::AbsoluteColorimetric => "Absolute",
     };
     let theirs = magick_profile(&input, src_cs, dst_cs, a, b, Some(iname));
-    let t = IccTransform::new(src, dst, intent).expect("transform");
+    let opts = TransformOptions::new()
+        .with_intent(intent)
+        .with_interpolation(interpolation);
+    let t = IccTransform::with_options(src, dst, opts).expect("transform");
     let mut ours = vec![0u16; theirs.len()];
     t.transform_u16(&input, &mut ours).unwrap();
     // Measure both results in the destination profile's PCSLAB.
@@ -271,6 +287,7 @@ fn system_profiles_match_magick() {
     }
     let mut worst: f64 = 0.0;
     let mut worst_lut: f64 = 0.0;
+    let mut worst_lut_simplex: f64 = 0.0;
     for (na, pa, a) in &loaded {
         for (nb, pb, b) in &loaded {
             if na == nb {
@@ -296,6 +313,9 @@ fn system_profiles_match_magick() {
                 );
                 assert!(s.mean < 0.1, "{na} -> {nb} {intent:?}: mean {}", s.mean);
                 if lut_src {
+                    let t = compare_with(a, b, intent, pa, pb, ClutInterpolation::Tetrahedral);
+                    eprintln!("    tetrahedral: max {:.4} mean {:.4}", t.max, t.mean);
+                    worst_lut_simplex = worst_lut_simplex.max(t.max);
                     worst_lut = worst_lut.max(s.max);
                 } else {
                     worst = worst.max(s.max);
@@ -303,9 +323,15 @@ fn system_profiles_match_magick() {
             }
         }
     }
-    eprintln!("worst {worst}, worst with a CMYK CLUT source {worst_lut}");
+    eprintln!(
+        "worst {worst}, worst with a CMYK CLUT source {worst_lut} (multilinear) / \
+         {worst_lut_simplex} (tetrahedral)"
+    );
     assert!(worst < 1.0, "{worst}");
     assert!(worst_lut < 1.25, "{worst_lut}");
+    // Simplex interpolation lands closer to the validator between the
+    // nodes of the 9-point CMYK table.
+    assert!(worst_lut_simplex < 0.6, "{worst_lut_simplex}");
 }
 
 /// CMYK inputs sitting exactly on Generic CMYK's 9-point CLUT grid:

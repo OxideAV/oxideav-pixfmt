@@ -54,3 +54,13 @@ name = "icc_profile"
 path = "fuzz_targets/icc_profile.rs"
 test = false
 doc = false
+
+# ICC transform harness — fuzz-chosen options (intent, CLUT
+# interpolation, threads, precomputed-table grid), a parsed profile on
+# either side / in the middle of a chain / as a DeviceLink, and every
+# buffer path including the precomputed table.
+[[bin]]
+name = "icc_transform"
+path = "fuzz_targets/icc_transform.rs"
+test = false
+doc = false

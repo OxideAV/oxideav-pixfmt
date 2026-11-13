@@ -14,8 +14,8 @@ use std::process::Command;
 
 use oxideav_pixfmt::colorspace::delta_e2000;
 use oxideav_pixfmt::icc::{
-    Curve, DataColorSpace, IccProfile, IccProfileBuilder, IccTransform, ProfileClass,
-    RenderingIntent, lab_to_xyz, xyz_to_lab,
+    ClutInterpolation, Curve, DataColorSpace, IccError, IccProfile, IccProfileBuilder,
+    IccTransform, ProfileClass, RenderingIntent, TransformOptions, lab_to_xyz, xyz_to_lab,
 };
 
 fn sig(s: &[u8; 4]) -> u32 {
@@ -662,4 +662,208 @@ fn device_link_profile_applies_its_atob0_directly() {
     // A DeviceLink is not a transform endpoint.
     assert!(IccTransform::new(&link, &IccProfile::srgb(), RenderingIntent::Perceptual).is_err());
     assert!(IccTransform::device_link(&IccProfile::srgb()).is_err());
+}
+
+fn tetra(intent: RenderingIntent) -> TransformOptions {
+    TransformOptions::new()
+        .with_intent(intent)
+        .with_interpolation(ClutInterpolation::Tetrahedral)
+}
+
+#[test]
+fn tetrahedral_interpolation_stays_close_to_multilinear_and_the_model() {
+    let lab = IccProfile::lab_d50();
+    let srgb = IccProfile::srgb();
+    let intent = RenderingIntent::RelativeColorimetric;
+    for kind in ["mAB", "mAB8", "mft2"] {
+        let p = rgb_lut_profile(kind);
+        let multi = IccTransform::new(&p, &lab, intent).unwrap();
+        let simplex = IccTransform::with_options(&p, &lab, tetra(intent)).unwrap();
+        // Both schemes stay within the table's own sampling error of
+        // the analytic model (grid points themselves are reproduced
+        // exactly by either: see the unit tests in `icc::lut`).
+        let reference = IccTransform::new(&srgb, &lab, intent).unwrap();
+        let mut worst_pair: f64 = 0.0;
+        let mut worst_model: f64 = 0.0;
+        for px in probe_rgb().as_chunks::<3>().0.iter() {
+            let (m, s, r) = (
+                lab_of(&multi, px),
+                lab_of(&simplex, px),
+                lab_of(&reference, px),
+            );
+            worst_pair = worst_pair.max(delta_e2000(m, s));
+            worst_model = worst_model.max(delta_e2000(s, r));
+        }
+        eprintln!("{kind}: tetrahedral vs multilinear {worst_pair:.4}, vs model {worst_model:.4}");
+        assert!(worst_pair < 1.0, "{kind}: {worst_pair}");
+        assert!(worst_model < 1.0, "{kind}: {worst_model}");
+    }
+    // Four inputs: the CMYK table through both schemes.
+    let cmyk = cmyk_lut_profile();
+    let multi = IccTransform::new(&cmyk, &lab, intent).unwrap();
+    let simplex = IccTransform::with_options(&cmyk, &lab, tetra(intent)).unwrap();
+    let mut s: u32 = 99;
+    let mut worst: f64 = 0.0;
+    for _ in 0..2000 {
+        let mut d = [0u16; 4];
+        for v in &mut d {
+            s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *v = (s >> 16) as u16;
+        }
+        worst = worst.max(delta_e2000(lab_of(&multi, &d), lab_of(&simplex, &d)));
+    }
+    eprintln!("CMYK: tetrahedral vs multilinear max ΔE2000 {worst:.4}");
+    assert!(worst < 3.0, "{worst}");
+}
+
+/// Max and mean ΔE2000 between two transforms into the same RGB space,
+/// measured through `measure` (that space → PCSLAB).
+fn rgb_difference(a: &[u16], b: &[u16], measure: &IccTransform) -> (f64, f64) {
+    let (mut max, mut sum, mut n) = (0f64, 0.0, 0usize);
+    for (x, y) in a.as_chunks::<3>().0.iter().zip(b.as_chunks::<3>().0) {
+        let de = delta_e2000(lab_of(measure, x), lab_of(measure, y));
+        max = max.max(de);
+        sum += de;
+        n += 1;
+    }
+    (max, sum / n as f64)
+}
+
+#[test]
+fn precomputed_tables_track_the_exact_transform() {
+    let srgb = IccProfile::srgb();
+    let p3 = IccProfile::display_p3();
+    let lab = IccProfile::lab_d50();
+    let intent = RenderingIntent::RelativeColorimetric;
+    let p3_lab = IccTransform::new(&p3, &lab, intent).unwrap();
+    let srgb_lab = IccTransform::new(&srgb, &lab, intent).unwrap();
+
+    // Dense pseudo-random RGB.
+    let mut s: u32 = 0xBEEF;
+    let input: Vec<u16> = (0..3 * 20_000)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            (s >> 16) as u16
+        })
+        .collect();
+
+    // Matrix/TRC → matrix/TRC.
+    let exact = IccTransform::new(&srgb, &p3, intent).unwrap();
+    assert!(!exact.is_precomputed());
+    let mut want = vec![0u16; input.len()];
+    exact.transform_u16(&input, &mut want).unwrap();
+    for (grid, limit) in [(17, 0.6), (33, 0.2), (65, 0.06)] {
+        let baked = exact.precompute(grid).unwrap();
+        assert!(baked.is_precomputed());
+        assert_eq!((baked.input_channels(), baked.output_channels()), (3, 3));
+        let mut got = vec![0u16; input.len()];
+        baked.transform_u16(&input, &mut got).unwrap();
+        let (max, mean) = rgb_difference(&want, &got, &p3_lab);
+        eprintln!("sRGB → P3, {grid}³ table: max ΔE2000 {max:.4}, mean {mean:.4}");
+        assert!(max < limit, "grid {grid}: {max}");
+
+        // Grid points are exact (to f32 and the 16-bit rounding).
+        let mut node = [0.0; 3];
+        let mut reference = [0.0; 3];
+        for k in [0, 1, grid / 2, grid - 1] {
+            let d = [k, grid - 1 - k, k / 2].map(|v| v as f64 / (grid - 1) as f64);
+            baked.transform_pixel(&d, &mut node);
+            exact.transform_pixel(&d, &mut reference);
+            for c in 0..3 {
+                assert!((node[c] - reference[c]).abs() < 1e-6, "node {d:?}");
+            }
+        }
+
+        // The three buffer paths and the per-pixel path agree, at any
+        // thread budget.
+        let f: Vec<f32> = input.iter().map(|&v| v as f32 / 65535.0).collect();
+        let mut gf = vec![0f32; f.len()];
+        baked.transform_f32(&f, &mut gf).unwrap();
+        for (a, b) in got.iter().zip(&gf) {
+            assert!((*a as f32 / 65535.0 - b.clamp(0.0, 1.0)).abs() < 2e-5);
+        }
+        let threaded = IccTransform::with_options(
+            &srgb,
+            &p3,
+            TransformOptions::new().with_intent(intent).with_threads(4),
+        )
+        .unwrap()
+        .precompute(grid)
+        .unwrap();
+        let mut gt = vec![0u16; input.len()];
+        threaded.transform_u16(&input, &mut gt).unwrap();
+        assert_eq!(got, gt, "threads change the result");
+    }
+
+    // 8-bit: a 33-point table against the exact 8-bit path.
+    let in8: Vec<u8> = input.iter().map(|&v| (v >> 8) as u8).collect();
+    let mut want8 = vec![0u8; in8.len()];
+    let mut got8 = vec![0u8; in8.len()];
+    exact.transform_u8(&in8, &mut want8).unwrap();
+    exact
+        .precompute(33)
+        .unwrap()
+        .transform_u8(&in8, &mut got8)
+        .unwrap();
+    let worst = want8
+        .iter()
+        .zip(&got8)
+        .map(|(a, b)| (*a as i32 - *b as i32).abs())
+        .max()
+        .unwrap();
+    eprintln!("sRGB → P3 8-bit, 33³ table: max code difference {worst}");
+    assert!(worst <= 2, "{worst}");
+
+    // CLUT profiles on either side, three and four input channels.
+    let cmyk = cmyk_lut_profile();
+    let to_cmyk = IccTransform::new(&srgb, &cmyk, intent).unwrap();
+    let from_cmyk = IccTransform::new(&cmyk, &srgb, intent).unwrap();
+    let baked_to = to_cmyk.precompute(33).unwrap();
+    assert_eq!(baked_to.output_channels(), 4);
+    let mut k_exact = vec![0u16; input.len() / 3 * 4];
+    let mut k_baked = vec![0u16; k_exact.len()];
+    to_cmyk.transform_u16(&input, &mut k_exact).unwrap();
+    baked_to.transform_u16(&input, &mut k_baked).unwrap();
+    // Compare the inks as the colours they print.
+    let cmyk_lab = IccTransform::new(&cmyk, &lab, intent).unwrap();
+    let mut worst: f64 = 0.0;
+    for (a, b) in k_exact
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(k_baked.as_chunks::<4>().0)
+    {
+        worst = worst.max(delta_e2000(lab_of(&cmyk_lab, a), lab_of(&cmyk_lab, b)));
+    }
+    eprintln!("sRGB → CMYK LUT, 33³ table: max ΔE2000 {worst:.4}");
+    assert!(worst < 2.0, "{worst}");
+
+    let baked_from = from_cmyk.precompute(17).unwrap();
+    let mut rgb_exact = vec![0u16; input.len()];
+    let mut rgb_baked = vec![0u16; input.len()];
+    from_cmyk.transform_u16(&k_exact, &mut rgb_exact).unwrap();
+    baked_from.transform_u16(&k_exact, &mut rgb_baked).unwrap();
+    let (max, mean) = rgb_difference(&rgb_exact, &rgb_baked, &srgb_lab);
+    eprintln!("CMYK LUT → sRGB, 17⁴ table: max ΔE2000 {max:.4}, mean {mean:.4}");
+    assert!(max < 2.0, "{max}");
+
+    // Limits.
+    assert!(matches!(exact.precompute(1), Err(IccError::Unsupported(_))));
+    assert!(matches!(
+        exact.precompute(257),
+        Err(IccError::Unsupported(_))
+    ));
+    assert!(matches!(
+        from_cmyk.precompute(256),
+        Err(IccError::Unsupported(_))
+    ));
+    // Out-of-range float input is clamped, not extrapolated.
+    let baked = exact.precompute(9).unwrap();
+    let mut o = [0f32; 6];
+    baked
+        .transform_f32(&[-1.0, 2.0, f32::NAN, 0.0, 1.0, 0.0], &mut o)
+        .unwrap();
+    assert_eq!(&o[..3], &o[3..]);
 }

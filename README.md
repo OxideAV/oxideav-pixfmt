@@ -676,7 +676,9 @@ t.transform_u16(&rgb16, &mut cmyk16)?;                  // also _u8, _f32, trans
 | chains | `IccTransform::chain(&[&a, &abstract, &proof, &b], opts)`: Abstract profiles (§8.8; DToB0 / AToB0 PCS → PCS, Lab or XYZ in and out) and device profiles passed through in the middle; ICC-absolute rescales at every step into a device profile |
 | DeviceLink | `IccTransform::device_link(&p)` runs a link's `DToB0` (§8.10.3 a) or `AToB0` directly (§8.6) |
 | frames | `icc::transform_frame` over packed `Gray8` / `Ya8` / `Gray16Le` / `Ya16Le` / `GrayF32Le` / `Rgb24` / `Rgba` / `Rgb48Le` / `Rgba64Le` / `RgbF32Le` / `RgbaF32Le` / `Cmyk` / `CmykInverted` (alpha carried or synthesised, the ICC blob replaced); `icc::frame_profile` parses a frame's `BlobKind::ICC` |
-| speed | first-stage curves tabulated per input code on 8-bit and large 16-bit buffers; `TransformOptions::with_threads(n)` splits buffers over scoped threads with identical output. 1 MP 8-bit, Apple M4 Max, serial: sRGB → P3 59 ms, sRGB → Generic CMYK 100 ms, Generic CMYK → sRGB 187 ms |
+| CLUT interpolation | `TransformOptions::with_interpolation`: `ClutInterpolation::Multilinear` (default, all `2^n` cell corners) or `Tetrahedral` (simplex: `n + 1` corners along the cell diagonal, for any number of inputs) on `mft1` / `mft2` / `mAB ` / `mBA ` tables; both reproduce grid points exactly |
+| precomputed tables | `IccTransform::precompute(grid)`: any transform (matrix/TRC, CLUT, float tags, chains, DeviceLinks; 1–4 input channels) sampled on a regular grid into an in-memory device link, then run by simplex interpolation on `f32` — 8-bit, 16-bit and float buffers; `is_precomputed()` |
+| speed | first-stage curves tabulated per input code on 8-bit and large 16-bit buffers; `TransformOptions::with_threads(n)` / `with_execution(&ExecutionContext)` split buffers over scoped threads with identical output (serial by default) |
 | writing | `IccProfileBuilder` (header, tag table, `XYZ `, `curv` / `para`, `mluc`, `sf32`, B-curve `mAB ` / `mBA `) |
 | built-in profiles | `srgb()`, `display_p3()`, `adobe_rgb()`, `rec2020()`, `prophoto()` (v4 matrix/TRC, Bradford-adapted to D50 per Annex E), `gray(curve)`, `lab_d50()` |
 
@@ -698,12 +700,27 @@ On the CMYK CLUT's grid nodes the two agree to one 16-bit code; the
 remaining gap is between nodes, where ICC.1 prescribes "linear
 interpolation" without fixing the simplex scheme.
 
-Not covered yet: black-point compensation (its algorithm is ISO 18619,
-which is not staged), NamedColor profiles and DeviceLinks inside a
-chain.
+With `ClutInterpolation::Tetrahedral` the same CMYK pairs agree within
+0.41 ΔE2000 (multilinear: 1.19), so every system-profile pair is below
+1.
 
-The module is self-contained (`std` only, its own error type) so it can
-be split into its own crate later without changing its API.
+A precomputed table is an approximation between its grid points. Against
+the exact transform, over 20 000 random 16-bit colours
+(`tests/icc_lut_profiles.rs`):
+
+| transform | table | max ΔE2000 | mean |
+| --------- | ----- | ---------- | ---- |
+| sRGB → Display P3 | 17³ | 0.26 | 0.019 |
+| sRGB → Display P3 | 33³ | 0.10 | 0.005 |
+| sRGB → Display P3 | 65³ | 0.031 | 0.0015 |
+| sRGB → synthesized CMYK (`mBA `) | 33³ | 0.52 | — |
+| synthesized CMYK (`mAB `) → sRGB | 17⁴ | 1.76 | 0.067 |
+
+At 8 bits the 33³ sRGB → P3 table is within one code of the exact path.
+
+Not covered: black-point compensation (ICC.1:2022 does not define it —
+its algorithm is ISO 18619, which is not among the project's reference
+documents), NamedColor profiles and DeviceLinks inside a chain.
 
 ## Performance
 
@@ -917,8 +934,18 @@ one (must be rejected), and the sweep also drives `convert_with` with
 fuzz-chosen thread budgets and colour-signal overrides (range, and
 matrix code points including identity and reserved values).
 
+Two byte-stream targets cover the ICC module: `icc_profile` feeds
+arbitrary bytes to `IccProfile::parse` and transforms between whatever
+parses; `icc_transform` adds fuzz-chosen options (rendering intent,
+CLUT interpolation, thread budget, precomputed-table grid) and uses the
+parsed profile as source, destination, the middle of a chain and as a
+DeviceLink, through the per-pixel, 8-bit, 16-bit and float paths (with
+non-finite and out-of-range samples) and through a precomputed table.
+
 ```sh
 cargo +nightly fuzz run convert_geometry
+cargo +nightly fuzz run icc_profile
+cargo +nightly fuzz run icc_transform
 ```
 
 ## License

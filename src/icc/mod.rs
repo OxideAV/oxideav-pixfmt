@@ -32,6 +32,10 @@
 //!   8-bit and 16-bit interleaved buffers ([`IccTransform`]), and on
 //!   packed `VideoFrame`s with alpha carry and the frame's own ICC blob
 //!   ([`transform_frame`], [`frame_profile`]);
+//! - multilinear or simplex ("tetrahedral") CLUT interpolation
+//!   ([`ClutInterpolation`]), and any transform sampled into an
+//!   in-memory device-link table for speed
+//!   ([`IccTransform::precompute`]);
 //! - a small profile writer and synthesized matrix/TRC profiles of the
 //!   sRGB, Display P3, Adobe RGB (1998), BT.2020 and ProPhoto shapes
 //!   ([`IccProfileBuilder`], [`IccProfile::srgb`] …).
@@ -40,8 +44,9 @@
 //! algorithm is ISO 18619, not part of ICC.1), NamedColor profiles,
 //! DeviceLink profiles as chain members.
 //!
-//! The module depends on nothing beyond `std` and could move into its
-//! own crate later without API changes.
+//! Apart from the `VideoFrame` glue and the execution-budget hook
+//! ([`TransformOptions::with_execution`]) the module depends on nothing
+//! beyond `std`.
 
 mod build;
 mod curve;
@@ -55,6 +60,7 @@ mod transform;
 pub use build::IccProfileBuilder;
 pub use curve::Curve;
 pub use frame::{frame_formats, frame_profile, transform_frame};
+pub use lut::ClutInterpolation;
 pub use pcs::{PCS_WHITE, lab_to_xyz, xyz_to_lab};
 pub use profile::{DataColorSpace, IccHeader, IccProfile, ProfileClass, RenderingIntent, TagEntry};
 pub use transform::{IccTransform, TransformOptions};

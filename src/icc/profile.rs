@@ -768,6 +768,7 @@ fn parse_mft(t: &[u8], pcs_xyz_input: bool) -> Result<Lut, IccError> {
         grid,
         out_ch: o,
         data,
+        interpolation: Default::default(),
     }));
     stages.push(Stage::Curves(output));
     Ok(Lut {
@@ -846,6 +847,7 @@ fn parse_mab(t: &[u8], a_to_b: bool) -> Result<Lut, IccError> {
             grid,
             out_ch: o,
             data,
+            interpolation: Default::default(),
         }))
     } else {
         None

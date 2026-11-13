@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(colorspace)* `ModelConverter`: a conversion between any two colour models planned once (matrices derived and inverted at construction, same-domain models fused into one 3 × 3) and run over interleaved `f64` / `f32` / 8-bit / 16-bit buffers, with `with_channels` (alpha / padding copied through), `with_gamut(GamutPolicy::Preserve | Clamp)`, and `with_threads` / `with_execution` (serial default, identical output). Integer buffers follow `ColorModel::component_ranges()`; a plain sRGB source is linearised through an exact per-code table and a plain sRGB destination encoded through a piecewise-linear table with error below 2e-6 (0.13 of a 16-bit code). `tests/colorspace_rows.rs`; `benches/colorspace_models.rs`
 
+- *(icc)* `ClutInterpolation::Tetrahedral` via `TransformOptions::with_interpolation`: simplex interpolation of the integer CLUT tags for any number of inputs (the `n + 1` cell corners along the diagonal, ordered by descending fraction) next to the default multilinear; both exact on grid points. Brings the 9-point Generic CMYK table from 1.19 to 0.41 ΔE2000 of the black-box validator
+- *(icc)* `IccTransform::precompute(grid)`: any transform with 1–4 input channels sampled on a regular grid into an in-memory device-link table (at most 2²⁴ values, built on the transform's thread budget) and run by simplex interpolation on 8-bit / 16-bit / `f32` buffers; `is_precomputed()`. Measured error against the exact transform in the README
+- *(icc)* `TransformOptions::with_execution(&ExecutionContext)`; `IccTransform::device_link_with(profile, options)`
+- *(fuzz)* `icc_transform` harness: fuzz-chosen intent / interpolation / threads / table grid over a parsed profile as source, destination, chain member and DeviceLink, through every buffer path and the precomputed table
+- *(bench)* `icc_transform` (matrix/TRC and CLUT profiles, exact / tetrahedral / precomputed, 1 MP and 12 MP)
+
 ### Changed
 
 - *(colorspace)* `ColorModel::Yuv`, `Yiq` and `YDbDr` are now built from the constants of their broadcast standards on the 0.299 / 0.587 / 0.114 luma (`U = 0.436·(B′ − Y′) / 0.886`, `V = 0.615·(R′ − Y′) / 0.701`; I / Q the 33° rotation; `Db = 1.505·(B′ − Y′)`, `Dr = −1.902·(R′ − Y′)`) instead of matrices measured from a black-box tool; values move by up to 5e-4. `ColorModel::Lms` is named as the CIECAM02 `M_CAT02` matrix (same numbers)

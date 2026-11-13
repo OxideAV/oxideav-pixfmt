@@ -70,3 +70,8 @@ required-features = ["bench"]
 name = "colorspace_models"
 harness = false
 required-features = ["bench"]
+
+[[bench]]
+name = "icc_transform"
+harness = false
+required-features = ["bench", "icc"]
