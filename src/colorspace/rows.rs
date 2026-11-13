@@ -804,9 +804,10 @@ mod tests {
             worst = worst.max((t.encode(x) - exact).abs());
         }
         assert!(worst < 2e-6, "{worst:e}");
-        // Outside 0..1 the exact formula is used.
-        assert_eq!(t.encode(-0.25), linear_to_srgb(-0.25));
-        assert_eq!(t.encode(1.5), linear_to_srgb(1.5));
-        assert_eq!(t.encode(1.0), linear_to_srgb(1.0));
+        // Outside 0..1 the exact formula is used (compared with a
+        // tolerance: Miri perturbs `powf` between calls on purpose).
+        for x in [-0.25, 1.5, 1.0] {
+            assert!((t.encode(x) - linear_to_srgb(x)).abs() < 1e-12);
+        }
     }
 }

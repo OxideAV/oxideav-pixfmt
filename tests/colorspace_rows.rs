@@ -1,6 +1,12 @@
 //! `colorspace::ModelConverter`: buffer conversions against the
 //! per-colour `ColorModel` functions, round trips over the gamut, the
 //! out-of-gamut policy, the integer encodings and thread parity.
+//!
+//! Not run under Miri: it perturbs `powf` / `cbrt` results between
+//! calls on purpose, and these tests assert bit-identical output
+//! between two runs of the same conversion (serial against threaded,
+//! buffer against per-colour).
+#![cfg(not(miri))]
 
 use oxideav_core::ExecutionContext;
 use oxideav_pixfmt::colorspace::{

@@ -777,9 +777,12 @@ impl IccTransform {
         if !(2..=256).contains(&grid_points) {
             return Err(IccError::Unsupported("precomputed table grid size"));
         }
-        let nodes = grid_points.pow(ic as u32);
+        let too_large = IccError::Unsupported("precomputed table too large");
+        let Some(nodes) = grid_points.checked_pow(ic as u32) else {
+            return Err(too_large);
+        };
         if nodes.saturating_mul(oc) > MAX_BAKED_VALUES {
-            return Err(IccError::Unsupported("precomputed table too large"));
+            return Err(too_large);
         }
         let mut data = vec![0f32; nodes * oc];
         let fill = |first: usize, part: &mut [f32]| {

@@ -293,7 +293,7 @@ fn cieluv_reference_points() {
     assert!((lch[1] - want[1].hypot(want[2])).abs() < 1e-3);
     assert!((lch[2] - want[2].atan2(want[1]).to_degrees()).abs() < 1e-3);
     let hcl = ColorModel::HclUv(LabWhite::D65).from_srgb(RED);
-    assert_eq!([hcl[2], hcl[1], hcl[0]], lch);
+    assert!(close([hcl[2], hcl[1], hcl[0]], lch, 1e-9));
     // Direct XYZ round trip, including black.
     let w = D65.to_xyz();
     for xyz in [[0.2, 0.3, 0.1], [0.9, 1.0, 1.05], [0.0, 0.0, 0.0]] {
@@ -439,8 +439,7 @@ fn cineon_log_reference_points() {
     assert!(close(m.from_srgb(WHITE), [685.0 / 1023.0; 3], 1e-12));
     assert!(close(m.from_srgb(BLACK), [95.0 / 1023.0; 3], 1e-12));
     // Exposure below film base clamps to code 0.
-    assert_eq!(p.encode(-1.0), p.encode(-2.0));
-    assert!(p.encode(-1.0).abs() < 1e-9);
+    assert!(p.encode(-1.0).abs() < 1e-9 && p.encode(-2.0).abs() < 1e-9);
 }
 
 #[test]
@@ -455,10 +454,11 @@ fn cone_response_reference_points() {
     // Hunt–Pointer–Estevez is normalised to D65: sRGB white is (1, 1, 1).
     let w = ColorModel::LmsOf(ConeResponse::HuntPointerEstevez).from_srgb(WHITE);
     assert!(close(w, [1.0, 1.0, 1.0], 2e-4), "{w:?}");
-    assert_eq!(
+    assert!(close(
         ColorModel::Lms.from_srgb([0.2, 0.6, 0.9]),
-        ColorModel::LmsOf(ConeResponse::Cat02).from_srgb([0.2, 0.6, 0.9])
-    );
+        ColorModel::LmsOf(ConeResponse::Cat02).from_srgb([0.2, 0.6, 0.9]),
+        1e-12
+    ));
     // scRGB is linear sRGB, values outside 0..1 kept.
     let v = ColorModel::ScRgb.from_srgb([1.5, -0.25, 0.5]);
     assert!(v[0] > 1.0 && v[1] < 0.0);
