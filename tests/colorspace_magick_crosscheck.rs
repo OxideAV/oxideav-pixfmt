@@ -7,7 +7,7 @@
 
 use std::process::Command;
 
-use oxideav_pixfmt::colorspace::{ColorModel, LabWhite, LumaWeights};
+use oxideav_pixfmt::colorspace::{CineonLog, ColorModel, LabWhite, LumaWeights};
 
 /// The luma weights ImageMagick's HCL / YIQ / YUV rows use (measured).
 const MAGICK_LUMA: LumaWeights = LumaWeights::new(0.298839, 0.114350);
@@ -94,7 +94,7 @@ fn models_match_magick_colorspace() {
     // (ImageMagick name, our model, scaling of ours into IM's storage,
     // tolerance, compare hue channel?)
     type Scale = fn([f64; 3]) -> [f64; 3];
-    let cases: [(&str, ColorModel, Scale, f64); 25] = [
+    let cases: [(&str, ColorModel, Scale, f64); 31] = [
         ("RGB", ColorModel::LinearSrgb, |v| v, 1e-5),
         ("Gray", ColorModel::Gray(LumaWeights::BT709), |v| v, 1e-4),
         (
@@ -168,23 +168,26 @@ fn models_match_magick_colorspace() {
             |v| [v[0] / 360.0, v[1], v[2]],
             1e-5,
         ),
+        // Ours are the BT.470 / SMPTE 170M definitions on the 0.299 /
+        // 0.587 / 0.114 luma; the validator rounds its coefficients to
+        // three decimals and uses slightly different luma weights.
         (
             "YIQ",
             ColorModel::Yiq,
             |v| [v[0], v[1] + 0.5, v[2] + 0.5],
-            1e-5,
+            1e-3,
         ),
         (
             "YUV",
             ColorModel::Yuv,
             |v| [v[0], v[1] + 0.5, v[2] + 0.5],
-            1e-5,
+            1e-3,
         ),
         (
             "YDbDr",
             ColorModel::YDbDr,
             |v| [v[0], v[1] + 0.5, v[2] + 0.5],
-            1e-5,
+            1e-3,
         ),
         // ImageMagick offsets I2 / I3 by 32768 / 65535 and rounds the
         // I1 weights to five decimals.
@@ -195,6 +198,35 @@ fn models_match_magick_colorspace() {
             3e-5,
         ),
         ("LMS", ColorModel::Lms, |v| v, 2e-4),
+        ("scRGB", ColorModel::ScRgb, |v| v, 1e-5),
+        // Stored as L* / 100, (u* + 134) / 354, (v* + 140) / 262.
+        (
+            "Luv",
+            ColorModel::Luv(LabWhite::D65),
+            |v| [v[0] / 100.0, (v[1] + 134.0) / 354.0, (v[2] + 140.0) / 262.0],
+            3e-4,
+        ),
+        (
+            "LCHuv",
+            ColorModel::Lchuv(LabWhite::D65),
+            |v| [v[0] / 100.0, v[1] / 255.0 + 0.5, v[2] / 360.0],
+            3e-4,
+        ),
+        // The validator feeds XYZ with white at Y = 1 as cd/m².
+        (
+            "Jzazbz",
+            ColorModel::Jzazbz(1.0),
+            |v| [v[0], v[1] + 0.5, v[2] + 0.5],
+            2e-5,
+        ),
+        // The validator stores the 10-bit code / 1024.
+        (
+            "Log",
+            ColorModel::Log(CineonLog::new()),
+            |v| v.map(|c| c * 1023.0 / 1024.0),
+            5e-5,
+        ),
+        ("YCbCr", ColorModel::YCbCr(LumaWeights::BT601), |v| v, 5e-4),
     ];
     for (name, model, scale, tol) in cases {
         let theirs = magick_colorspace(&px, name);
@@ -205,14 +237,23 @@ fn models_match_magick_colorspace() {
             if name == "xyY" && p.iter().all(|&v| v == 0.0) {
                 continue;
             }
-            let ours = scale(model.from_srgb(p.map(|v| v as f64)));
+            // The validator's Jzazbz takes the green and blue channels
+            // in swapped order (it places sRGB blue at a positive bz,
+            // the yellow side of the axis, and green where blue
+            // belongs); with the swap undone the two agree.
+            let input = if name == "Jzazbz" {
+                [p[0], p[2], p[1]]
+            } else {
+                *p
+            };
+            let ours = scale(model.from_srgb(input.map(|v| v as f64)));
             for c in 0..3 {
                 // Skip the hue of achromatic colours (powerless; a
                 // near-zero chroma makes it numerically arbitrary).
                 let achromatic = p[0] == p[1] && p[1] == p[2];
                 let hue_slot = match name {
                     "HSL" | "HWB" | "HSV" | "HSB" | "HSI" | "HCL" | "HCLp" => 0,
-                    "LCHab" | "Oklch" => 2,
+                    "LCHab" | "LCHuv" | "Oklch" => 2,
                     _ => 3,
                 };
                 if c == hue_slot && achromatic {

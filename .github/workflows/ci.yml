@@ -33,6 +33,11 @@ jobs:
       - name: Test
         run: cargo test --verbose
 
+      # The ICC colour-management module is behind a non-default
+      # feature; build and test it too.
+      - name: Test --features icc
+        run: cargo test --features icc --verbose
+
   lint:
     name: rustfmt + clippy
     runs-on: ubuntu-latest
@@ -54,6 +59,9 @@ jobs:
 
       - name: cargo clippy -- -D warnings
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo clippy --features icc -- -D warnings
+        run: cargo clippy --all-targets --features icc -- -D warnings
 
   nightly:
     name: Build & test (nightly, --features nightly)

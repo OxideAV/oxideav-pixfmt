@@ -14,8 +14,17 @@
 //! - Y′PbPr / Y′CbCr from `K_R`, `K_B`: ITU-T H.273 equations 44–46 and
 //!   37 (full-range digital offset), with the BT.601 / BT.709 / BT.2020
 //!   weights (`video/signal-metadata/`).
+//!
+//! The analogue-television matrices (Y′UV, Y′IQ, Y′DbDr) are built
+//! from the constants of their defining broadcast standards; CIELUV,
+//! Jzazbz, PhotoYCC, the Cineon log encoding and the cone-response
+//! matrices live in `extra.rs` with their publications.
 
 use super::cie::{RgbPrimaries, bradford_adaptation};
+use super::extra::{
+    CineonLog, ConeResponse, jzazbz_to_xyz_abs, linear_rgb_to_photoycc, luv_to_xyz,
+    photoycc_to_linear_rgb, xyz_abs_to_jzazbz, xyz_to_luv,
+};
 use crate::mat3::{Mat3, invert3, mul3v};
 
 // --------------------------------------------------------------------
@@ -374,44 +383,57 @@ pub fn hclp_to_rgb(hcl: [f64; 3], w: LumaWeights) -> [f64; 3] {
 }
 
 // --------------------------------------------------------------------
-// Fixed-matrix luma / chroma models. The broadcast colour-difference
-// standards that define YIQ, YUV and YDbDr are not staged, so these
-// are the matrices measured from black-box `magick -colorspace YIQ /
-// YUV / YDbDr` output on the unit primaries (every entry resolves to
-// three decimals in the chroma rows; the luma row is the measured
-// 0.298839 / 0.586811 / 0.114350). Chroma is centred on zero here;
-// ImageMagick stores it offset by +0.5.
+// Fixed-matrix luma / chroma models of analogue colour television, on
+// the gamma-encoded components with the luma `Y′ = 0.299·R′ + 0.587·G′
+// + 0.114·B′` (Recommendation ITU-R BT.470 / BT.601). Chroma is
+// centred on zero.
 
-const YIQ_M: Mat3 = [
-    [0.298839, 0.586811, 0.114350],
-    [0.595716, -0.274453, -0.321263],
-    [0.211456, -0.522591, 0.311135],
-];
-const YUV_M: Mat3 = [
-    [0.298839, 0.586811, 0.114350],
-    [-0.147, -0.289, 0.436],
-    [0.615, -0.515, -0.100],
-];
-const YDBDR_M: Mat3 = [
-    [0.298839, 0.586811, 0.114350],
-    [-0.450, -0.883, 1.333],
-    [-1.333, 1.116, 0.217],
-];
+/// `[Y′, s_b·(B′ − Y′), s_r·(R′ − Y′)]` as a matrix on R′G′B′.
+fn colour_difference_matrix(s_b: f64, s_r: f64) -> Mat3 {
+    let w = LumaWeights::BT601;
+    let y = [w.kr, 1.0 - w.kr - w.kb, w.kb];
+    [
+        y,
+        [-s_b * y[0], -s_b * y[1], s_b * (1.0 - y[2])],
+        [s_r * (1.0 - y[0]), -s_r * y[1], -s_r * y[2]],
+    ]
+}
+
+/// PAL Y′UV (BT.470 systems B / G / I): `U = 0.436·(B′ − Y′) / (1 −
+/// 0.114)`, `V = 0.615·(R′ − Y′) / (1 − 0.299)`, i.e. the published
+/// `U ≈ 0.492·(B′ − Y′)`, `V ≈ 0.877·(R′ − Y′)` with peak excursions
+/// 0.436 and 0.615.
+fn yuv_matrix() -> Mat3 {
+    colour_difference_matrix(0.436 / (1.0 - 0.114), 0.615 / (1.0 - 0.299))
+}
+
+/// NTSC Y′IQ (FCC 1953 / SMPTE 170M): the Y′UV colour-difference pair
+/// rotated by 33°, `I = V·cos 33° − U·sin 33°`, `Q = V·sin 33° +
+/// U·cos 33°`.
+fn yiq_matrix() -> Mat3 {
+    let m = yuv_matrix();
+    let (s, c) = 33f64.to_radians().sin_cos();
+    let mut i = [0.0; 3];
+    let mut q = [0.0; 3];
+    for k in 0..3 {
+        i[k] = m[2][k] * c - m[1][k] * s;
+        q[k] = m[2][k] * s + m[1][k] * c;
+    }
+    [m[0], i, q]
+}
+
+/// SECAM Y′DbDr (BT.470 system L): `Db = 1.505·(B′ − Y′)`,
+/// `Dr = −1.902·(R′ − Y′)`.
+fn ydbdr_matrix() -> Mat3 {
+    colour_difference_matrix(1.505, -1.902)
+}
+
 /// Ohta's I1 I2 I3: `(R + G + B) / 3`, `(R − B) / 2`, `(2G − R − B) / 4`.
 const OHTA_M: Mat3 = [
     [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
     [0.5, 0.0, -0.5],
     [-0.25, 0.5, -0.25],
 ];
-/// CIE XYZ (D65) → LMS cone response, measured from black-box `magick
-/// -colorspace LMS` output (linear-light input; the entries resolve to
-/// four decimals once the sRGB → XYZ matrix is factored out).
-const XYZ_TO_LMS_CAT: Mat3 = [
-    [0.7328, 0.4296, -0.1624],
-    [-0.7036, 1.6975, 0.0061],
-    [0.0030, 0.0136, 0.9834],
-];
-
 fn apply_inv(m: &Mat3, v: [f64; 3]) -> [f64; 3] {
     mul3v(&invert3(m).expect("model matrix is invertible"), v)
 }
@@ -540,7 +562,10 @@ pub enum LabWhite {
 /// by +0.5 (the full-range digital form of H.273 equation 37,
 /// normalised); HSV / HSI / HCL in degrees and 0..1; Y′IQ, Y′UV,
 /// Y′DbDr and Ohta chroma centred on zero; LMS with the D65 white near
-/// `(0.95, 1.04, 1.09)`. Gray models return the luma in all three
+/// `(0.95, 1.04, 1.09)` for CAT02; `L*u*v*` unscaled; Jzazbz as the
+/// paper's `Jz` 0..1 with `az`, `bz` centred on zero; narrow-range
+/// Y′CbCr and PhotoYCC as 8-bit codes / 255; the Cineon log as the
+/// 10-bit code / 1023. Gray models return the luma in all three
 /// slots.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
@@ -593,8 +618,42 @@ pub enum ColorModel {
     YDbDr,
     /// Ohta's I1 I2 I3 (I2, I3 centred on zero).
     Ohta,
-    /// LMS cone response of the linear-light colour (from D65 XYZ).
+    /// LMS cone response of the linear-light colour: D65 XYZ through
+    /// the CIECAM02 matrix `M_CAT02` ([`ConeResponse::Cat02`]).
     Lms,
+    /// LMS through a chosen cone-response matrix.
+    LmsOf(ConeResponse),
+    /// scRGB (IEC 61966-2-2): linear light on the sRGB primaries and
+    /// D65 white, 0 = black and 1 = sRGB white, values outside 0..1
+    /// kept. Numerically the same as [`ColorModel::LinearSrgb`].
+    ScRgb,
+    /// CIE 1976 L\*u\*v\* ([`xyz_to_luv`]).
+    Luv(LabWhite),
+    /// CIE LCh(uv): `(L*, C*uv, h°uv)`, the polar form of L\*u\*v\*.
+    Lchuv(LabWhite),
+    /// Cylindrical CIELAB in hue-first order `(h°ab, C*ab, L*)` — the
+    /// "HCL" of CIELAB. See [`ColorModel::Hcl`] for the hexagonal
+    /// hue / chroma / luma model of the same name.
+    HclAb(LabWhite),
+    /// Cylindrical CIE L\*u\*v\* in hue-first order `(h°uv, C*uv, L*)`
+    /// — the "HCL" of CIELUV.
+    HclUv(LabWhite),
+    /// Jzazbz ([`xyz_abs_to_jzazbz`]); the value is the luminance in
+    /// cd/m² that sRGB white stands for (see
+    /// [`ColorModel::JZ_SDR_WHITE`]).
+    Jzazbz(f64),
+    /// JzCzhz: `(Jz, Cz, hz°)`, the polar form of Jzazbz.
+    JzCzhz(f64),
+    /// Narrow-range ("limited", "video") Y′CbCr, normalised by the
+    /// 8-bit full scale: `Y = (16 + 219·Y′) / 255`, `Cb = (128 +
+    /// 224·Pb) / 255`, `Cr = (128 + 224·Pr) / 255` (ITU-T H.273
+    /// equations 41–43 at 8 bits; deeper codes scale by `2^(n − 8)`).
+    YCbCrLimited(LumaWeights),
+    /// Kodak PhotoYCC ([`linear_rgb_to_photoycc`]), codes / 255.
+    PhotoYcc,
+    /// Cineon printing-density log encoding of each linear-light sRGB
+    /// component ([`CineonLog::encode`]), as the 10-bit code / 1023.
+    Log(CineonLog),
 }
 
 fn d65() -> [f64; 3] {
@@ -610,6 +669,13 @@ fn d65_to_d50() -> Mat3 {
 }
 
 impl ColorModel {
+    /// sRGB white at 100 cd/m², the nominal SDR display peak, for
+    /// [`ColorModel::Jzazbz`] / [`ColorModel::JzCzhz`].
+    pub const JZ_SDR_WHITE: f64 = 100.0;
+    /// sRGB white at 203 cd/m², the HDR reference white of Report
+    /// ITU-R BT.2408.
+    pub const JZ_HDR_REFERENCE_WHITE: f64 = 203.0;
+
     /// Convert gamma-encoded sRGB into this model.
     pub fn from_srgb(self, rgb: [f64; 3]) -> [f64; 3] {
         let xyz65 = || mul3v(&srgb_to_xyz_m(), map3(rgb, srgb_to_linear));
@@ -617,6 +683,11 @@ impl ColorModel {
             LabWhite::D65 => xyz_to_lab(xyz65(), d65()),
             LabWhite::D50 => xyz_to_lab(mul3v(&d65_to_d50(), xyz65()), super::cie::D50.to_xyz()),
         };
+        let luv = |w: LabWhite| match w {
+            LabWhite::D65 => xyz_to_luv(xyz65(), d65()),
+            LabWhite::D50 => xyz_to_luv(mul3v(&d65_to_d50(), xyz65()), super::cie::D50.to_xyz()),
+        };
+        let hue_first = |lch: [f64; 3]| [lch[2], lch[1], lch[0]];
         match self {
             ColorModel::Srgb => rgb,
             ColorModel::LinearSrgb => map3(rgb, srgb_to_linear),
@@ -640,11 +711,29 @@ impl ColorModel {
             ColorModel::Hsv => rgb_to_hsv(rgb),
             ColorModel::Hsi => rgb_to_hsi(rgb),
             ColorModel::Hcl(w) | ColorModel::Hclp(w) => rgb_to_hcl(rgb, w),
-            ColorModel::Yiq => mul3v(&YIQ_M, rgb),
-            ColorModel::Yuv => mul3v(&YUV_M, rgb),
-            ColorModel::YDbDr => mul3v(&YDBDR_M, rgb),
+            ColorModel::Yiq => mul3v(&yiq_matrix(), rgb),
+            ColorModel::Yuv => mul3v(&yuv_matrix(), rgb),
+            ColorModel::YDbDr => mul3v(&ydbdr_matrix(), rgb),
             ColorModel::Ohta => mul3v(&OHTA_M, rgb),
-            ColorModel::Lms => mul3v(&XYZ_TO_LMS_CAT, xyz65()),
+            ColorModel::Lms => mul3v(&ConeResponse::Cat02.matrix(), xyz65()),
+            ColorModel::LmsOf(c) => mul3v(&c.matrix(), xyz65()),
+            ColorModel::ScRgb => map3(rgb, srgb_to_linear),
+            ColorModel::Luv(w) => luv(w),
+            ColorModel::Lchuv(w) => lab_to_lch(luv(w)),
+            ColorModel::HclAb(w) => hue_first(lab_to_lch(lab(w))),
+            ColorModel::HclUv(w) => hue_first(lab_to_lch(luv(w))),
+            ColorModel::Jzazbz(nits) => xyz_abs_to_jzazbz(xyz65().map(|c| c * nits)),
+            ColorModel::JzCzhz(nits) => lab_to_lch(xyz_abs_to_jzazbz(xyz65().map(|c| c * nits))),
+            ColorModel::YCbCrLimited(w) => {
+                let v = rgb_to_ypbpr(rgb, w);
+                [
+                    (16.0 + 219.0 * v[0]) / 255.0,
+                    (128.0 + 224.0 * v[1]) / 255.0,
+                    (128.0 + 224.0 * v[2]) / 255.0,
+                ]
+            }
+            ColorModel::PhotoYcc => linear_rgb_to_photoycc(map3(rgb, srgb_to_linear)),
+            ColorModel::Log(p) => map3(rgb, srgb_to_linear).map(|c| p.encode(c) / 1023.0),
         }
     }
 
@@ -662,6 +751,11 @@ impl ColorModel {
             LabWhite::D65 => from_xyz65(lab_to_xyz(lab, d65())),
             LabWhite::D50 => from_d50(lab_to_xyz(lab, super::cie::D50.to_xyz())),
         };
+        let from_luv = |luv: [f64; 3], w: LabWhite| match w {
+            LabWhite::D65 => from_xyz65(luv_to_xyz(luv, d65())),
+            LabWhite::D50 => from_d50(luv_to_xyz(luv, super::cie::D50.to_xyz())),
+        };
+        let lch_of = |hcl: [f64; 3]| lch_to_lab([hcl[2], hcl[1], hcl[0]]);
         match self {
             ColorModel::Srgb => v,
             ColorModel::LinearSrgb => map3(v, linear_to_srgb),
@@ -683,11 +777,31 @@ impl ColorModel {
             ColorModel::Hsi => hsi_to_rgb(v),
             ColorModel::Hcl(w) => hcl_to_rgb(v, w),
             ColorModel::Hclp(w) => hclp_to_rgb(v, w),
-            ColorModel::Yiq => apply_inv(&YIQ_M, v),
-            ColorModel::Yuv => apply_inv(&YUV_M, v),
-            ColorModel::YDbDr => apply_inv(&YDBDR_M, v),
+            ColorModel::Yiq => apply_inv(&yiq_matrix(), v),
+            ColorModel::Yuv => apply_inv(&yuv_matrix(), v),
+            ColorModel::YDbDr => apply_inv(&ydbdr_matrix(), v),
             ColorModel::Ohta => apply_inv(&OHTA_M, v),
-            ColorModel::Lms => from_xyz65(apply_inv(&XYZ_TO_LMS_CAT, v)),
+            ColorModel::Lms => from_xyz65(apply_inv(&ConeResponse::Cat02.matrix(), v)),
+            ColorModel::LmsOf(c) => from_xyz65(apply_inv(&c.matrix(), v)),
+            ColorModel::ScRgb => map3(v, linear_to_srgb),
+            ColorModel::Luv(w) => from_luv(v, w),
+            ColorModel::Lchuv(w) => from_luv(lch_to_lab(v), w),
+            ColorModel::HclAb(w) => from_lab(lch_of(v), w),
+            ColorModel::HclUv(w) => from_luv(lch_of(v), w),
+            ColorModel::Jzazbz(nits) => from_xyz65(jzazbz_to_xyz_abs(v).map(|c| c / nits)),
+            ColorModel::JzCzhz(nits) => {
+                from_xyz65(jzazbz_to_xyz_abs(lch_to_lab(v)).map(|c| c / nits))
+            }
+            ColorModel::YCbCrLimited(w) => ypbpr_to_rgb(
+                [
+                    (v[0] * 255.0 - 16.0) / 219.0,
+                    (v[1] * 255.0 - 128.0) / 224.0,
+                    (v[2] * 255.0 - 128.0) / 224.0,
+                ],
+                w,
+            ),
+            ColorModel::PhotoYcc => map3(photoycc_to_linear_rgb(v), linear_to_srgb),
+            ColorModel::Log(p) => v.map(|c| linear_to_srgb(p.decode(c * 1023.0))),
         }
     }
 

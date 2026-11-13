@@ -3,8 +3,9 @@
 //! ISO 32000-2 CMYK rules, and spot values from the staged formulas.
 
 use oxideav_pixfmt::colorspace::{
-    ColorModel, LabWhite, LumaWeights, cmyk_to_rgb, delta_e2000, linear_to_srgb, rgb_to_cmyk,
-    rgb_to_cmyk_with, srgb_to_linear,
+    CineonLog, ColorModel, ConeResponse, D65, LabWhite, LumaWeights, cmyk_to_rgb, delta_e2000,
+    jzazbz_to_xyz_abs, linear_to_srgb, luv_to_xyz, rgb_to_cmyk, rgb_to_cmyk_with, srgb_to_linear,
+    xyz_abs_to_jzazbz, xyz_to_luv,
 };
 
 fn models() -> Vec<ColorModel> {
@@ -30,10 +31,25 @@ fn models() -> Vec<ColorModel> {
         ColorModel::YDbDr,
         ColorModel::Ohta,
         ColorModel::Lms,
+        ColorModel::LmsOf(ConeResponse::Bradford),
+        ColorModel::LmsOf(ConeResponse::HuntPointerEstevez),
+        ColorModel::ScRgb,
+        ColorModel::Luv(LabWhite::D65),
+        ColorModel::Luv(LabWhite::D50),
+        ColorModel::Lchuv(LabWhite::D65),
+        ColorModel::Lchuv(LabWhite::D50),
+        ColorModel::HclAb(LabWhite::D65),
+        ColorModel::HclUv(LabWhite::D65),
+        ColorModel::Jzazbz(ColorModel::JZ_SDR_WHITE),
+        ColorModel::Jzazbz(ColorModel::JZ_HDR_REFERENCE_WHITE),
+        ColorModel::JzCzhz(ColorModel::JZ_SDR_WHITE),
+        ColorModel::PhotoYcc,
+        ColorModel::Log(CineonLog::new()),
     ];
     for w in [LumaWeights::BT601, LumaWeights::BT709, LumaWeights::BT2020] {
         v.push(ColorModel::YPbPr(w));
         v.push(ColorModel::YCbCr(w));
+        v.push(ColorModel::YCbCrLimited(w));
         v.push(ColorModel::Hcl(w));
         v.push(ColorModel::Hclp(w));
     }
@@ -238,4 +254,217 @@ fn hue_model_reference_points() {
             "{m:?} {v:?}"
         );
     }
+}
+
+fn close(a: [f64; 3], b: [f64; 3], tol: f64) -> bool {
+    a.iter().zip(&b).all(|(x, y)| (x - y).abs() <= tol)
+}
+
+const WHITE: [f64; 3] = [1.0, 1.0, 1.0];
+const BLACK: [f64; 3] = [0.0, 0.0, 0.0];
+const RED: [f64; 3] = [1.0, 0.0, 0.0];
+const BLUE: [f64; 3] = [0.0, 0.0, 1.0];
+
+#[test]
+fn cieluv_reference_points() {
+    let m = ColorModel::Luv(LabWhite::D65);
+    assert!(close(m.from_srgb(WHITE), [100.0, 0.0, 0.0], 1e-9));
+    assert!(close(m.from_srgb(BLACK), [0.0, 0.0, 0.0], 1e-12));
+    // sRGB red: Y = 0.2126 → L* = 116·0.2126^(1/3) − 16; u′ = 4x / (−2x
+    // + 12y + 3) at the red primary (0.64, 0.33), against the white's.
+    let l = 116.0 * 0.212_639f64.cbrt() - 16.0;
+    let ucs = |x: f64, y: f64| {
+        let d = -2.0 * x + 12.0 * y + 3.0;
+        [4.0 * x / d, 9.0 * y / d]
+    };
+    let (r, w) = (ucs(0.64, 0.33), ucs(D65.x, D65.y));
+    let want = [l, 13.0 * l * (r[0] - w[0]), 13.0 * l * (r[1] - w[1])];
+    assert!(
+        close(m.from_srgb(RED), want, 1e-3),
+        "{:?}",
+        m.from_srgb(RED)
+    );
+    assert!((want[1] - 175.0).abs() < 0.1 && (want[2] - 37.76).abs() < 0.1);
+    // Mid grey keeps the white's chromaticity: u* = v* = 0.
+    let g = m.from_srgb([0.5, 0.5, 0.5]);
+    assert!((g[0] - 53.389).abs() < 1e-3 && g[1].abs() < 1e-9 && g[2].abs() < 1e-9);
+    // Polar form of red.
+    let lch = ColorModel::Lchuv(LabWhite::D65).from_srgb(RED);
+    assert!((lch[1] - want[1].hypot(want[2])).abs() < 1e-3);
+    assert!((lch[2] - want[2].atan2(want[1]).to_degrees()).abs() < 1e-3);
+    let hcl = ColorModel::HclUv(LabWhite::D65).from_srgb(RED);
+    assert_eq!([hcl[2], hcl[1], hcl[0]], lch);
+    // Direct XYZ round trip, including black.
+    let w = D65.to_xyz();
+    for xyz in [[0.2, 0.3, 0.1], [0.9, 1.0, 1.05], [0.0, 0.0, 0.0]] {
+        assert!(close(luv_to_xyz(xyz_to_luv(xyz, w), w), xyz, 1e-12));
+    }
+}
+
+#[test]
+fn jzazbz_reference_points() {
+    // D65 white at 100 cd/m²: neutral (az, bz within 3e-4 of zero — the
+    // published matrices carry seven digits) and Jz ≈ 0.1672.
+    let w = D65.to_xyz().map(|c| c * 100.0);
+    let j = xyz_abs_to_jzazbz(w);
+    assert!((j[0] - 0.1672).abs() < 2e-4, "{j:?}");
+    assert!(j[1].abs() < 3e-4 && j[2].abs() < 3e-4, "{j:?}");
+    // Black is the origin exactly (that is what d0 is for).
+    let k = xyz_abs_to_jzazbz([0.0; 3]);
+    assert!(k.iter().all(|v| v.abs() < 1e-12), "{k:?}");
+    // The ceiling of the encoding: 10 000 cd/m² white gives Jz just
+    // under 1.
+    let top = xyz_abs_to_jzazbz(D65.to_xyz().map(|c| c * 10000.0));
+    assert!(top[0] < 1.0 && top[0] > 0.98, "{top:?}");
+    for xyz in [[20.0, 30.0, 10.0], [95.0, 100.0, 108.0], [0.5, 0.2, 3.0]] {
+        let back = jzazbz_to_xyz_abs(xyz_abs_to_jzazbz(xyz));
+        assert!(close(back, xyz, 1e-7), "{back:?}");
+    }
+    // Lightness is monotonic along the grey axis.
+    let m = ColorModel::Jzazbz(ColorModel::JZ_HDR_REFERENCE_WHITE);
+    let mut last = -1.0;
+    for k in 0..=64 {
+        let v = m.from_srgb([k as f64 / 64.0; 3])[0];
+        assert!(v > last);
+        last = v;
+    }
+}
+
+#[test]
+fn broadcast_colour_difference_reference_points() {
+    // Narrow-range Y′CbCr: the 8-bit rails of H.273.
+    let m = ColorModel::YCbCrLimited(LumaWeights::BT601);
+    let code = |v: [f64; 3]| v.map(|c| c * 255.0);
+    assert!(close(code(m.from_srgb(WHITE)), [235.0, 128.0, 128.0], 1e-9));
+    assert!(close(code(m.from_srgb(BLACK)), [16.0, 128.0, 128.0], 1e-9));
+    let red = code(m.from_srgb(RED));
+    let want = [16.0 + 219.0 * 0.299, 128.0 - 112.0 * 0.299 / 0.886, 240.0];
+    assert!(close(red, want, 1e-9), "{red:?}");
+    let blue = code(ColorModel::YCbCrLimited(LumaWeights::BT2020).from_srgb(BLUE));
+    assert!(close(
+        blue,
+        [
+            16.0 + 219.0 * 0.0593,
+            240.0,
+            128.0 - 112.0 * 0.0593 / 0.7373
+        ],
+        1e-9
+    ));
+    // PAL Y′UV: blue reaches U = 0.436, red V = 0.615.
+    let yuv = ColorModel::Yuv;
+    assert!(close(
+        yuv.from_srgb(BLUE),
+        [0.114, 0.436, -0.615 * 0.114 / 0.701],
+        1e-12
+    ));
+    assert!(close(
+        yuv.from_srgb(RED),
+        [0.299, -0.436 * 0.299 / 0.886, 0.615],
+        1e-12
+    ));
+    assert!(close(yuv.from_srgb(WHITE), [1.0, 0.0, 0.0], 1e-12));
+    // The published three-decimal Y′UV rows.
+    let g = yuv.from_srgb([0.0, 1.0, 0.0]);
+    assert!(close(g, [0.587, -0.289, -0.515], 5e-4), "{g:?}");
+    // NTSC Y′IQ: the published four-decimal matrix.
+    let yiq = ColorModel::Yiq;
+    assert!(close(yiq.from_srgb(RED), [0.299, 0.5959, 0.2115], 1e-4));
+    assert!(close(
+        yiq.from_srgb([0.0, 1.0, 0.0]),
+        [0.587, -0.2746, -0.5227],
+        1e-4
+    ));
+    assert!(close(yiq.from_srgb(BLUE), [0.114, -0.3213, 0.3112], 1e-4));
+    assert!(close(yiq.from_srgb([0.5; 3]), [0.5, 0.0, 0.0], 1e-12));
+    // SECAM Y′DbDr: Db and Dr span ±1.333.
+    let d = ColorModel::YDbDr;
+    assert!(close(
+        d.from_srgb(BLUE),
+        [0.114, 1.505 * 0.886, 1.902 * 0.114],
+        1e-12
+    ));
+    assert!(close(
+        d.from_srgb(RED),
+        [0.299, -1.505 * 0.299, -1.902 * 0.701],
+        1e-12
+    ));
+    assert!((1.505f64 * 0.886 - 1.333).abs() < 1e-3 && (1.902f64 * 0.701 - 1.333).abs() < 1e-3);
+}
+
+#[test]
+fn photoycc_reference_points() {
+    let m = ColorModel::PhotoYcc;
+    let code = |v: [f64; 3]| v.map(|c| c * 255.0);
+    // Neutral colours sit on the chroma offsets 156 / 137; white is
+    // 255 / 1.402 ≈ 181.9.
+    assert!(close(
+        code(m.from_srgb(WHITE)),
+        [255.0 / 1.402, 156.0, 137.0],
+        1e-9
+    ));
+    assert!(close(code(m.from_srgb(BLACK)), [0.0, 156.0, 137.0], 1e-9));
+    let red = code(m.from_srgb(RED));
+    let want = [
+        255.0 / 1.402 * 0.299,
+        156.0 - 111.40 * 0.299,
+        137.0 + 135.64 * 0.701,
+    ];
+    assert!(close(red, want, 1e-9), "{red:?}");
+    // Mid grey: sRGB 0.5 is linear 0.21404, BT.709-encoded.
+    let lin = srgb_to_linear(0.5);
+    let v = 1.099 * lin.powf(0.45) - 0.099;
+    assert!(close(
+        code(m.from_srgb([0.5; 3])),
+        [255.0 / 1.402 * v, 156.0, 137.0],
+        1e-9
+    ));
+}
+
+#[test]
+fn cineon_log_reference_points() {
+    let p = CineonLog::new();
+    assert!((p.encode(1.0) - 685.0).abs() < 1e-9);
+    assert!((p.encode(0.0) - 95.0).abs() < 1e-9);
+    // 300 codes per decade: ten times the white exposure is +300 codes
+    // on the offset-free scale.
+    let o = 10f64.powf(-590.0 / 300.0);
+    let lin18 = 0.18;
+    let want = 685.0 + 300.0 * (lin18 * (1.0 - o) + o).log10();
+    assert!((p.encode(lin18) - want).abs() < 1e-9);
+    assert!((want - 470.0).abs() < 3.0, "{want}");
+    for l in [0.0, 0.001, 0.18, 1.0, 4.0] {
+        assert!((p.decode(p.encode(l)) - l).abs() < 1e-12);
+    }
+    let m = ColorModel::Log(p);
+    assert!(close(m.from_srgb(WHITE), [685.0 / 1023.0; 3], 1e-12));
+    assert!(close(m.from_srgb(BLACK), [95.0 / 1023.0; 3], 1e-12));
+    // Exposure below film base clamps to code 0.
+    assert_eq!(p.encode(-1.0), p.encode(-2.0));
+    assert!(p.encode(-1.0).abs() < 1e-9);
+}
+
+#[test]
+fn cone_response_reference_points() {
+    // CAT02 and Bradford rows sum to one (to the four published
+    // decimals): the equal-energy white maps to L = M = S = 1.
+    for c in [ConeResponse::Cat02, ConeResponse::Bradford] {
+        for row in c.matrix() {
+            assert!((row.iter().sum::<f64>() - 1.0).abs() < 2e-4);
+        }
+    }
+    // Hunt–Pointer–Estevez is normalised to D65: sRGB white is (1, 1, 1).
+    let w = ColorModel::LmsOf(ConeResponse::HuntPointerEstevez).from_srgb(WHITE);
+    assert!(close(w, [1.0, 1.0, 1.0], 2e-4), "{w:?}");
+    assert_eq!(
+        ColorModel::Lms.from_srgb([0.2, 0.6, 0.9]),
+        ColorModel::LmsOf(ConeResponse::Cat02).from_srgb([0.2, 0.6, 0.9])
+    );
+    // scRGB is linear sRGB, values outside 0..1 kept.
+    let v = ColorModel::ScRgb.from_srgb([1.5, -0.25, 0.5]);
+    assert!(v[0] > 1.0 && v[1] < 0.0);
+    assert!(close(
+        ColorModel::ScRgb.to_srgb(v),
+        [1.5, -0.25, 0.5],
+        1e-12
+    ));
 }

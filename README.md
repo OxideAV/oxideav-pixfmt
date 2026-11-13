@@ -540,9 +540,19 @@ colour models on `f64`, unclamped, in natural units (hues in degrees,
 | device CMY | `Cmy` | ISO 32000-2 §10.4.2.4 |
 | gray / linear gray (any luma weights) | `Gray(_)`, `LinearGray(_)` | BT.601 / BT.709 / BT.2020 weights, ISO 32000-2 §10.4.2.2 |
 | Y′PbPr, full-range Y′CbCr | `YPbPr(_)`, `YCbCr(_)` | ITU-T H.273 eq. 37, 44–46 |
-| HSV / HSB, HSI, HCL, HCLp | `Hsv`, `Hsi`, `Hcl(_)`, `Hclp(_)` | Khronos Data Format 1.4 §5.5.8–5.5.11 (hexagonal / angular hue), CSS Color 4 §7; pinned against `magick -colorspace` |
-| Y′IQ, Y′UV, Y′DbDr, Ohta I1I2I3 | `Yiq`, `Yuv`, `YDbDr`, `Ohta` | matrices measured from black-box `magick -colorspace` (chroma centred on zero) |
-| LMS (from D65 XYZ) | `Lms` | matrix measured from black-box `magick -colorspace LMS` |
+| Y′CbCr narrow range (8-bit codes / 255) | `YCbCrLimited(_)` | ITU-T H.273 eq. 41–43; BT.601 / BT.709 / BT.2020 weights |
+| HSV / HSB, HSI, HCL, HCLp | `Hsv`, `Hsi`, `Hcl(_)`, `Hclp(_)` | Khronos Data Format 1.4 §5.5.8–5.5.11 (hexagonal / angular hue), CSS Color 4 §7 |
+| scRGB | `ScRgb` | IEC 61966-2-2: linear light on the sRGB primaries, D65, unclamped |
+| CIELUV, LCh(uv) (D65 or D50 white) | `Luv(_)`, `Lchuv(_)` | CIE 15 §8.2.2: `u* = 13·L*·(u′ − u′n)`, `u′ = 4X / (X + 15Y + 3Z)`, `v′ = 9Y / (X + 15Y + 3Z)` |
+| cylindrical "HCL" of CIELAB / CIELUV (hue first) | `HclAb(_)`, `HclUv(_)` | the LCh forms above in `(h°, C*, L*)` order |
+| Jzazbz, JzCzhz | `Jzazbz(nits)`, `JzCzhz(nits)` | Safdar, Cui, Kim, Luo, Optics Express 25(13), 2017; absolute D65 XYZ, sRGB white at the given cd/m² (`JZ_SDR_WHITE` 100, `JZ_HDR_REFERENCE_WHITE` 203) |
+| Y′UV (PAL) | `Yuv` | BT.470: `U = 0.436·(B′ − Y′) / 0.886`, `V = 0.615·(R′ − Y′) / 0.701`, BT.601 luma |
+| Y′IQ (NTSC) | `Yiq` | FCC 1953 / SMPTE 170M: the Y′UV pair rotated 33° |
+| Y′DbDr (SECAM) | `YDbDr` | BT.470: `Db = 1.505·(B′ − Y′)`, `Dr = −1.902·(R′ − Y′)` |
+| Ohta I1I2I3 | `Ohta` | Ohta, Kanade, Sakai 1980: `(R + G + B) / 3`, `(R − B) / 2`, `(2G − R − B) / 4` |
+| Kodak PhotoYCC (8-bit codes / 255) | `PhotoYcc` | Photo CD: BT.709 transfer, `Y₈ = 255·Y / 1.402`, `C1₈ = 111.40·(B′ − Y) + 156`, `C2₈ = 135.64·(R′ − Y) + 137` |
+| Cineon log (10-bit code / 1023) | `Log(CineonLog)` | Kodak Cineon printing density: `code = 685 + 300·log10(L·(1 − o) + o)`, `o = 10^(−590 / 300)` (white 685, black 95, gamma 0.6, 0.002 D per code) |
+| LMS (from D65 XYZ) | `Lms`, `LmsOf(ConeResponse)` | `M_CAT02` of CIECAM02 (CIE 159:2004), the linearised Bradford matrix (ICC.1:2022 Annex E) or Hunt–Pointer–Estevez normalised to D65 |
 
 Device CMYK has four-channel functions: `rgb_to_cmyk_with(rgb, bg,
 ucr)` takes the black-generation and undercolour-removal functions of
@@ -558,28 +568,34 @@ converts the same way but its inverse pulls an out-of-gamut result
 toward the grey of the same luma until it fits (`hclp_to_rgb`). Every
 hue is in degrees; an achromatic colour's hue is 0.
 
-ImageMagick's `scRGB` is linear sRGB: `LinearSrgb`, which is unclamped
-and uses the extended transfer of Khronos Data Format 1.4 §13.3.4 for
-values outside 0..1. `Rec601YCbCr` / `Rec709YCbCr` are
-`YCbCr(LumaWeights::BT601 / BT709)`.
+Where a name has competing definitions the table says which one is
+implemented: "HCL" is three different models here (`Hcl` is the
+hexagonal hue / chroma / luma triple, `HclAb` cylindrical CIELAB,
+`HclUv` cylindrical CIELUV); "YCbCr" is always H.273's, with explicit
+weights and range; Y′UV / Y′IQ / Y′DbDr are the analogue broadcast
+definitions on the 0.299 / 0.587 / 0.114 luma, exact inverses included.
+Out-of-gamut values are preserved everywhere (nothing clamps); the only
+exceptions are documented on the item: `hclp_to_rgb` pulls into gamut,
+the CMYK rules clamp to 0..1, and `CineonLog::encode` stops at code 0.
 
 Every model round-trips sRGB within ±1 LSB at 16 bits with the model
 values held as `f32` (`tests/colorspace_models.rs`). Against
 `magick -colorspace X` (Q16-HDRI float I/O, after ImageMagick's own
 channel scaling) the values agree within 1e-4 for RGB, Gray,
 LinearGray, XYZ, xyY, Lab, LCHab, Oklab, Oklch, HSL, HWB, CMY,
-Rec709YCbCr and LMS, within 1e-6 for HSV, HSB, HSI, HCL, HCLp, YIQ, YUV
-and YDbDr, within 1e-5 for OHTA (ImageMagick offsets its chroma by
-32768 / 65535), and within 4e-4 for Rec601YCbCr / YPbPr, where
-ImageMagick's luma weights differ slightly from BT.601's 0.299 / 0.114.
-Back to sRGB (`magick -set colorspace X -colorspace sRGB`) the hue
-models and LMS agree within 2e-7; ImageMagick inverts YIQ, YUV, YDbDr
-and OHTA with its own rounded coefficients, so those differ by up to
-2.5e-4 (ours is the exact inverse of the forward matrix).
+Rec709YCbCr and LMS, within 1e-6 for HSV, HSB, HSI, HCL and HCLp,
+within 1e-5 for OHTA (the tool offsets its chroma by 32768 / 65535),
+and within 5e-4 for Rec601YCbCr / YPbPr / YIQ / YUV / YDbDr, where the
+tool's luma weights and three-decimal coefficients differ slightly from
+the standards' 0.299 / 0.587 / 0.114 and exact scale factors. Back to
+sRGB (`magick -set colorspace X -colorspace sRGB`) the hue models and
+LMS agree within 2e-7 and the television matrices within 2.5e-4 (ours
+is the exact inverse of the forward matrix).
 
-Not provided, because the defining formulas are neither in the staged
-references nor recoverable from black-box output by measurement alone:
-CIELUV / LCHuv, Kodak PhotoYCC, Jzazbz and the Cineon "Log" encoding.
+CIELUV, Jzazbz (with its green and blue inputs swapped back) and the
+Cineon log agree with the same black-box tool within 3e-4, 5e-6 and
+5e-5; PhotoYCC and the analogue-television matrices are checked
+against their defining constants (`tests/colorspace_models.rs`).
 
 ## ICC colour management (feature `icc`)
 

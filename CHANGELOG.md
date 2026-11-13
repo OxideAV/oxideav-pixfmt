@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(colorspace)* `ColorModel::Luv(_)` / `Lchuv(_)` (CIE 1976 L\*u\*v\*, CIE 15 §8.2.2; `xyz_to_luv` / `luv_to_xyz`), the hue-first cylindrical forms `HclAb(_)` / `HclUv(_)`, `Jzazbz(nits)` / `JzCzhz(nits)` (Safdar et al. 2017 on absolute D65 XYZ; `xyz_abs_to_jzazbz` / `jzazbz_to_xyz_abs`), `ScRgb` (IEC 61966-2-2), narrow-range `YCbCrLimited(_)` (H.273 equations 41–43 as 8-bit codes / 255), `PhotoYcc` (Kodak Photo CD; `linear_rgb_to_photoycc` / `photoycc_to_linear_rgb`), `Log(CineonLog)` (Cineon printing density, 685 / 95 / 0.6 / 0.002) and `LmsOf(ConeResponse)` with the CAT02, Bradford and Hunt–Pointer–Estevez matrices. All round-trip sRGB within ±1 LSB at 16 bits; analytic spot values for white, black, mid grey and the primaries in `tests/colorspace_models.rs`
+
+### Changed
+
+- *(colorspace)* `ColorModel::Yuv`, `Yiq` and `YDbDr` are now built from the constants of their broadcast standards on the 0.299 / 0.587 / 0.114 luma (`U = 0.436·(B′ − Y′) / 0.886`, `V = 0.615·(R′ − Y′) / 0.701`; I / Q the 33° rotation; `Db = 1.505·(B′ − Y′)`, `Dr = −1.902·(R′ − Y′)`) instead of matrices measured from a black-box tool; values move by up to 5e-4. `ColorModel::Lms` is named as the CIECAM02 `M_CAT02` matrix (same numbers)
+
 ## [0.1.13](https://github.com/OxideAV/oxideav-pixfmt/compare/v0.1.12...v0.1.13) - 2026-11-07
 
 ### Added
